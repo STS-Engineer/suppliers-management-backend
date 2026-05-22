@@ -1,0 +1,13 @@
+fastapi 
+uvicorn 
+sqlalchemy 
+asyncpg 
+alembic 
+pydantic-settings
+python-jose[cryptography]
+passlib[bcrypt]
+python-multipart
+azure-storage-blob
+azure-core
+
+# azure-identity
