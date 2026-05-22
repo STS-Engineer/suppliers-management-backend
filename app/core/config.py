@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     ALLOWED_ORIGINS: str = ""
 
     SMTP_HOST: str = ""
-    SMTP_PORT: int = 587
+    SMTP_PORT: int = 25
     SMTP_USER: str = ""
     SMTP_PASSWORD: str = ""
 

@@ -1,6 +1,6 @@
 """Supplier relations router."""
 
-from fastapi import APIRouter, Depends, File, Form, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import AppException
@@ -157,11 +157,17 @@ async def create_initial_evaluation(
         return {
             "status": "success",
             "data": {
-                "relation": schemas.SupplierRelationSummaryResponse.model_validate(result["relation"]),
+                "relation": schemas.SupplierRelationSummaryResponse.model_validate(
+                    result["relation"]
+                ),
                 "cycle_id": result["cycle"].id_cycle,
-                "score_card_id": result["score_card"].id_score_card if result["score_card"] else None,
+                "score_card_id": result["score_card"].id_score_card
+                if result["score_card"]
+                else None,
                 "classification_id": result["classification"].id_classification,
-                "status_history_id": result["status_history"].id_history if result["status_history"] else None,
+                "status_history_id": result["status_history"].id_history
+                if result["status_history"]
+                else None,
             },
             "message": "Initial relation evaluation saved successfully.",
         }
@@ -184,10 +190,16 @@ async def update_class_evaluation(
         return {
             "status": "success",
             "data": {
-                "relation": schemas.SupplierRelationSummaryResponse.model_validate(result["relation"]),
+                "relation": schemas.SupplierRelationSummaryResponse.model_validate(
+                    result["relation"]
+                ),
                 "cycle_id": result["cycle"].id_cycle if result["cycle"] else None,
-                "classification_id": result["classification"].id_classification if result["classification"] else None,
-                "status_history_id": result["status_history"].id_history if result["status_history"] else None,
+                "classification_id": result["classification"].id_classification
+                if result["classification"]
+                else None,
+                "status_history_id": result["status_history"].id_history
+                if result["status_history"]
+                else None,
             },
             "message": "Class evaluation updated successfully.",
         }
@@ -210,11 +222,17 @@ async def update_operational_evaluation(
         return {
             "status": "success",
             "data": {
-                "relation": schemas.SupplierRelationSummaryResponse.model_validate(result["relation"]),
+                "relation": schemas.SupplierRelationSummaryResponse.model_validate(
+                    result["relation"]
+                ),
                 "cycle_id": result["cycle"].id_cycle,
-                "score_card_id": result["score_card"].id_score_card if result["score_card"] else None,
+                "score_card_id": result["score_card"].id_score_card
+                if result["score_card"]
+                else None,
                 "classification_id": result["classification"].id_classification,
-                "status_history_id": result["status_history"].id_history if result["status_history"] else None,
+                "status_history_id": result["status_history"].id_history
+                if result["status_history"]
+                else None,
             },
             "message": "Operational evaluation updated successfully.",
         }
@@ -237,7 +255,9 @@ async def override_supplier_status(
         return {
             "status": "success",
             "data": {
-                "relation": schemas.SupplierRelationSummaryResponse.model_validate(result["relation"]),
+                "relation": schemas.SupplierRelationSummaryResponse.model_validate(
+                    result["relation"]
+                ),
                 "status_history_id": result["status_history"].id_history,
                 "computed_supplier_status": result["computed_supplier_status"],
             },
