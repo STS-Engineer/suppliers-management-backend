@@ -6,19 +6,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import AppException
 from app.shared.dependencies.db import get_db
-from app.shared.dependencies.auth import get_current_user, get_current_user_optional
+from app.shared.dependencies.auth import get_current_user
 from app.features.sites.service import SiteService
 from app.features.sites import schemas
 
 router = APIRouter(prefix="/sites", tags=["sites"])
 
 
-@router.get("/", response_model=dict)
+@router.get("", response_model=dict)
 async def list_sites(
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=1000),
     db: AsyncSession = Depends(get_db),
-    current_user: dict | None = Depends(get_current_user_optional),
+    current_user: dict = Depends(get_current_user),
 ):
     try:
         service = SiteService(db)
@@ -54,7 +54,7 @@ async def list_site_panel(
     purchase_manager: str | None = Query(default=None),
     plant_manager: str | None = Query(default=None),
     db: AsyncSession = Depends(get_db),
-    current_user: dict | None = Depends(get_current_user_optional),
+    current_user: dict = Depends(get_current_user),
 ):
     try:
         service = SiteService(db)
@@ -90,7 +90,7 @@ async def list_site_panel(
 @router.get("/options", response_model=dict)
 async def list_site_options(
     db: AsyncSession = Depends(get_db),
-    current_user: dict | None = Depends(get_current_user_optional),
+    current_user: dict = Depends(get_current_user),
 ):
     service = SiteService(db)
     sites = await service.list_site_options()
@@ -101,7 +101,7 @@ async def list_site_options(
     }
 
 
-@router.post("/", response_model=dict, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=dict, status_code=status.HTTP_201_CREATED)
 async def create_site(
     data: schemas.SiteCreate,
     db: AsyncSession = Depends(get_db),
@@ -127,7 +127,7 @@ async def create_site(
 async def get_site(
     site_id: int,
     db: AsyncSession = Depends(get_db),
-    current_user: dict | None = Depends(get_current_user_optional),
+    current_user: dict = Depends(get_current_user),
 ):
     try:
         service = SiteService(db)
@@ -185,3 +185,5 @@ async def delete_site(
         raise
     except Exception:
         raise
+
+
