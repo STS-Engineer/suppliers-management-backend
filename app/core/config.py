@@ -1,5 +1,7 @@
 """Application settings."""
 
+import json
+
 from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import (
     BaseSettings,
@@ -17,6 +19,7 @@ class Settings(BaseSettings):
         "http://localhost:5173,"
         "https://avo-supplier-management.azurewebsites.net"
     )
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 480
 
     SMTP_HOST: str = ""
     SMTP_PORT: int = 25
@@ -97,10 +100,24 @@ class Settings(BaseSettings):
 
         return self.DATABASE_URL
 
-    @field_validator("ALLOWED_ORIGINS")
-    @classmethod
-    def parse_origins(cls, v: str):
-        return [x.strip() for x in v.split(",") if x.strip()]
+    @property
+    def cors_origins(self) -> list[str]:
+        """Return CORS origins from a simple comma-separated setting."""
+
+        raw_value = self.ALLOWED_ORIGINS.strip()
+        if not raw_value:
+            return []
+
+        if raw_value.startswith("["):
+            try:
+                parsed = json.loads(raw_value)
+            except json.JSONDecodeError:
+                return []
+            if isinstance(parsed, list):
+                return [str(origin).strip() for origin in parsed if str(origin).strip()]
+            return []
+
+        return [origin.strip() for origin in raw_value.split(",") if origin.strip()]
 
 
 settings = Settings()
