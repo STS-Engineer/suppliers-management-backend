@@ -2,7 +2,7 @@
 
 import json
 
-from pydantic import AliasChoices, Field, field_validator
+from pydantic import AliasChoices, Field
 from pydantic_settings import (
     BaseSettings,
     SettingsConfigDict,

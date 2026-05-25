@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.shared.dependencies.db import get_db
-from app.shared.dependencies.auth import get_current_user, get_current_user_optional
+from app.shared.dependencies.auth import get_current_user
 from app.features.suppliers.service import SupplierService
 from app.features.suppliers import schemas
 from app.features.supplier_onboarding.workflow import SupplierOnboardingWorkflow
@@ -38,7 +38,7 @@ def _resolve_actor(current_user: dict | None) -> Optional[str]:
 async def complete_supplier_onboarding(
     data: schemas.CompleteSupplierOnboardingRequest,
     db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(get_current_user_optional),
+    current_user: dict = Depends(get_current_user),
 ):
     """
     This is the main endpoint for onboarding a new supplier. It handles:
@@ -133,7 +133,7 @@ async def list_supplier_groups(
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=1000),
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_optional),
+    current_user: dict = Depends(get_current_user),
 ):
     """
     List all supplier groups with pagination.
@@ -165,7 +165,7 @@ async def list_supplier_groups(
 async def get_supplier_group(
     group_id: int,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_optional),
+    current_user: dict = Depends(get_current_user),
 ):
     """Get a specific supplier group with its units, contacts, and documents."""
     try:
@@ -299,7 +299,7 @@ async def list_supplier_units(
 async def get_supplier_unit(
     unit_id: int,
     db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(get_current_user_optional),
+    current_user: dict = Depends(get_current_user),
 ):
     """Get a specific supplier unit."""
     try:
@@ -320,7 +320,7 @@ async def get_supplier_unit(
 async def list_units_for_group(
     group_id: int,
     db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(get_current_user_optional),
+    current_user: dict = Depends(get_current_user),
 ):
     """List all supplier units for a specific supplier group."""
     try:
@@ -346,7 +346,7 @@ async def list_units_for_group(
 async def create_supplier_unit(
     data: schemas.SupplierUnitCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(get_current_user_optional),
+    current_user: dict = Depends(get_current_user),
 ):
     """
     Create a new supplier unit (manufacturing/operating location).
@@ -386,7 +386,7 @@ async def update_supplier_unit(
     unit_id: int,
     data: schemas.SupplierUnitUpdate,
     db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(get_current_user_optional),
+    current_user: dict = Depends(get_current_user),
 ):
     """Update an existing supplier unit."""
     try:
@@ -409,7 +409,7 @@ async def update_supplier_unit(
 async def delete_supplier_unit(
     unit_id: int,
     db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(get_current_user_optional),
+    current_user: dict = Depends(get_current_user),
 ):
     """Delete a supplier unit."""
     try:
@@ -443,7 +443,7 @@ async def link_unit_to_site(
     site_id: int,
     data: Optional[schemas.SupplierSiteRelationCreate] = None,
     db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(get_current_user_optional),
+    current_user: dict = Depends(get_current_user),
 ):
     """
     Link a supplier unit to an Avocarbon site, creating a supplier-site relation.
@@ -480,7 +480,7 @@ async def link_unit_to_site(
 async def list_sites_for_unit(
     unit_id: int,
     db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(get_current_user_optional),
+    current_user: dict = Depends(get_current_user),
 ):
     """List all Avocarbon sites linked to a specific supplier unit."""
     try:
@@ -507,7 +507,7 @@ async def list_sites_for_unit(
 async def get_unit_evaluation_summary(
     unit_id: int,
     db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(get_current_user_optional),
+    current_user: dict = Depends(get_current_user),
 ):
     """Get the latest qualification snapshot for a supplier unit."""
     try:
@@ -529,7 +529,7 @@ async def get_group_audit_trail(
     group_id: int,
     limit: int = Query(25, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(get_current_user_optional),
+    current_user: dict = Depends(get_current_user),
 ):
     """Get recent audit events for a supplier group and its related units and site links."""
     try:
@@ -559,7 +559,7 @@ async def create_initial_unit_evaluation(
     unit_id: int,
     data: schemas.InitialUnitEvaluationRequest,
     db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(get_current_user_optional),
+    current_user: dict = Depends(get_current_user),
 ):
     """
     Save the initial supplier evaluation baseline for a specific unit.
@@ -608,7 +608,7 @@ async def unlink_unit_from_site(
     unit_id: int,
     site_id: int,
     db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(get_current_user_optional),
+    current_user: dict = Depends(get_current_user),
 ):
     """Remove the link between a supplier unit and an Avocarbon site."""
     try:
@@ -632,11 +632,11 @@ async def unlink_unit_from_site(
 # ============================================================================
 
 
-@router.post("/", response_model=dict, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=dict, status_code=status.HTTP_201_CREATED)
 async def create_complete_supplier(
     data: schemas.CreateSupplierRequest,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_optional),
+    current_user: dict = Depends(get_current_user),
 ):
     """
     Create a complete supplier with all related entities in a single transaction.
@@ -755,7 +755,7 @@ async def add_contact_to_group(
 async def list_contacts_for_group(
     group_id: int,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_optional),
+    current_user: dict = Depends(get_current_user),
 ):
     """List contacts for a supplier group."""
     try:
@@ -809,7 +809,7 @@ async def add_contact_to_unit(
 async def list_contacts_for_unit(
     unit_id: int,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_optional),
+    current_user: dict = Depends(get_current_user),
 ):
     """List contacts for a supplier unit."""
     try:
@@ -846,7 +846,7 @@ async def add_certification_to_unit(
     unit_id: int,
     data: schemas.SupplierCertificationCreate,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_optional),
+    current_user: dict = Depends(get_current_user),
 ):
     """Add a certification to a supplier unit."""
     try:
@@ -868,7 +868,7 @@ async def add_certification_to_unit(
 async def list_certifications_for_unit(
     unit_id: int,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user_optional),
+    current_user: dict = Depends(get_current_user),
 ):
     """List certifications for a supplier unit."""
     try:
@@ -896,7 +896,7 @@ async def list_certifications_for_unit(
 # ============================================================================
 
 
-@router.get("/", response_model=dict)
+@router.get("", response_model=dict)
 async def list_suppliers(
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=1000),
@@ -944,6 +944,8 @@ async def delete_supplier(
     return await delete_supplier_group(
         group_id=supplier_id, db=db, current_user=current_user
     )
+
+
 
 
 

@@ -1,12 +1,12 @@
 """Supplier relations router."""
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import AppException
 from app.features.supplier_relations import schemas
 from app.features.supplier_relations.service import SupplierRelationService
-from app.shared.dependencies.auth import get_current_user_optional
+from app.shared.dependencies.auth import get_current_user
 from app.shared.dependencies.db import get_db
 
 router = APIRouter(prefix="/supplier-relations", tags=["supplier-relations"])
@@ -16,7 +16,7 @@ router = APIRouter(prefix="/supplier-relations", tags=["supplier-relations"])
 async def get_relation(
     relation_id: int,
     db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(get_current_user_optional),
+    current_user: dict = Depends(get_current_user),
 ):
     try:
         service = SupplierRelationService(db)
@@ -35,7 +35,7 @@ async def get_relation(
 async def get_relation_evaluation_workspace(
     relation_id: int,
     db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(get_current_user_optional),
+    current_user: dict = Depends(get_current_user),
 ):
     try:
         service = SupplierRelationService(db)
@@ -54,7 +54,7 @@ async def get_relation_evaluation_workspace(
 async def get_relation_status_history(
     relation_id: int,
     db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(get_current_user_optional),
+    current_user: dict = Depends(get_current_user),
 ):
     try:
         service = SupplierRelationService(db)
@@ -81,7 +81,7 @@ async def upload_relation_criteria_document(
     comments: str | None = Form(default=None),
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(get_current_user_optional),
+    current_user: dict = Depends(get_current_user),
 ):
     try:
         service = SupplierRelationService(db)
@@ -125,7 +125,7 @@ async def delete_relation_criteria_document(
     relation_id: int,
     criteria_type: str,
     db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(get_current_user_optional),
+    current_user: dict = Depends(get_current_user),
 ):
     try:
         service = SupplierRelationService(db)
@@ -149,7 +149,7 @@ async def create_initial_evaluation(
     relation_id: int,
     data: schemas.InitialRelationEvaluationRequest,
     db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(get_current_user_optional),
+    current_user: dict = Depends(get_current_user),
 ):
     try:
         service = SupplierRelationService(db)
@@ -182,7 +182,7 @@ async def update_class_evaluation(
     relation_id: int,
     data: schemas.ClassEvaluationUpdateRequest,
     db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(get_current_user_optional),
+    current_user: dict = Depends(get_current_user),
 ):
     try:
         service = SupplierRelationService(db)
@@ -214,7 +214,7 @@ async def update_operational_evaluation(
     relation_id: int,
     data: schemas.OperationalEvaluationUpdateRequest,
     db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(get_current_user_optional),
+    current_user: dict = Depends(get_current_user),
 ):
     try:
         service = SupplierRelationService(db)
@@ -247,7 +247,7 @@ async def override_supplier_status(
     relation_id: int,
     data: schemas.SupplierStatusOverrideRequest,
     db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(get_current_user_optional),
+    current_user: dict = Depends(get_current_user),
 ):
     try:
         service = SupplierRelationService(db)
@@ -263,7 +263,9 @@ async def override_supplier_status(
             },
             "message": "Supplier status overridden successfully.",
         }
-    except AppException as e:
-        raise HTTPException(status_code=e.status_code, detail=e.message)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except AppException:
+        raise
+    except Exception:
+        raise
+
+

@@ -10,7 +10,7 @@ from app.core.config import settings
 from app.core.exceptions import UnauthorizedError
 
 pwd_context = CryptContext(
-    schemes=["bcrypt"],
+    schemes=["pbkdf2_sha256"],
     deprecated="auto",
 )
 
