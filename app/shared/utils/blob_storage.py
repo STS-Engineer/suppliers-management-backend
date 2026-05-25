@@ -1,9 +1,8 @@
-
-
 import os
 import logging
 from datetime import datetime
 from typing import Optional
+from urllib.parse import urlparse, urlunparse
 from fastapi import UploadFile, HTTPException
 from azure.storage.blob import BlobClient, BlobServiceClient, ContentSettings
 from azure.core.exceptions import AzureError
@@ -16,13 +15,13 @@ MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
 ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".doc", ".docx", ".xls", ".xlsx"}
 
 MIME_TYPES: dict[str, str] = {
-    ".pdf":  "application/pdf",
-    ".jpg":  "image/jpeg",
+    ".pdf": "application/pdf",
+    ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
-    ".png":  "image/png",
-    ".doc":  "application/msword",
+    ".png": "image/png",
+    ".doc": "application/msword",
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    ".xls":  "application/vnd.ms-excel",
+    ".xls": "application/vnd.ms-excel",
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 }
 
@@ -36,13 +35,11 @@ def _get_azure_container_name() -> str:
         "AZURE_STORAGE_CONTAINER_NAME", ""
     )
 
+
 def _parse_connection_string(conn_str: str) -> dict:
     """Parse Azure connection string into a key/value dict."""
-    return dict(
-        part.split("=", 1)
-        for part in conn_str.split(";")
-        if "=" in part
-    )
+    return dict(part.split("=", 1) for part in conn_str.split(";") if "=" in part)
+
 
 def _extract_blob_name(file_url: str) -> Optional[str]:
     """
@@ -51,7 +48,6 @@ def _extract_blob_name(file_url: str) -> Optional[str]:
          → car/car_1_ref_ts_file.pdf
     """
     try:
-        from urllib.parse import urlparse
         parsed = urlparse(file_url)
         parts = parsed.path.lstrip("/").split("/", 1)  # [container, blob_name]
         return parts[1] if len(parts) == 2 else None
@@ -59,17 +55,34 @@ def _extract_blob_name(file_url: str) -> Optional[str]:
         return None
 
 
+def _force_https_url(url: str) -> str:
+    """Normalize Azure blob URLs to HTTPS to avoid mixed-content responses."""
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return url
+
+    if parsed.scheme != "http":
+        return url
+
+    hostname = (parsed.hostname or "").lower()
+    if not hostname.endswith(".blob.core.windows.net"):
+        return url
+
+    return urlunparse(parsed._replace(scheme="https"))
+
+
 def get_fresh_doc_url(file_url: str, expiry_days: int = 7) -> str:
     """Extract blob name from stored URL and generate a fresh SAS URL."""
     blob_name = _extract_blob_name(file_url)
     if not blob_name:
-        return file_url
+        return _force_https_url(file_url)
     try:
         return get_blob_sas_url(blob_name, expiry_days=expiry_days)
     except Exception:
-        return file_url
-    
-    
+        return _force_https_url(file_url)
+
+
 def get_blob_sas_url(blob_name: str, expiry_days: int = 7) -> str:
     """
     Generate a fresh SAS URL for an existing blob.
@@ -88,7 +101,7 @@ def get_blob_sas_url(blob_name: str, expiry_days: int = 7) -> str:
     blob_client = container.get_blob_client(blob_name)
 
     if not account_name or not account_key:
-        return blob_client.url  # fallback
+        return _force_https_url(blob_client.url)  # fallback
 
     sas_token = generate_blob_sas(
         account_name=account_name,
@@ -98,7 +111,8 @@ def get_blob_sas_url(blob_name: str, expiry_days: int = 7) -> str:
         permission=BlobSasPermissions(read=True),
         expiry=dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=expiry_days),
     )
-    return f"{blob_client.url}?{sas_token}"
+    return f"{_force_https_url(blob_client.url)}?{sas_token}"
+
 
 def get_blob_url(blob_name: str) -> str:
     return get_blob_sas_url(blob_name, expiry_days=3650)  # 10 years for stored URLs
@@ -147,6 +161,7 @@ def _get_container_client():
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _build_blob_name(folder: str, filename: str) -> str:
     """
     Returns a blob path like:  car/car_12_AUD-2025-001_20250101_120000_report.pdf
@@ -158,6 +173,7 @@ def _build_blob_name(folder: str, filename: str) -> str:
 def _safe_filename(original: str) -> str:
     """Strip path separators and whitespace from a filename."""
     import re
+
     name = os.path.basename(original).strip()
     # Replace spaces and problematic chars with underscores
     name = re.sub(r"[^\w.\-]", "_", name)
@@ -181,6 +197,7 @@ def _validate_extension(filename: str) -> str:
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
 
 async def upload_car_document(
     file: UploadFile,
@@ -231,7 +248,9 @@ async def upload_misc_document(
     Upload a document not yet tied to a final entity id.
     Useful for draft evidence uploads from UI.
     """
-    safe_purpose = "".join(ch for ch in purpose if ch.isalnum() or ch in ("_", "-")) or "misc"
+    safe_purpose = (
+        "".join(ch for ch in purpose if ch.isalnum() or ch in ("_", "-")) or "misc"
+    )
     return await _upload_file(
         file=file,
         folder="answers",
@@ -245,9 +264,10 @@ async def upload_evaluation_document(
     criteria_type: str,
 ) -> dict:
     """Upload a document for a supplier relation evaluation criterion."""
-    safe_criteria = "".join(
-        ch for ch in criteria_type.lower() if ch.isalnum() or ch in ("_", "-")
-    ) or "criteria"
+    safe_criteria = (
+        "".join(ch for ch in criteria_type.lower() if ch.isalnum() or ch in ("_", "-"))
+        or "criteria"
+    )
     return await _upload_file(
         file=file,
         folder="evaluation",
@@ -293,11 +313,10 @@ def delete_blob_sync(blob_name: str) -> bool:
         raise HTTPException(status_code=500, detail=f"Error deleting file: {exc}")
 
 
-
-
 # ---------------------------------------------------------------------------
 # Internal
 # ---------------------------------------------------------------------------
+
 
 async def _upload_file(
     file: UploadFile,
