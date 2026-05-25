@@ -12,7 +12,7 @@ class Settings(BaseSettings):
 
     APP_NAME: str = "Supplier Management Backend"
 
-     ALLOWED_ORIGINS: str = (
+    ALLOWED_ORIGINS: str = (
         "http://localhost:3000,"
         "http://localhost:5173,"
         "https://avo-supplier-management.azurewebsites.net"
