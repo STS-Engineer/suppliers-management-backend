@@ -111,6 +111,9 @@ async def complete_supplier_onboarding(
             evaluation=data.evaluation.model_dump(exclude_unset=True)
             if data.evaluation
             else None,
+            unit_contacts=[c.model_dump(exclude_unset=True) for c in data.unit_contacts],
+            annual_spend_value=data.annual_spend_value,
+            annual_spend_currency=data.annual_spend_currency,
         )
 
         return {
@@ -339,6 +342,80 @@ async def list_units_for_group(
     except AppException:
         raise
     except Exception:
+        raise
+
+
+@router.post(
+    "/groups/{group_id}/units/complete",
+    response_model=dict,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_unit_complete(
+    group_id: int,
+    data: schemas.CreateUnitCompleteRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Create a unit with its contacts and certifications in a single transaction."""
+    from app.db.models import Contact, SupplierCertification, SupplierUnit
+    from sqlalchemy import select
+
+    # Verify group exists
+    from app.db.models import SupplierGroup
+    group = await db.get(SupplierGroup, group_id)
+    if not group:
+        raise AppException(f"Supplier group {group_id} not found", status_code=404)
+
+    # Enforce unique supplier_code
+    existing_unit_stmt = select(SupplierUnit).where(
+        SupplierUnit.supplier_code == data.unit.supplier_code
+    )
+    existing_unit = (await db.execute(existing_unit_stmt)).scalar_one_or_none()
+    if existing_unit:
+        raise AppException(
+            f"A supplier unit with name '{data.unit.supplier_code}' already exists. "
+            "Each unit must have a unique name.",
+            status_code=409,
+        )
+
+    try:
+        unit_data = data.unit.model_dump(exclude_unset=True)
+        unit_data["id_group"] = group_id
+        unit = SupplierUnit(**unit_data)
+        db.add(unit)
+        await db.flush()
+
+        created_contacts = []
+        for c in data.contacts:
+            contact_data = c.model_dump(exclude_unset=True)
+            contact_data["id_supplier_unit"] = unit.id_supplier_unit
+            contact = Contact(**contact_data)
+            db.add(contact)
+            await db.flush()
+            created_contacts.append(contact)
+
+        created_certs = []
+        for cert in data.certifications:
+            cert_data = cert.model_dump(exclude_unset=True)
+            cert_data["id_supplier_unit"] = unit.id_supplier_unit
+            certification = SupplierCertification(**cert_data)
+            db.add(certification)
+            await db.flush()
+            created_certs.append(certification)
+
+        await db.commit()
+
+        return {
+            "status": "success",
+            "data": {
+                "unit": schemas.SupplierUnitResponse.model_validate(unit),
+                "contacts_count": len(created_contacts),
+                "certifications_count": len(created_certs),
+            },
+            "message": f"Unit '{unit.supplier_code}' created with {len(created_contacts)} contact(s) and {len(created_certs)} certification(s)",
+        }
+    except Exception:
+        await db.rollback()
         raise
 
 
@@ -855,7 +932,7 @@ async def add_certification_to_unit(
         return {
             "status": "success",
             "data": schemas.SupplierCertificationResponse.model_validate(cert),
-            "message": f"Certification '{data.certification_type}' added to unit {unit_id}",
+            "message": f"Certification added to unit {unit_id}",
             "id": cert.id_certification,
         }
     except AppException:

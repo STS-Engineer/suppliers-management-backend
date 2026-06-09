@@ -46,6 +46,9 @@ class SupplierOnboardingWorkflow:
         supplier_owner: str,
         template_id: Optional[int] = None,
         evaluation: Optional[Dict[str, Any]] = None,
+        unit_contacts: Optional[List[Dict[str, Any]]] = None,
+        annual_spend_value: Optional[Decimal] = None,
+        annual_spend_currency: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Complete supplier onboarding workflow:
@@ -87,7 +90,15 @@ class SupplierOnboardingWorkflow:
             unit = supplier_result["unit"]
             contact_list = supplier_result["contacts"]
 
-            # Step 3: Create supplier-site relation with owner and classification
+            # Step 3: Create unit-level contacts if provided
+            for uc_data in (unit_contacts or []):
+                uc_data["id_supplier_unit"] = unit.id_supplier_unit
+                uc = Contact(**uc_data)
+                self.db.add(uc)
+            if unit_contacts:
+                await self.db.flush()
+
+            # Step 4: Create supplier-site relation with owner and classification
             relation = await self._create_supplier_site_relation(
                 supplier_unit_id=unit.id_supplier_unit,
                 site_id=site_id,
@@ -95,6 +106,8 @@ class SupplierOnboardingWorkflow:
                 buyer_owner=supplier_owner,
                 certifications=certifications,
                 evaluation=evaluation,
+                annual_spend_value=annual_spend_value,
+                annual_spend_currency=annual_spend_currency,
             )
 
             # Step 4: Get primary contact for emails
@@ -293,6 +306,8 @@ class SupplierOnboardingWorkflow:
         buyer_owner: str,
         certifications: Optional[List[Dict[str, Any]]] = None,
         evaluation: Optional[Dict[str, Any]] = None,
+        annual_spend_value: Optional[Decimal] = None,
+        annual_spend_currency: Optional[str] = None,
     ) -> SupplierSiteRelation:
         """Create supplier-site relation with owner and classification."""
         existing_stmt = select(SupplierSiteRelation).where(
@@ -318,6 +333,10 @@ class SupplierOnboardingWorkflow:
             else "Annual",
             "last_status_change": datetime.now(),
         }
+        if annual_spend_value is not None:
+            relation_data["annual_spend_value"] = annual_spend_value
+        if annual_spend_currency:
+            relation_data["annual_spend_currency"] = annual_spend_currency
 
         # Add evaluation data if provided (store as-is, no conversion)
         if evaluation:

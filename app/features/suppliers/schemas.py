@@ -6,6 +6,8 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.features.suppliers.options import (
     CERTIFICATION_TYPE_OPTIONS,
+    CERTIFICATION_STANDARD_TYPE_OPTIONS,
+    CERT_TYPES_BY_STANDARD,
     CONS_OR_WD_OPTIONS,
     FAMILY_COVERAGE_OPTIONS,
     FINANCIAL_HEALTH_OPTIONS,
@@ -86,19 +88,52 @@ class SupplierGroupResponse(SupplierGroupBase):
 # SupplierUnit Schemas
 # ============================================================================
 
+def _coerce_decimal(value: object) -> Optional[Decimal]:
+    """Convert empty string or whitespace to None; otherwise parse as Decimal."""
+    if value is None:
+        return None
+    if isinstance(value, str) and value.strip() == "":
+        return None
+    return Decimal(str(value))
+
+
 class SupplierUnitBase(BaseModel):
     """Base supplier unit schema."""
     supplier_code: Optional[str] = Field(None, max_length=50, description="Unique supplier code")
     address_line: Optional[str] = Field(None, max_length=255, description="Street address")
     city: Optional[str] = Field(None, max_length=100, description="City")
     country: Optional[str] = Field(None, max_length=100, description="Country")
-    product_type: Optional[str] = Field(None, max_length=255, description="Type of products supplied")
-    product_category: Optional[str] = Field(None, max_length=255, description="Product category")
+    product_type: Optional[str] = Field(None, max_length=255, description="Type of products supplied (legacy)")
+    product_category: Optional[str] = Field(None, max_length=255, description="Product category (legacy)")
+    # Product classification — stored comma-separated, accept list or string
+    family: Optional[str] = Field(None, max_length=500, description="Product family (comma-separated)")
+    sub_family: Optional[str] = Field(None, max_length=500, description="Product sub-family (comma-separated)")
+    product_line: Optional[str] = Field(None, max_length=500, description="Product line (comma-separated)")
+    website: Optional[str] = Field(None, max_length=500, description="Supplier unit website URL")
+    carbon_footprint: Optional[str] = Field(None, max_length=100, description="Annual carbon footprint (tCO2e)")
+    green_electricity_pct: Optional[str] = Field(None, max_length=10, description="Green electricity share (%)")
+    copper_brass_pct: Optional[str] = Field(None, max_length=10, description="Copper/Brass content (%)")
+    category: Optional[str] = Field(None, max_length=500, description="Product category (comma-separated, e.g. Ferrites,Chokes)")
     amount_value: Optional[Decimal] = Field(None, description="Annual spend value")
     amount_currency: Optional[str] = Field(None, max_length=10, description="Currency code (USD, EUR, etc.)")
     strategique: Optional[bool] = Field(False, description="Is this unit strategic?")
     monopolistique: Optional[bool] = Field(False, description="Is this unit monopolistic?")
     directed: Optional[bool] = Field(False, description="Is this unit directed?")
+
+    @field_validator("family", "sub_family", "product_line", "category", mode="before")
+    @classmethod
+    def coerce_list_to_csv(cls, v: object) -> Optional[str]:
+        """Accept a list of strings and join as CSV, or pass through a plain string."""
+        if v is None:
+            return None
+        if isinstance(v, list):
+            return ",".join(str(x).strip() for x in v if str(x).strip())
+        return str(v) if v != "" else None
+
+    @field_validator("amount_value", mode="before")
+    @classmethod
+    def coerce_unit_amount(cls, v: object) -> Optional[Decimal]:
+        return _coerce_decimal(v)
 
 
 class SupplierUnitCreate(SupplierUnitBase):
@@ -130,14 +165,23 @@ class SupplierUnitResponse(SupplierUnitBase):
 
 class SupplierCertificationBase(BaseModel):
     """Base supplier certification schema."""
-    certification_type: Optional[str] = Field(None, max_length=100, description="Type of certification (ISO, IATF, etc.)")
-    certificate_name: Optional[str] = Field(None, max_length=150, description="Name of the certificate")
+    standard_type: Optional[str] = Field(None, max_length=50, description="Standard category: quality, environmental, safety, energy, other")
+    certification_type: Optional[str] = Field(None, max_length=100, description="Specific certification name (e.g., IATF 16949:2016, ISO 9001 (cat BCD))")
+    certificate_name: Optional[str] = Field(None, max_length=150, description="Free-text certificate reference or issuer")
     amount_value: Optional[Decimal] = Field(None, description="Cost/value of certification")
     amount_currency: Optional[str] = Field(None, max_length=10, description="Currency code")
     start_date: Optional[date] = Field(None, description="Certificate start date (YYYY-MM-DD)")
     end_date: Optional[date] = Field(None, description="Certificate expiry date (YYYY-MM-DD)")
     expiry_mode: Optional[str] = Field(None, max_length=30, description="How expiry is handled")
     comments: Optional[str] = Field(None, description="Additional notes")
+    file_name: Optional[str] = Field(None, max_length=255, description="Uploaded certificate file name")
+    file_url: Optional[str] = Field(None, description="URL to the uploaded certificate file")
+    file_size: Optional[Decimal] = Field(None, description="File size in bytes")
+
+    @field_validator("amount_value", "file_size", mode="before")
+    @classmethod
+    def coerce_cert_decimal(cls, v: object) -> Optional[Decimal]:
+        return _coerce_decimal(v)
 
     @model_validator(mode="after")
     def validate_certification_dates(self):
@@ -152,23 +196,14 @@ class SupplierCertificationBase(BaseModel):
 
 class SupplierCertificationCreate(SupplierCertificationBase):
     """Schema for creating a supplier certification."""
-    certification_type: str = Field(..., max_length=100, description="Type of certification (required)")
-
-    @field_validator("certification_type")
-    @classmethod
-    def validate_certification_type(cls, value: str) -> str:
-        if value not in CERTIFICATION_TYPE_VALUES:
-            raise ValueError(
-                f"certification_type must be one of: {', '.join(sorted(CERTIFICATION_TYPE_VALUES))}"
-            )
-        return value
+    standard_type: str = Field(..., max_length=50, description="Standard category (required): quality, environmental, safety, energy, other")
 
 
 class SupplierCertificationResponse(SupplierCertificationBase):
     """Response schema for supplier certification."""
     id_certification: int
     id_supplier_unit: Optional[int]
-    
+
     class Config:
         from_attributes = True
 
@@ -326,10 +361,14 @@ class EvaluationDetailsBase(BaseModel):
     @field_validator("quality_certification")
     @classmethod
     def validate_quality_certification(cls, value: Optional[str]) -> Optional[str]:
-        if value is not None and value not in CERTIFICATION_TYPE_VALUES:
+        # Accept new values and keep legacy values for backward compatibility
+        all_valid = CERTIFICATION_TYPE_VALUES | {
+            "IATF 16949:2016", "ISO 9001 (cat BCD)", "ISO 9001", "Distributor",
+        }
+        if value is not None and value not in all_valid:
             raise ValueError(
                 "quality_certification must be one of: "
-                + ", ".join(sorted(CERTIFICATION_TYPE_VALUES))
+                + ", ".join(sorted(all_valid))
             )
         return value
 
@@ -417,12 +456,15 @@ class EvaluationDetailsBase(BaseModel):
     def validate_strategic_mention(cls, value: Optional[str]) -> Optional[str]:
         if value is None:
             return value
-        v = value.lower()
-        if v not in STRATEGIC_MENTION_VALUES:
+        parts = [p.strip().lower() for p in value.split(",") if p.strip()]
+        if not parts:
+            return None
+        invalid = [p for p in parts if p not in STRATEGIC_MENTION_VALUES]
+        if invalid:
             raise ValueError(
                 f"strategic_mention must be one of: {', '.join(sorted(STRATEGIC_MENTION_VALUES))}"
             )
-        return v
+        return ",".join(sorted(parts))
 
     @field_validator("panel_decision")
     @classmethod
@@ -474,21 +516,38 @@ class CompleteSupplierOnboardingRequest(BaseModel):
     """Request schema for complete supplier onboarding workflow."""
     group: SupplierGroupCreate = Field(..., description="Supplier group details (required)")
     unit: SupplierUnitCreate = Field(..., description="Supplier unit details (required)")
-    contacts: List[ContactCreate] = Field(default_factory=list, description="Initial contacts (at least one recommended)")
+    contacts: List[ContactCreate] = Field(default_factory=list, description="Group-level contacts (at least one recommended)")
+    unit_contacts: List[ContactCreate] = Field(default_factory=list, description="Unit-level contacts (quality manager, sales contact, etc.)")
     certifications: List[SupplierCertificationCreate] = Field(default_factory=list, description="Certifications")
     evaluation: Optional[EvaluationDetailsBase] = Field(None, description="Initial evaluation details")
-    
+
     # Onboarding configuration
     site_id: int = Field(..., description="Avocarbon site ID to link supplier to (required)")
     supplier_scope: str = Field(..., description="Classification: 'global', 'strategic', or 'local' (required)")
-    supplier_owner: str = Field(..., max_length=200, description="Supplier owner name or email (required)")
+    supplier_owner: str = Field(..., max_length=200, description="Relation-level supplier owner (overrides group default if provided)")
+    annual_spend_value: Optional[Decimal] = Field(None, description="Annual spend for this unit-plant relation")
+    annual_spend_currency: Optional[str] = Field(None, max_length=10, description="Currency for annual spend")
     template_id: Optional[int] = Field(None, description="Optional assessment template ID (defaults to first active template)")
+
+
+class CreateUnitCompleteRequest(BaseModel):
+    """Create a unit with its contacts and certifications in one atomic call."""
+    unit: SupplierUnitCreate
+    contacts: List[ContactCreate] = Field(default_factory=list)
+    certifications: List[SupplierCertificationCreate] = Field(default_factory=list)
 
 
 class SupplierSiteRelationCreate(BaseModel):
     """Request schema for creating a supplier-site relation."""
     supplier_scope: Optional[str] = Field(None, description="Classification: 'global', 'strategic', or 'local'")
-    supplier_owner: Optional[str] = Field(None, max_length=200, description="Supplier owner name or email")
+    supplier_owner: Optional[str] = Field(None, max_length=200, description="Relation-level supplier owner override (email). Falls back to group owner if not set.")
+    annual_spend_value: Optional[Decimal] = Field(None, description="Annual spend for this unit-plant relation")
+    annual_spend_currency: Optional[str] = Field(None, max_length=10, description="Currency for annual spend")
+
+    @field_validator("annual_spend_value", mode="before")
+    @classmethod
+    def coerce_relation_spend(cls, v: object) -> Optional[Decimal]:
+        return _coerce_decimal(v)
     operational_grade: Optional[str] = Field(None, max_length=1, description="Grade: A-D")
     class_value: Optional[int] = Field(None, ge=1, le=4, description="Numeric value: 1-4")
     final_grade: Optional[str] = Field(None, description="Combined final grade, for example A2")
@@ -510,6 +569,8 @@ class SupplierSiteRelationResponse(BaseModel):
     unit_code: Optional[str] = None
     supplier_scope: Optional[str] = None
     supplier_owner: Optional[str] = None
+    annual_spend_value: Optional[Decimal] = None
+    annual_spend_currency: Optional[str] = None
     operational_grade: Optional[str] = None
     class_value: Optional[int] = None
     evaluation_frequency: Optional[str] = None
@@ -526,7 +587,7 @@ class SupplierSiteRelationResponse(BaseModel):
     last_status_change: Optional[datetime] = None
     evaluation_comments: Optional[str] = None
     evaluation_suggestion: Optional[str] = None
-    
+
     class Config:
         from_attributes = True
 
@@ -634,5 +695,7 @@ class OnboardingSelectionOptionsResponse(BaseModel):
     cons_or_wd: List[dict[str, str]]
     financial_health: List[dict[str, str]]
     certification_types: List[dict[str, str]]
+    certification_standard_types: List[dict[str, str]]
+    cert_types_by_standard: dict
     prod_lia_ins: List[dict[str, str]]
     prod: List[dict[str, str]]
