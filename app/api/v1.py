@@ -7,7 +7,7 @@ from app.features.sites.router import router as sites_router
 from app.features.suppliers.router import router as suppliers_router
 from app.features.supplier_relations.router import router as supplier_relations_router
 
-# from app.features.purchasing_value.router import router as purchasing_value_router
+from app.features.purchasing_value.router import router as purchasing_value_router
 from app.features.evaluations.router import router as evaluations_router
 
 
@@ -19,5 +19,5 @@ api_router.include_router(auth_router)
 api_router.include_router(sites_router)
 api_router.include_router(suppliers_router)
 api_router.include_router(supplier_relations_router)
-# api_router.include_router(purchasing_value_router)
+api_router.include_router(purchasing_value_router)
 api_router.include_router(evaluations_router)
