@@ -290,6 +290,9 @@ class SupplierGroupCategory(GovernanceMixin, Base):
 
 class SupplierUnit(TimestampMixin, GovernanceMixin, Base):
     __tablename__ = "supplier_unit"
+    __table_args__ = (
+        UniqueConstraint("supplier_code", name="uq_supplier_unit_code"),
+    )
 
     id_supplier_unit: Mapped[int] = mapped_column(
         Integer, primary_key=True, autoincrement=True
@@ -303,6 +306,16 @@ class SupplierUnit(TimestampMixin, GovernanceMixin, Base):
     country: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     product_type: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     product_category: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    # Product classification (comma-separated multi-value)
+    family: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    sub_family: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    product_line: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    # Additional unit info
+    website: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    carbon_footprint: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    green_electricity_pct: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    copper_brass_pct: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    category: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     amount_value: Mapped[Optional[Decimal]] = mapped_column(
         Numeric(18, 2), nullable=True
     )
@@ -338,7 +351,10 @@ class SupplierUnit(TimestampMixin, GovernanceMixin, Base):
         foreign_keys="Document.id_supplier_unit",
     )
     opportunities: Mapped[List["Opportunity"]] = relationship(
-        back_populates="supplier", cascade="all, delete-orphan", passive_deletes=True
+        back_populates="supplier",
+        foreign_keys="Opportunity.supplier_id",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
     )
 
     @property
@@ -370,6 +386,12 @@ class SupplierSiteRelation(GovernanceMixin, Base):
     )
     alias_1: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
     buyer_owner: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    annual_spend_value: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(18, 2), nullable=True
+    )
+    annual_spend_currency: Mapped[Optional[str]] = mapped_column(
+        String(10), nullable=True
+    )
     supplier_status: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     operational_grade: Mapped[Optional[str]] = mapped_column(CHAR(1), nullable=True)
     class_value: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
@@ -470,6 +492,9 @@ class SupplierSiteRelation(GovernanceMixin, Base):
     action_plans: Mapped[List["SupplierActionPlan"]] = relationship(
         back_populates="relation"
     )
+    development_plans: Mapped[List["SupplierDevelopmentPlan"]] = relationship(
+        back_populates="relation", cascade="all, delete-orphan", passive_deletes=True
+    )
 
     def __repr__(self) -> str:
         return (
@@ -519,6 +544,50 @@ class SupplierStatusHistory(TimestampMixin, Base):
     )
 
 
+class SupplierDevelopmentPlan(TimestampMixin, GovernanceMixin, Base):
+    __tablename__ = "supplier_development_plan"
+
+    id_development_plan: Mapped[int] = mapped_column(
+        Integer, primary_key=True, autoincrement=True
+    )
+    id_relation: Mapped[int] = mapped_column(
+        ForeignKey("supplier_site_relation.id_relation", ondelete="CASCADE"),
+        nullable=False,
+    )
+    id_document: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("document.id_document", ondelete="SET NULL"), nullable=True
+    )
+    plan_title: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    plan_status: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    issue_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    due_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    submission_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    review_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    decision_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    reviewed_by: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    approved_by: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    rejected_by: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    business_hold_active: Mapped[Optional[bool]] = mapped_column(
+        Boolean, nullable=True
+    )
+    escalated: Mapped[bool] = mapped_column(
+        Boolean, server_default="false", nullable=False
+    )
+    escalation_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    file_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    file_url: Mapped[Optional[str]] = mapped_column(String(1000), nullable=True)
+    file_notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    supplier_comments: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    internal_comments: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    relation: Mapped["SupplierSiteRelation"] = relationship(
+        back_populates="development_plans"
+    )
+    document: Mapped[Optional["Document"]] = relationship(
+        foreign_keys="[SupplierDevelopmentPlan.id_document]"
+    )
+
+
 class SupplierCertification(GovernanceMixin, Base):
     """
     Certifications (ISO, IATF …) held by a supplier unit.
@@ -538,6 +607,7 @@ class SupplierCertification(GovernanceMixin, Base):
     id_supplier_unit: Mapped[Optional[int]] = mapped_column(
         ForeignKey("supplier_unit.id_supplier_unit", ondelete="CASCADE"), nullable=True
     )
+    standard_type: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     certification_type: Mapped[Optional[str]] = mapped_column(
         String(100), nullable=True
     )
@@ -550,6 +620,9 @@ class SupplierCertification(GovernanceMixin, Base):
     end_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
     expiry_mode: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
     comments: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    file_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    file_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    file_size: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2), nullable=True)
 
     supplier_unit: Mapped[Optional["SupplierUnit"]] = relationship(
         back_populates="certifications"
@@ -712,6 +785,11 @@ class Document(TimestampMixin, GovernanceMixin, Base):
     file_hash_sha256: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     storage_provider: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     storage_object_key: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    id_development_plan: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("supplier_development_plan.id_development_plan", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     superseded_by_document_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("document.id_document", ondelete="SET NULL"), nullable=True
     )
@@ -1910,10 +1988,9 @@ class Opportunity(GovernanceMixin, Base):
     status2: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     change_mode: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     assumptions_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    # FIX: kept quoted column aliases only if the DB was created with those exact
-    # mixed-case names. Verify against your DB; if columns are lowercase, remove the alias.
-    saving_score: Mapped[Optional[Decimal]] = mapped_column(
-        "Saving_score", Numeric(10, 2), nullable=True
+    # PLD prioritization — P × L × D scoring (1–5 each, max 125)
+    payback_score: Mapped[Optional[Decimal]] = mapped_column(
+        "payback_score", Numeric(10, 2), nullable=True
     )
     lead_time_score: Mapped[Optional[Decimal]] = mapped_column(
         Numeric(10, 2), nullable=True
@@ -1924,22 +2001,96 @@ class Opportunity(GovernanceMixin, Base):
     priority_score: Mapped[Optional[Decimal]] = mapped_column(
         Numeric(10, 2), nullable=True
     )
-    priority_category: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    priority_category: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     comments: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     lead_time: Mapped[Optional[int]] = mapped_column(
         "Lead_time", Integer, nullable=True
     )
+    cash_impact: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2), nullable=True)
+    validation_request_sent_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    validation_request_sent_by: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    # Budget & validation tracking
+    budget_status: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    val_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    # Study start date = when buyer clicked "Start Study" (Assigned → Working on it)
+    # Olivier: "je clique sur working on it et du coup ça me valide la date de l'opportunité"
+    study_start_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    # Phase 2: when execution work began (tooling ordered, supplier contacted)
+    execution_start_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    # Phase 3: when savings actually started flowing (PPAP done, Longrun parts in production)
+    # real_start_date already exists above — this is the trigger for R9 monthly profile rebuild
+    # STP / scope fields
+    scope_in: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    scope_out: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    customers: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    annual_quantity_n1: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    annual_quantity_n2: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    annual_quantity_n3: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    annual_quantity_n4: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # Supplier before/after (for Sourcing)
+    proposed_supplier_name: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    proposed_supplier_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("supplier_unit.id_supplier_unit", ondelete="SET NULL"), nullable=True
+    )
+    current_price: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 6), nullable=True)
+    proposed_price: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 6), nullable=True)
+    # Price projections N+1, N+2, N+3
+    proposed_price_n1: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 6), nullable=True)
+    proposed_price_n2: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 6), nullable=True)
+    proposed_price_n3: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 6), nullable=True)
+    # Supplier logistics details (Before / After for STP)
+    # Incoterms, TOP, Transit — not stored anywhere else in the DB → stored here
+    incoterms_before: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    incoterms_after: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    top_days_before: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    top_days_after: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    transit_days_before: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    transit_days_after: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # country_before is NOT stored — read from SupplierUnit.country via supplier_id
+    # country_after is for the new supplier not yet in the panel
+    country_after: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    bonus_before: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2), nullable=True)
+    bonus_after: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2), nullable=True)
+    # Initial step: has the current supplier been formally asked?
+    supplier_asked: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    supplier_asked_result: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Investment costs
+    tooling_cost: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2), nullable=True)
+    travel_cost: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2), nullable=True)
+    qualification_cost: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2), nullable=True)
+    total_investment: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2), nullable=True)
+    roi_percent: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2), nullable=True)
+    # Cash savings components
+    cash_inventory_gap: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2), nullable=True)
+    cash_ap_gap: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2), nullable=True)
+    # Planning (weeks per phase)
+    phase1_weeks: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    phase2_weeks: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    phase3_weeks: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    phase4_weeks: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # Why checkboxes
+    reason_productivity: Mapped[bool] = mapped_column(Boolean, server_default="false", nullable=False)
+    reason_quality: Mapped[bool] = mapped_column(Boolean, server_default="false", nullable=False)
+    reason_capacity: Mapped[bool] = mapped_column(Boolean, server_default="false", nullable=False)
+    reason_other: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
 
     plant: Mapped[Optional["AvocarbonSite"]] = relationship(
         back_populates="opportunities"
     )
     supplier: Mapped[Optional["SupplierUnit"]] = relationship(
-        back_populates="opportunities"
+        back_populates="opportunities",
+        foreign_keys=[supplier_id],
+    )
+    proposed_supplier: Mapped[Optional["SupplierUnit"]] = relationship(
+        foreign_keys=[proposed_supplier_id],
     )
     projects: Mapped[List["Project"]] = relationship(
         back_populates="opportunity", cascade="all, delete-orphan", passive_deletes=True
     )
     financial_lines: Mapped[List["FinancialLine"]] = relationship(
+        back_populates="opportunity", cascade="all, delete-orphan", passive_deletes=True
+    )
+    opp_documents: Mapped[List["OpportunityDocument"]] = relationship(
         back_populates="opportunity", cascade="all, delete-orphan", passive_deletes=True
     )
 
@@ -1966,6 +2117,11 @@ class Project(GovernanceMixin, Base):
     actual_end_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
     plant_validation: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     comments: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Phase outputs
+    phase_output_notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    off_tool_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    committee_review_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    committee_members: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     opportunity: Mapped[Optional["Opportunity"]] = relationship(
         back_populates="projects"
@@ -2024,6 +2180,19 @@ class FinancialLine(GovernanceMixin, Base):
     expected_annual_saving: Mapped[Optional[Decimal]] = mapped_column(
         Numeric(18, 2), nullable=True
     )
+    # Per-component tracking (Gap 2 — one line per part number)
+    component_name: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    component_pn: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    # Escalation
+    is_escalated: Mapped[bool] = mapped_column(Boolean, server_default="false", nullable=False)
+    escalated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    escalated_by: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    escalation_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Recovery
+    recovery_status: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    recovery_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    recovery_updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    recovery_updated_by: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
 
     opportunity: Mapped["Opportunity"] = relationship(back_populates="financial_lines")
     project: Mapped[Optional["Project"]] = relationship(
@@ -2073,10 +2242,37 @@ class MonthlyFinancial(GovernanceMixin, Base):
         Numeric(18, 2), nullable=True
     )
     forecast_comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Monthly review outcome: Continue / Recover / Escalate
+    monthly_outcome: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    # Gap 3 — Cash monthly tracking (for Negotiation / Cash type opportunities)
+    cash_expected: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2), nullable=True)
+    cash_actual: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2), nullable=True)
+    cumulated_cash_actual: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2), nullable=True)
 
     financial_line: Mapped["FinancialLine"] = relationship(
         back_populates="monthly_financials"
     )
+
+
+class OpportunityDocument(TimestampMixin, Base):
+    """File attached to an opportunity — Phase 0/1/2/3/4 or general."""
+
+    __tablename__ = "opportunity_document"
+
+    doc_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    opportunity_id: Mapped[int] = mapped_column(
+        ForeignKey("opportunity.opportunity_id", ondelete="CASCADE"), nullable=False
+    )
+    phase_label: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    file_name: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    original_file_name: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    file_url: Mapped[Optional[str]] = mapped_column(String(2000), nullable=True)
+    mime_type: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    file_size: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    uploaded_by: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    opportunity: Mapped["Opportunity"] = relationship(back_populates="opp_documents")
 
 
 class EmailDeliveryHistory(Base):
@@ -2136,6 +2332,7 @@ __all__ = [
     "SupplierUnit",
     "SupplierSiteRelation",
     "SupplierStatusHistory",
+    "SupplierDevelopmentPlan",
     "SupplierCertification",
     "SupplierAgreement",
     "Contact",

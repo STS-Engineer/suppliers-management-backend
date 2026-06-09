@@ -48,6 +48,7 @@ def _error_response(
         payload["details"] = details
     return JSONResponse(status_code=status_code, content=payload)
 
+
 # CORS
 app.add_middleware(
     CORSMiddleware,

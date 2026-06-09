@@ -41,13 +41,37 @@ class EmailService:
         cc: list[str] | None = None,
         attachment_path: str | None = None,
         attachment_filename: str | None = None,
+        attachments: list[dict] | None = None,
         sender_email: str | None = None,
         sender_name: str | None = None,
         reply_to: str | None = None,
     ) -> MIMEMultipart:
+        """Build the MIME message.
+
+        ``attachments`` is an optional list of ``{"path": str, "filename": str}``
+        dicts.  The legacy single-file ``attachment_path`` / ``attachment_filename``
+        pair is still honoured for backwards compatibility.
+        """
         from_email = sender_email or self.smtp_user
 
-        message = MIMEMultipart("mixed" if attachment_path else "alternative")
+        all_attachments: list[dict] = []
+        if attachment_path:
+            all_attachments.append(
+                {
+                    "path": attachment_path,
+                    "filename": attachment_filename or os.path.basename(attachment_path),
+                }
+            )
+        for a in attachments or []:
+            if a.get("path"):
+                all_attachments.append(
+                    {
+                        "path": a["path"],
+                        "filename": a.get("filename") or os.path.basename(a["path"]),
+                    }
+                )
+
+        message = MIMEMultipart("mixed" if all_attachments else "alternative")
         message["From"] = formataddr((sender_name or "", from_email))
         message["To"] = ", ".join(recipients)
         message["Subject"] = subject
@@ -58,19 +82,14 @@ class EmailService:
 
         message.attach(MIMEText(body_html, "html"))
 
-        if attachment_path:
-            if not os.path.exists(attachment_path):
-                raise FileNotFoundError(f"Attachment not found: {attachment_path}")
-
-            with open(attachment_path, "rb") as file:
-                attachment = MIMEApplication(file.read())
-
-            attachment.add_header(
-                "Content-Disposition",
-                "attachment",
-                filename=attachment_filename or os.path.basename(attachment_path),
-            )
-            message.attach(attachment)
+        for att in all_attachments:
+            path = att["path"]
+            if not os.path.exists(path):
+                raise FileNotFoundError(f"Attachment not found: {path}")
+            with open(path, "rb") as fh:
+                part = MIMEApplication(fh.read())
+            part.add_header("Content-Disposition", "attachment", filename=att["filename"])
+            message.attach(part)
 
         return message
 
@@ -84,6 +103,7 @@ class EmailService:
         db: Session | None = None,
         attachment_path: str | None = None,
         attachment_filename: str | None = None,
+        attachments: list[dict] | None = None,
         sender_email: str | None = None,
         sender_name: str | None = None,
         reply_to: str | None = None,
@@ -101,6 +121,7 @@ class EmailService:
                 cc=cc,
                 attachment_path=attachment_path,
                 attachment_filename=attachment_filename,
+                attachments=attachments,
                 sender_email=sender_email,
                 sender_name=sender_name,
                 reply_to=reply_to,
@@ -230,6 +251,36 @@ async def send_email(*args, **kwargs):
 
 async def send_email_with_attachment(*args, **kwargs):
     return await get_email_service().send_email_with_attachment(*args, **kwargs)
+
+
+async def send_email_with_attachments(
+    *,
+    subject: str,
+    recipients: list[str],
+    body_html: str,
+    attachments: list[dict],
+    cc: list[str] | None = None,
+    db=None,
+    **kwargs,
+):
+    """Send an email with multiple attachments.
+
+    Each entry in ``attachments`` must be ``{"path": str, "filename": str}``.
+    """
+    service = get_email_service()
+    success = await asyncio.to_thread(
+        service.send_sync,
+        subject=subject,
+        recipients=recipients,
+        body_html=body_html,
+        cc=cc,
+        db=db,
+        attachments=attachments,
+        **kwargs,
+    )
+    if not success:
+        raise Exception("Error sending email with attachments")
+    return {"status": "Email sent successfully"}
 
 
 # from app.services.email_service import get_email_service

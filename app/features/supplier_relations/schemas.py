@@ -14,6 +14,7 @@ class SupplierRelationSummaryResponse(BaseModel):
     id_supplier_unit: int
     relation_code: Optional[str] = None
     unit_code: Optional[str] = None
+    supplier_owner: Optional[str] = None
     supplier_status: Optional[str] = None
     class_value: Optional[int] = None
     operational_grade: Optional[str] = None
@@ -59,6 +60,84 @@ class SupplierStatusOverridePayload(BaseModel):
     changed_by: Optional[str] = None
     changed_at: Optional[datetime] = None
     computed_status: Optional[str] = None
+
+
+class SupplierDevelopmentPlanBase(BaseModel):
+    plan_title: Optional[str] = Field(None, max_length=255)
+    plan_status: Optional[str] = Field(None, max_length=100)
+    issue_date: Optional[date] = None
+    due_date: Optional[date] = None
+    submission_date: Optional[date] = None
+    review_date: Optional[date] = None
+    decision_date: Optional[date] = None
+    reviewed_by: Optional[str] = Field(None, max_length=200)
+    approved_by: Optional[str] = Field(None, max_length=200)
+    rejected_by: Optional[str] = Field(None, max_length=200)
+    business_hold_active: Optional[bool] = None
+    escalated: Optional[bool] = None
+    escalation_date: Optional[date] = None
+    file_name: Optional[str] = Field(None, max_length=255)
+    file_url: Optional[str] = Field(None, max_length=1000)
+    file_notes: Optional[str] = None
+    supplier_comments: Optional[str] = None
+    internal_comments: Optional[str] = None
+
+
+class SupplierDevelopmentPlanCreateRequest(SupplierDevelopmentPlanBase):
+    sync_relation_hold_status: bool = True
+    changed_by: Optional[str] = None
+
+
+class SupplierDevelopmentPlanUpdateRequest(SupplierDevelopmentPlanBase):
+    sync_relation_hold_status: bool = True
+    changed_by: Optional[str] = None
+
+
+class SupplierDevelopmentPlanSendRequest(BaseModel):
+    changed_by: Optional[str] = None
+    custom_message: Optional[str] = None
+    to_emails: Optional[list[str]] = None
+    extra_cc_emails: Optional[list[str]] = None
+
+
+class SupplierDevelopmentPlanReviewNotificationRequest(BaseModel):
+    changed_by: Optional[str] = None
+    custom_message: Optional[str] = None
+    to_emails: list[str] = Field(..., min_length=1)
+    extra_cc_emails: Optional[list[str]] = None
+    review_deadline: Optional[date] = None
+
+
+class SupplierDevelopmentPlanReceivedNotificationRequest(BaseModel):
+    changed_by: Optional[str] = None
+    custom_message: Optional[str] = None
+    to_emails: list[str] = Field(..., min_length=1)
+    extra_cc_emails: Optional[list[str]] = None
+
+
+class PlanDocumentResponse(BaseModel):
+    id_document: int
+    file_name: Optional[str] = None
+    file_url: Optional[str] = None
+    file_notes: Optional[str] = None
+    uploaded_at: Optional[datetime] = None
+    comments: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class SupplierDevelopmentPlanResponse(SupplierDevelopmentPlanBase):
+    id_development_plan: int
+    id_relation: int
+    id_document: Optional[int] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    is_overdue: bool = False
+    days_past_due: Optional[int] = None
+
+    class Config:
+        from_attributes = True
 
 
 class ClassEvaluationUpdateRequest(BaseModel):
@@ -146,6 +225,31 @@ class EvaluationCriterionDocumentDeleteResponse(BaseModel):
     deleted_document_id: Optional[int] = None
 
 
+class DevelopmentPlanDocumentUploadResponse(BaseModel):
+    relation_id: int
+    plan_id: int
+    document_id: int
+    document_name: str
+    original_file_name: Optional[str] = None
+    file_url: Optional[str] = None
+    mime_type: Optional[str] = None
+    file_size: Optional[Decimal] = None
+    uploaded_at: Optional[datetime] = None
+
+
+class DevelopmentPlanRegisterRowResponse(BaseModel):
+    relation: SupplierRelationSummaryResponse
+    development_plan: SupplierDevelopmentPlanResponse
+    site_name: Optional[str] = None
+    site_city: Optional[str] = None
+    site_country: Optional[str] = None
+    unit_supplier_code: Optional[str] = None
+    unit_code: Optional[str] = None
+    group_id: Optional[int] = None
+    group_name: Optional[str] = None
+    group_code: Optional[str] = None
+
+
 class InitialRelationEvaluationRequest(EvaluationDetailsBase):
     evaluation_date: Optional[date] = None
     changed_by: Optional[str] = None
@@ -167,3 +271,11 @@ class RelationEvaluationWorkspaceResponse(EvaluationDetailsBase):
     computed_supplier_status: Optional[str] = None
     effective_supplier_status: Optional[str] = None
     status_override: Optional[SupplierStatusOverridePayload] = None
+    development_plans: list[SupplierDevelopmentPlanResponse] = Field(default_factory=list)
+    # Extended workspace fields
+    unit_supplier_code: Optional[str] = None
+    baseline_locked: bool = False
+    baseline_data: Optional[dict] = None
+    unit_certifications: list[dict] = Field(default_factory=list)
+    evaluation_documents: list[dict] = Field(default_factory=list)
+    criteria_scores: dict = Field(default_factory=dict)

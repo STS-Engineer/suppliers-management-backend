@@ -275,6 +275,36 @@ async def upload_evaluation_document(
     )
 
 
+async def upload_development_plan_document(
+    file: UploadFile,
+    relation_id: int,
+    plan_id: int,
+) -> dict:
+    """Upload a document for a supplier development plan."""
+    return await _upload_file(
+        file=file,
+        folder="development-plans",
+        prefix=f"development_plan_{relation_id}_{plan_id}",
+    )
+
+
+async def upload_opportunity_document(
+    file: UploadFile,
+    opportunity_id: int,
+    phase_label: str = "general",
+) -> dict:
+    """Upload a file attached to a purchasing value opportunity."""
+    safe_phase = (
+        "".join(ch for ch in phase_label.lower() if ch.isalnum() or ch in ("_", "-"))
+        or "general"
+    )
+    return await _upload_file(
+        file=file,
+        folder="purchasing-value",
+        prefix=f"opp_{opportunity_id}_{safe_phase}",
+    )
+
+
 async def delete_blob(blob_name: str) -> bool:
     """
     Delete a blob by its full path inside the container.

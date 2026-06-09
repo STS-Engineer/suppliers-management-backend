@@ -9,7 +9,117 @@ from app.features.supplier_relations.service import SupplierRelationService
 from app.shared.dependencies.auth import get_current_user
 from app.shared.dependencies.db import get_db
 
+from app.db.models import Contact, ContactSiteRelation, SupplierSiteRelation
+from pydantic import BaseModel
+from typing import Optional
+
 router = APIRouter(prefix="/supplier-relations", tags=["supplier-relations"])
+
+
+def _resolve_actor(current_user: dict | None) -> Optional[str]:
+    if not isinstance(current_user, dict):
+        return None
+    return current_user.get("email") or current_user.get("upn") or current_user.get("sub")
+
+
+class ContactRelationPayload(BaseModel):
+    """Link an existing contact to a relation, or create a new one on-the-fly."""
+    contact_id: Optional[int] = None       # link existing contact
+    full_name: Optional[str] = None        # create new contact
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    role_label: Optional[str] = None
+    id_supplier_unit: Optional[int] = None  # unit to associate the new contact with
+
+
+@router.get("/{relation_id}/contacts", response_model=dict)
+async def list_relation_contacts(
+    relation_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """List all contacts linked to a supplier-site relation."""
+    from sqlalchemy import select
+    stmt = (
+        select(Contact)
+        .join(ContactSiteRelation, ContactSiteRelation.id_contact == Contact.id_contact)
+        .where(ContactSiteRelation.id_relation == relation_id)
+        .where(ContactSiteRelation.is_deleted.is_(False))
+        .where(Contact.is_deleted.is_(False))
+    )
+    result = await db.execute(stmt)
+    contacts = result.scalars().all()
+    return {
+        "status": "success",
+        "data": {
+            "items": [
+                {
+                    "id_contact": c.id_contact,
+                    "full_name": c.full_name,
+                    "email": c.email,
+                    "phone": c.phone,
+                    "role_label": c.role_label,
+                    "is_primary_contact": c.is_primary_contact,
+                }
+                for c in contacts
+            ],
+            "count": len(contacts),
+        },
+    }
+
+
+@router.post("/{relation_id}/contacts", response_model=dict, status_code=201)
+async def add_contact_to_relation(
+    relation_id: int,
+    data: ContactRelationPayload,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Link an existing contact (by contact_id) or create a new one, then attach to a relation."""
+    from sqlalchemy import select
+
+    relation = await db.get(SupplierSiteRelation, relation_id)
+    if not relation:
+        raise AppException(f"Relation {relation_id} not found", status_code=404)
+
+    if data.contact_id:
+        contact = await db.get(Contact, data.contact_id)
+        if not contact:
+            raise AppException(f"Contact {data.contact_id} not found", status_code=404)
+    elif data.full_name:
+        contact = Contact(
+            full_name=data.full_name,
+            email=data.email,
+            phone=data.phone,
+            role_label=data.role_label,
+            id_supplier_unit=data.id_supplier_unit,
+            is_primary_contact=False,
+        )
+        db.add(contact)
+        await db.flush()
+    else:
+        raise AppException("Provide either contact_id or full_name", status_code=422)
+
+    # Avoid duplicate junction rows
+    existing_stmt = select(ContactSiteRelation).where(
+        ContactSiteRelation.id_contact == contact.id_contact,
+        ContactSiteRelation.id_relation == relation_id,
+    )
+    existing = (await db.execute(existing_stmt)).scalar_one_or_none()
+    if not existing:
+        db.add(ContactSiteRelation(id_contact=contact.id_contact, id_relation=relation_id))
+
+    await db.commit()
+    return {
+        "status": "success",
+        "data": {
+            "id_contact": contact.id_contact,
+            "full_name": contact.full_name,
+            "email": contact.email,
+            "role_label": contact.role_label,
+        },
+        "message": f"Contact linked to relation {relation_id}",
+    }
 
 
 @router.get("/{relation_id}", response_model=dict)
@@ -67,6 +177,294 @@ async def get_relation_status_history(
                     for entry in workspace["status_history"]
                 ]
             },
+        }
+    except AppException:
+        raise
+    except Exception:
+        raise
+
+
+@router.get("/{relation_id}/development-plans", response_model=dict)
+async def list_relation_development_plans(
+    relation_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    try:
+        service = SupplierRelationService(db)
+        items = await service.list_development_plans(relation_id)
+        return {
+            "status": "success",
+            "data": {
+                "items": [
+                    schemas.SupplierDevelopmentPlanResponse(**item)
+                    for item in items
+                ]
+            },
+        }
+    except AppException:
+        raise
+    except Exception:
+        raise
+
+
+@router.get("/development-plans/register", response_model=dict)
+async def list_development_plan_register(
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    try:
+        service = SupplierRelationService(db)
+        items = await service.list_development_plan_register()
+        return {
+            "status": "success",
+            "data": {
+                "items": [
+                    {
+                        **schemas.DevelopmentPlanRegisterRowResponse(
+                            relation=schemas.SupplierRelationSummaryResponse.model_validate(
+                                item["relation"]
+                            ),
+                            development_plan=schemas.SupplierDevelopmentPlanResponse(
+                                **item["development_plan"]
+                            ),
+                            site_name=item["site_name"],
+                            site_city=item["site_city"],
+                            site_country=item["site_country"],
+                            unit_supplier_code=item["unit_supplier_code"],
+                            unit_code=item["unit_code"],
+                            group_id=item["group_id"],
+                            group_name=item["group_name"],
+                            group_code=item["group_code"],
+                        ).model_dump(),
+                        "documents": item.get("documents", []),
+                    }
+                    for item in items
+                ]
+            },
+        }
+    except AppException:
+        raise
+    except Exception:
+        raise
+
+
+@router.post("/{relation_id}/development-plans", response_model=dict)
+async def create_relation_development_plan(
+    relation_id: int,
+    data: schemas.SupplierDevelopmentPlanCreateRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    try:
+        service = SupplierRelationService(db)
+        plan = await service.create_development_plan(relation_id, data)
+        return {
+            "status": "success",
+            "data": schemas.SupplierDevelopmentPlanResponse(
+                **service._serialize_development_plan(plan)
+            ),
+            "message": "Supplier development plan created successfully.",
+        }
+    except AppException:
+        raise
+    except Exception:
+        raise
+
+
+@router.put("/{relation_id}/development-plans/{plan_id}", response_model=dict)
+async def update_relation_development_plan(
+    relation_id: int,
+    plan_id: int,
+    data: schemas.SupplierDevelopmentPlanUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    try:
+        service = SupplierRelationService(db)
+        plan = await service.update_development_plan(relation_id, plan_id, data)
+        return {
+            "status": "success",
+            "data": schemas.SupplierDevelopmentPlanResponse(
+                **service._serialize_development_plan(plan)
+            ),
+            "message": "Supplier development plan updated successfully.",
+        }
+    except AppException:
+        raise
+    except Exception:
+        raise
+
+
+@router.post("/{relation_id}/development-plans/{plan_id}/send-request", response_model=dict)
+async def send_relation_development_plan_request(
+    relation_id: int,
+    plan_id: int,
+    data: schemas.SupplierDevelopmentPlanSendRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    try:
+        service = SupplierRelationService(db)
+        plan = await service.send_development_plan_request(relation_id, plan_id, data)
+        return {
+            "status": "success",
+            "data": schemas.SupplierDevelopmentPlanResponse(
+                **service._serialize_development_plan(plan)
+            ),
+            "message": "Development plan request email sent successfully.",
+        }
+    except AppException:
+        raise
+    except Exception:
+        raise
+
+
+@router.get("/{relation_id}/development-plans/{plan_id}/documents", response_model=dict)
+async def list_plan_documents(
+    relation_id: int,
+    plan_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    try:
+        service = SupplierRelationService(db)
+        docs = await service.get_plan_documents(relation_id, plan_id)
+        return {
+            "status": "success",
+            "data": {
+                "items": [
+                    {
+                        "id_document": d.id_document,
+                        "file_name": d.original_file_name,
+                        "file_url": d.file_url,
+                        "file_notes": d.comments,
+                        "uploaded_at": d.uploaded_at.isoformat() if d.uploaded_at else None,
+                        "comments": d.comments,
+                    }
+                    for d in docs
+                ]
+            },
+        }
+    except AppException:
+        raise
+    except Exception:
+        raise
+
+
+@router.delete(
+    "/{relation_id}/development-plans/{plan_id}/documents/{document_id}",
+    response_model=dict,
+)
+async def delete_plan_document(
+    relation_id: int,
+    plan_id: int,
+    document_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    try:
+        service = SupplierRelationService(db)
+        await service.delete_plan_document(relation_id, plan_id, document_id)
+        return {"status": "success", "message": "Document deleted."}
+    except AppException:
+        raise
+    except Exception:
+        raise
+
+
+@router.post(
+    "/{relation_id}/development-plans/{plan_id}/send-received-notification",
+    response_model=dict,
+)
+async def send_plan_received_notification(
+    relation_id: int,
+    plan_id: int,
+    data: schemas.SupplierDevelopmentPlanReceivedNotificationRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    try:
+        service = SupplierRelationService(db)
+        await service.send_plan_received_notification(relation_id, plan_id, data)
+        return {
+            "status": "success",
+            "message": "Received notification email sent with attached documents.",
+        }
+    except AppException:
+        raise
+    except Exception:
+        raise
+
+
+@router.post(
+    "/{relation_id}/development-plans/{plan_id}/send-review-notification",
+    response_model=dict,
+)
+async def send_relation_development_plan_review_notification(
+    relation_id: int,
+    plan_id: int,
+    data: schemas.SupplierDevelopmentPlanReviewNotificationRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    try:
+        service = SupplierRelationService(db)
+        plan = await service.send_development_plan_review_notification(
+            relation_id, plan_id, data
+        )
+        return {
+            "status": "success",
+            "data": schemas.SupplierDevelopmentPlanResponse(
+                **service._serialize_development_plan(plan)
+            ),
+            "message": "Review notification email sent to committee successfully.",
+        }
+    except AppException:
+        raise
+    except Exception:
+        raise
+
+
+@router.post("/{relation_id}/development-plans/{plan_id}/document", response_model=dict)
+async def upload_relation_development_plan_document(
+    relation_id: int,
+    plan_id: int,
+    comments: str | None = Form(default=None),
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    try:
+        service = SupplierRelationService(db)
+        uploaded_by = None
+        if isinstance(current_user, dict):
+            uploaded_by = (
+                current_user.get("email")
+                or current_user.get("upn")
+                or current_user.get("sub")
+            )
+        document = await service.upload_development_plan_file(
+            relation_id=relation_id,
+            plan_id=plan_id,
+            file=file,
+            uploaded_by=uploaded_by,
+            comments=comments,
+        )
+        return {
+            "status": "success",
+            "data": schemas.DevelopmentPlanDocumentUploadResponse(
+                relation_id=relation_id,
+                plan_id=plan_id,
+                document_id=document.id_document,
+                document_name=document.document_name,
+                original_file_name=document.original_file_name,
+                file_url=document.file_url,
+                mime_type=document.mime_type,
+                file_size=document.file_size,
+                uploaded_at=document.uploaded_at,
+            ),
+            "message": "Development plan document uploaded successfully.",
         }
     except AppException:
         raise
@@ -235,6 +633,72 @@ async def update_operational_evaluation(
                 else None,
             },
             "message": "Operational evaluation updated successfully.",
+        }
+    except AppException:
+        raise
+    except Exception:
+        raise
+
+
+@router.post("/{relation_id}/documents/evaluation-reference", response_model=dict)
+async def upload_evaluation_reference(
+    relation_id: int,
+    file: UploadFile = File(...),
+    comments: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Upload a reference document for this relation's evaluation (e.g. the filled Excel scorecard)."""
+    try:
+        service = SupplierRelationService(db)
+        doc = await service.upload_evaluation_reference(
+            relation_id=relation_id,
+            file=file,
+            uploaded_by=_resolve_actor(current_user),
+            comments=comments,
+        )
+        return {
+            "status": "success",
+            "data": {
+                "id_document": doc.id_document,
+                "document_name": doc.document_name,
+                "file_url": doc.file_url,
+                "uploaded_at": doc.uploaded_at.isoformat() if doc.uploaded_at else None,
+            },
+            "message": "Evaluation reference uploaded.",
+        }
+    except AppException:
+        raise
+    except Exception:
+        raise
+
+
+@router.post("/{relation_id}/documents/lta", response_model=dict)
+async def upload_lta_document(
+    relation_id: int,
+    file: UploadFile = File(...),
+    comments: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Upload the Long Term Agreement document for this relation."""
+    try:
+        service = SupplierRelationService(db)
+        doc = await service.upload_lta_document(
+            relation_id=relation_id,
+            file=file,
+            uploaded_by=_resolve_actor(current_user),
+            comments=comments,
+        )
+        return {
+            "status": "success",
+            "data": {
+                "id_document": doc.id_document,
+                "document_name": doc.document_name,
+                "file_url": doc.file_url,
+                "uploaded_at": doc.uploaded_at.isoformat() if doc.uploaded_at else None,
+            },
+            "message": "LTA document uploaded.",
         }
     except AppException:
         raise
