@@ -5,12 +5,12 @@ from __future__ import annotations
 import csv
 import io
 from datetime import date, datetime, timedelta
-from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import select, and_, or_
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.exceptions import AppException
 from app.db.models import (
     AvocarbonSite,
     Classification,
@@ -21,7 +21,6 @@ from app.db.models import (
     SupplierStatusHistory,
     SupplierUnit,
 )
-from app.core.logging import logger
 
 
 # ---------------------------------------------------------------------------
@@ -39,18 +38,18 @@ from app.core.logging import logger
 # Orange = Can Quote but Not be Awarded
 # Red    = New Business on Hold
 
-STATUS_GREEN  = "Can Quote and Be Awarded"
+STATUS_GREEN = "Can Quote and Be Awarded"
 STATUS_ORANGE = "Can Quote but Not be Awarded"
-STATUS_RED    = "New Business on Hold"
+STATUS_RED = "New Business on Hold"
 
-PANEL_ADD            = "panel_add"
-PANEL_ADD_EXEC       = "panel_add_exec_committee"
-PANEL_REJECT         = "panel_reject"
+PANEL_ADD = "panel_add"
+PANEL_ADD_EXEC = "panel_add_exec_committee"
+PANEL_REJECT = "panel_reject"
 
 STATUS_TO_PANEL = {
-    STATUS_GREEN:  PANEL_ADD,
+    STATUS_GREEN: PANEL_ADD,
     STATUS_ORANGE: PANEL_ADD_EXEC,
-    STATUS_RED:    PANEL_REJECT,
+    STATUS_RED: PANEL_REJECT,
 }
 
 
@@ -74,16 +73,16 @@ def compose_final_grade(grade: str, class_value: int) -> str:
 # ---------------------------------------------------------------------------
 
 FREQUENCY_DAYS: Dict[str, int] = {
-    "Quarterly":   91,
+    "Quarterly": 91,
     "Semi-Annual": 182,
-    "Annual":      365,
+    "Annual": 365,
 }
 
 SCOPE_DEFAULT_FREQUENCY: Dict[str, str] = {
-    "global":    "Quarterly",
+    "global": "Quarterly",
     "strategic": "Quarterly",
-    "local":     "Annual",
-    "regional":  "Semi-Annual",
+    "local": "Annual",
+    "regional": "Semi-Annual",
 }
 
 DUE_SOON_DAYS = 30  # flag as "due soon" within this window
@@ -96,7 +95,10 @@ def compute_next_evaluation_date(eval_date: date, frequency: str) -> date:
 
 def infer_frequency(relation: SupplierSiteRelation) -> str:
     """Fall back to scope-based frequency if not explicitly set."""
-    if relation.evaluation_frequency and relation.evaluation_frequency in FREQUENCY_DAYS:
+    if (
+        relation.evaluation_frequency
+        and relation.evaluation_frequency in FREQUENCY_DAYS
+    ):
         return relation.evaluation_frequency
     scope = (relation.global_status or "local").lower()
     return SCOPE_DEFAULT_FREQUENCY.get(scope, "Annual")
@@ -110,6 +112,7 @@ def infer_frequency(relation: SupplierSiteRelation) -> str:
 # Evaluation due query
 # ---------------------------------------------------------------------------
 
+
 async def get_evaluations_due(db: AsyncSession) -> List[Dict[str, Any]]:
     """
     Return all active relations with their evaluation status:
@@ -121,7 +124,10 @@ async def get_evaluations_due(db: AsyncSession) -> List[Dict[str, Any]]:
 
     stmt = (
         select(SupplierSiteRelation, SupplierUnit, AvocarbonSite)
-        .join(SupplierUnit, SupplierUnit.id_supplier_unit == SupplierSiteRelation.id_supplier_unit)
+        .join(
+            SupplierUnit,
+            SupplierUnit.id_supplier_unit == SupplierSiteRelation.id_supplier_unit,
+        )
         .join(AvocarbonSite, AvocarbonSite.id_site == SupplierSiteRelation.id_site)
         .where(SupplierSiteRelation.is_deleted.is_(False))
         .where(SupplierSiteRelation.inactivated_at.is_(None))
@@ -160,27 +166,29 @@ async def get_evaluations_due(db: AsyncSession) -> List[Dict[str, Any]]:
             else:
                 days_until_due = abs(delta)
 
-        items.append({
-            "relation_id": rel.id_relation,
-            "relation_code": rel.relation_code,
-            "unit_name": unit.supplier_code,
-            "unit_id": unit.id_supplier_unit,
-            "plant_name": site.site_name,
-            "plant_city": site.city,
-            "plant_country": site.country,
-            "site_id": site.id_site,
-            "current_grade": rel.operational_grade,
-            "current_class": rel.class_value,
-            "final_grade": rel.final_grade,
-            "current_status": rel.supplier_status,
-            "evaluation_frequency": frequency,
-            "last_evaluation_date": last.isoformat() if last else None,
-            "next_evaluation_date": nxt.isoformat() if nxt else None,
-            "days_overdue": days_overdue,
-            "days_until_due": days_until_due,
-            "eval_status": status,
-            "priority": PRIORITY.get(status, 99),
-        })
+        items.append(
+            {
+                "relation_id": rel.id_relation,
+                "relation_code": rel.relation_code,
+                "unit_name": unit.supplier_code,
+                "unit_id": unit.id_supplier_unit,
+                "plant_name": site.site_name,
+                "plant_city": site.city,
+                "plant_country": site.country,
+                "site_id": site.id_site,
+                "current_grade": rel.operational_grade,
+                "current_class": rel.class_value,
+                "final_grade": rel.final_grade,
+                "current_status": rel.supplier_status,
+                "evaluation_frequency": frequency,
+                "last_evaluation_date": last.isoformat() if last else None,
+                "next_evaluation_date": nxt.isoformat() if nxt else None,
+                "days_overdue": days_overdue,
+                "days_until_due": days_until_due,
+                "eval_status": status,
+                "priority": PRIORITY.get(status, 99),
+            }
+        )
 
     items.sort(key=lambda x: (x["priority"], x.get("days_overdue") or 0), reverse=False)
     return items
@@ -205,6 +213,19 @@ GRADE_HELP = [
 ]
 
 
+def _load_openpyxl_or_raise():
+    try:
+        import openpyxl
+
+        return openpyxl
+    except ImportError as exc:
+        raise AppException(
+            "Excel template generation is unavailable because the Excel dependency is not installed on the server.",
+            status_code=500,
+            error_code="EXCEL_DEPENDENCY_MISSING",
+        ) from exc
+
+
 def generate_csv_template() -> bytes:
     buf = io.StringIO()
     writer = csv.writer(buf)
@@ -212,17 +233,16 @@ def generate_csv_template() -> bytes:
         writer.writerow([h])
     writer.writerow(TEMPLATE_COLUMNS)
     # Example row
-    writer.writerow(["ACME-CN-001", "Lyon Plant", "2026-06-08", "B", "Quarterly review"])
+    writer.writerow(
+        ["ACME-CN-001", "Lyon Plant", "2026-06-08", "B", "Quarterly review"]
+    )
     return buf.getvalue().encode("utf-8-sig")
 
 
 def generate_xlsx_template() -> bytes:
-    try:
-        import openpyxl
-        from openpyxl.styles import Alignment, Font, PatternFill
-        from openpyxl.utils import get_column_letter
-    except ImportError:
-        return generate_csv_template()
+    openpyxl = _load_openpyxl_or_raise()
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
 
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -281,7 +301,10 @@ async def generate_prefilled_template(db: AsyncSession) -> bytes:
     """
     stmt = (
         select(SupplierSiteRelation, SupplierUnit, AvocarbonSite)
-        .join(SupplierUnit, SupplierUnit.id_supplier_unit == SupplierSiteRelation.id_supplier_unit)
+        .join(
+            SupplierUnit,
+            SupplierUnit.id_supplier_unit == SupplierSiteRelation.id_supplier_unit,
+        )
         .join(AvocarbonSite, AvocarbonSite.id_site == SupplierSiteRelation.id_site)
         .where(SupplierSiteRelation.is_deleted.is_(False))
         .where(SupplierSiteRelation.inactivated_at.is_(None))
@@ -290,18 +313,9 @@ async def generate_prefilled_template(db: AsyncSession) -> bytes:
     result = await db.execute(stmt)
     rows = result.all()
 
-    try:
-        import openpyxl
-        from openpyxl.styles import Alignment, Font, PatternFill, Side, Border
-        from openpyxl.utils import get_column_letter
-    except ImportError:
-        # Fallback to CSV
-        buf = io.StringIO()
-        writer = csv.writer(buf)
-        writer.writerow(TEMPLATE_COLUMNS)
-        for rel, unit, site in rows:
-            writer.writerow([unit.supplier_code, site.site_name, "", "", ""])
-        return buf.getvalue().encode("utf-8-sig")
+    openpyxl = _load_openpyxl_or_raise()
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
 
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -341,11 +355,18 @@ async def generate_prefilled_template(db: AsyncSession) -> bytes:
 # Batch ingestion
 # ---------------------------------------------------------------------------
 
+
 class EvaluationRow:
     __slots__ = ("supplier_code", "plant_name", "evaluation_date", "grade", "comments")
 
-    def __init__(self, supplier_code: str, plant_name: str, evaluation_date: date,
-                 grade: str, comments: str = "") -> None:
+    def __init__(
+        self,
+        supplier_code: str,
+        plant_name: str,
+        evaluation_date: date,
+        grade: str,
+        comments: str = "",
+    ) -> None:
         self.supplier_code = supplier_code.strip()
         self.plant_name = plant_name.strip()
         self.evaluation_date = evaluation_date
@@ -379,7 +400,10 @@ def parse_rows_from_xlsx(content: bytes) -> tuple[List[EvaluationRow], List[str]
     errors: List[str] = []
     wb = openpyxl.load_workbook(io.BytesIO(content), data_only=True)
     ws = wb.active
-    headers = [str(cell.value or "").strip().lower() for cell in next(ws.iter_rows(min_row=1, max_row=1))]
+    headers = [
+        str(cell.value or "").strip().lower()
+        for cell in next(ws.iter_rows(min_row=1, max_row=1))
+    ]
 
     for row_idx, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
         # Keep native Python date/datetime objects as-is so _parse_record can handle them cleanly
@@ -387,10 +411,14 @@ def parse_rows_from_xlsx(content: bytes) -> tuple[List[EvaluationRow], List[str]
         for i, v in enumerate(row):
             if i >= len(headers):
                 break
-            record[headers[i]] = v  # do NOT stringify here — let _parse_record normalise
+            record[headers[i]] = (
+                v  # do NOT stringify here — let _parse_record normalise
+            )
 
         first = str(list(record.values())[0] or "") if record else ""
-        if first.startswith("#") or not any(v is not None and str(v).strip() for v in record.values()):
+        if first.startswith("#") or not any(
+            v is not None and str(v).strip() for v in record.values()
+        ):
             continue
         try:
             rows.append(_parse_record(record, row_idx))
@@ -459,11 +487,13 @@ async def ingest_batch(
     for row in rows:
         key = (row.supplier_code.lower(), row.plant_name.lower())
         if key in seen_keys:
-            skipped.append({
-                "supplier_code": row.supplier_code,
-                "plant_name": row.plant_name,
-                "reason": "Duplicate row in file — only the first occurrence is processed",
-            })
+            skipped.append(
+                {
+                    "supplier_code": row.supplier_code,
+                    "plant_name": row.plant_name,
+                    "reason": "Duplicate row in file — only the first occurrence is processed",
+                }
+            )
         else:
             seen_keys.add(key)
             deduplicated.append(row)
@@ -472,12 +502,18 @@ async def ingest_batch(
     for row in rows:
         # Resolve relation
         from sqlalchemy import func as sqlfunc
+
         stmt = (
             select(SupplierSiteRelation, SupplierUnit, AvocarbonSite)
-            .join(SupplierUnit, SupplierUnit.id_supplier_unit == SupplierSiteRelation.id_supplier_unit)
+            .join(
+                SupplierUnit,
+                SupplierUnit.id_supplier_unit == SupplierSiteRelation.id_supplier_unit,
+            )
             .join(AvocarbonSite, AvocarbonSite.id_site == SupplierSiteRelation.id_site)
             # Case-insensitive match on both sides to be forgiving of capitalisation
-            .where(sqlfunc.lower(SupplierUnit.supplier_code) == row.supplier_code.lower())
+            .where(
+                sqlfunc.lower(SupplierUnit.supplier_code) == row.supplier_code.lower()
+            )
             .where(sqlfunc.lower(AvocarbonSite.site_name) == row.plant_name.lower())
             .where(SupplierSiteRelation.is_deleted.is_(False))
         )
@@ -485,11 +521,13 @@ async def ingest_batch(
         match = result.first()
 
         if match is None:
-            skipped.append({
-                "supplier_code": row.supplier_code,
-                "plant_name": row.plant_name,
-                "reason": "No active relation found for this unit–plant combination",
-            })
+            skipped.append(
+                {
+                    "supplier_code": row.supplier_code,
+                    "plant_name": row.plant_name,
+                    "reason": "No active relation found for this unit–plant combination",
+                }
+            )
             continue
 
         relation, unit, site = match
@@ -602,7 +640,9 @@ async def ingest_batch(
         if row.grade in ("C", "D") and not dry_run:
             existing_plan_stmt = select(SupplierDevelopmentPlan).where(
                 SupplierDevelopmentPlan.id_relation == relation.id_relation,
-                SupplierDevelopmentPlan.plan_status.in_(["Required", "Requested", "In Progress"]),
+                SupplierDevelopmentPlan.plan_status.in_(
+                    ["Required", "Requested", "In Progress"]
+                ),
                 SupplierDevelopmentPlan.is_deleted.is_(False),
             )
             existing_plan = (await db.execute(existing_plan_stmt)).scalar_one_or_none()
@@ -613,13 +653,13 @@ async def ingest_batch(
                 plan_due = row.evaluation_date + timedelta(days=due_months * 30)
 
                 if row.grade == "D":
-                    title = f"Improvement Plan — Grade D (exit within 3 months)"
+                    title = "Improvement Plan — Grade D (exit within 3 months)"
                     internal_note = (
                         "Supplier must submit an improvement plan targeting Grade B "
                         "within 6 months and exit Grade D within 3 months."
                     )
                 else:
-                    title = f"Improvement Plan — Grade C (exit within 6 months)"
+                    title = "Improvement Plan — Grade C (exit within 6 months)"
                     internal_note = (
                         "Supplier must submit an improvement plan immediately "
                         "to exit Grade C within 6 months."
@@ -636,21 +676,23 @@ async def ingest_batch(
                 db.add(dev_plan)
                 dev_plan_created = True
 
-        processed.append({
-            "supplier_code": row.supplier_code,
-            "plant_name": row.plant_name,
-            "evaluation_date": row.evaluation_date.isoformat(),
-            "grade": row.grade,
-            "class_value": existing_class,
-            "final_grade": final_grade,
-            "new_status": new_status,
-            "status_changed": status_changed,
-            "previous_grade": old_grade,
-            "previous_class": old_class,
-            "next_evaluation_date": next_eval.isoformat(),
-            "evaluation_frequency": frequency,
-            "dev_plan_created": dev_plan_created,
-        })
+        processed.append(
+            {
+                "supplier_code": row.supplier_code,
+                "plant_name": row.plant_name,
+                "evaluation_date": row.evaluation_date.isoformat(),
+                "grade": row.grade,
+                "class_value": existing_class,
+                "final_grade": final_grade,
+                "new_status": new_status,
+                "status_changed": status_changed,
+                "previous_grade": old_grade,
+                "previous_class": old_class,
+                "next_evaluation_date": next_eval.isoformat(),
+                "evaluation_frequency": frequency,
+                "dev_plan_created": dev_plan_created,
+            }
+        )
 
     if dry_run:
         await db.rollback()
