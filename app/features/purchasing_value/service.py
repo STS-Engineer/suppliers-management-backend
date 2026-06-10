@@ -23,6 +23,8 @@ from app.features.purchasing_value.schemas import (
     OpportunityUpdateRequest,
     RecoveryUpdateRequest,
     StartStudyRequest,
+    STPBenefits,
+    STPRisks,
     SubmitForValidationRequest,
     SubmitToCommitteeRequest,
     ValidationRequestPayload,
@@ -32,8 +34,9 @@ from app.features.purchasing_value.schemas import (
     auto_leadtime_score,
     DIFFICULTY_LABELS,
 )
-from app.shared.utils.email.email_service import send_email
+from app.shared.utils.email.email_service import send_email, send_email_with_attachment
 from app.shared.utils.blob_storage import upload_opportunity_document, delete_blob, _extract_blob_name
+from app.features.purchasing_value.stp_pdf import generate_stp_pdf
 
 # Phase progression order
 PHASE_ORDER = ["Assigned", "Phase 0", "Phase 1", "Phase 2", "Phase 3", "Phase 4", "Closed"]
@@ -141,17 +144,53 @@ class PurchasingValueService:
         _set_if(opp, "expected_annual_saving", payload.expected_annual_saving)
         _set_if(opp, "cash_impact", payload.cash_impact)
         _set_if(opp, "duration_months", payload.duration_months)
+
+        # Track planned_start_date change — rebuild profile if Phase 0/1 and date shifted
+        old_planned_start = opp.planned_start_date
         _set_if(opp, "planned_start_date", payload.planned_start_date)
-        # R9 — if real_start_date changes, rebuild the monthly profile on all active financial lines
+        planned_start_changed = (
+            payload.planned_start_date is not None
+            and payload.planned_start_date != old_planned_start
+            and opp.phase_status in ("Phase 0", "Phase 1", "Assigned")
+        )
+
+        # R9 — if real_start_date changes (Phase 3), rebuild monthly profile
         old_real_start = opp.real_start_date
         _set_if(opp, "execution_start_date", payload.execution_start_date)
         _set_if(opp, "real_start_date", payload.real_start_date)
-        # R9 only triggers on real_start_date (Phase 3 deployment) — not execution_start_date
         real_start_changed = (
             payload.real_start_date is not None
             and payload.real_start_date != old_real_start
         )
-        _set_if(opp, "budget_status", payload.budget_status)
+
+        # Budget confirmation — validate email domain + track + notify
+        old_budget_status = opp.budget_status
+        budget_just_confirmed = False
+        if payload.budget_status is not None and payload.budget_status != old_budget_status:
+            if payload.budget_status == "Budgeted":
+                confirmer = payload.changed_by or ""
+                if not confirmer.lower().endswith("@avocarbon.com"):
+                    raise AppException(
+                        422,
+                        "Budget confirmation requires an @avocarbon.com email address.",
+                        "INVALID_CONFIRMER_EMAIL",
+                    )
+            _set_if(opp, "budget_status", payload.budget_status)
+            opp.budget_confirmed_at = datetime.utcnow()
+            opp.budget_confirmed_by = payload.changed_by
+            budget_just_confirmed = payload.budget_status == "Budgeted"
+        else:
+            _set_if(opp, "budget_status", payload.budget_status)
+
+        effective_budget_status = payload.budget_status if payload.budget_status is not None else opp.budget_status
+        effective_budget_year = payload.budget_year if payload.budget_year is not None else opp.budget_year
+        if effective_budget_status == "Budgeted" and effective_budget_year is None:
+            raise AppException(
+                422,
+                "Enter the Budget Year before saving an opportunity with Budget Status set to Budgeted.",
+                "BUDGET_YEAR_REQUIRED",
+            )
+
         _set_if(opp, "budget_year", payload.budget_year)
         _set_if(opp, "change_mode", payload.change_mode)
         _set_if(opp, "assumptions_summary", payload.assumptions_summary)
@@ -205,12 +244,22 @@ class PurchasingValueService:
         _set_if(opp, "country_after", payload.country_after)
         _set_if(opp, "bonus_before", payload.bonus_before)
         _set_if(opp, "bonus_after", payload.bonus_after)
+        _set_if(opp, "consignment_before", payload.consignment_before)
+        _set_if(opp, "consignment_after", payload.consignment_after)
+        _set_if(opp, "current_price_n1", payload.current_price_n1)
+        _set_if(opp, "current_price_n2", payload.current_price_n2)
+        _set_if(opp, "current_price_n3", payload.current_price_n3)
         if payload.supplier_asked is not None:
             opp.supplier_asked = payload.supplier_asked
         _set_if(opp, "supplier_asked_result", payload.supplier_asked_result)
         _set_if(opp, "tooling_cost", payload.tooling_cost)
         _set_if(opp, "travel_cost", payload.travel_cost)
         _set_if(opp, "qualification_cost", payload.qualification_cost)
+        _set_if(opp, "other_cost", payload.other_cost)
+        if payload.stp_risks is not None:
+            opp.stp_risks = payload.stp_risks.model_dump()
+        if payload.stp_benefits is not None:
+            opp.stp_benefits = payload.stp_benefits.model_dump()
         _set_if(opp, "phase1_weeks", payload.phase1_weeks)
         _set_if(opp, "phase2_weeks", payload.phase2_weeks)
         _set_if(opp, "phase3_weeks", payload.phase3_weeks)
@@ -222,11 +271,12 @@ class PurchasingValueService:
         if payload.reason_capacity is not None:
             opp.reason_capacity = payload.reason_capacity
         _set_if(opp, "reason_other", payload.reason_other)
-        # Auto-compute investment total & ROI
+        # Auto-compute investment total & ROI (all 4 cost lines)
         costs = [
             float(opp.tooling_cost or 0),
             float(opp.travel_cost or 0),
             float(opp.qualification_cost or 0),
+            float(opp.other_cost or 0),
         ]
         total = sum(costs)
         if total > 0:
@@ -240,31 +290,66 @@ class PurchasingValueService:
             opp.priority_score = Decimal(str(p_score))
             opp.priority_category = p_cat
 
-        if opp.status == "Assigned":
-            opp.status = "Working on it"
-
         opp.updated_at = datetime.utcnow()
         opp.updated_by = payload.changed_by
 
-        # Auto-compute planned_end_date when start + duration are both known
+        # Auto-compute planned_end_date: last day of the final month in the period
+        # e.g. start=Oct, duration=1  → 31 Oct
+        #      start=Oct, duration=12 → 30 Sep next year
         if opp.planned_start_date and opp.duration_months:
-            computed_end = add_months(opp.planned_start_date, int(opp.duration_months))
-            # Update any linked project's planned_end_date too
+            last_month_start = add_months(opp.planned_start_date, int(opp.duration_months) - 1)
+            last_day = calendar.monthrange(last_month_start.year, last_month_start.month)[1]
+            computed_end = last_month_start.replace(day=last_day)
+            opp.planned_end_date = computed_end
+            # Sync to linked project if not yet set
             for proj in opp.projects:
                 if proj.planned_end_date is None:
                     proj.planned_end_date = computed_end
                     proj.updated_at = datetime.utcnow()
 
-        # R9 — rebuild monthly profile if real_start_date shifted
+        # Phase 0/1 — rebuild monthly profile if planned_start_date changed (no actuals yet)
+        if planned_start_changed and opp.financial_lines:
+            duration = int(opp.duration_months or 12)
+            for line in opp.financial_lines:
+                if line.status == "Active":
+                    line.planned_start_date = payload.planned_start_date
+                    await self._rebuild_monthly_profile(
+                        line, opp.expected_annual_saving or Decimal("0"),
+                        payload.planned_start_date, duration
+                    )
+                    await self._recalculate_ytd(line.financial_line_id)
+
+        # R9 — rebuild monthly profile if real_start_date shifted (Phase 3)
         if real_start_changed and opp.financial_lines:
             new_start = payload.real_start_date
             duration = int(opp.duration_months or 12)
             for line in opp.financial_lines:
                 if line.status == "Active":
                     await self._rebuild_monthly_profile(line, opp.expected_annual_saving or Decimal("0"), new_start, duration)
+                    await self._recalculate_ytd(line.financial_line_id)
 
         await self.db.flush()
         await self.db.refresh(opp, ["projects", "financial_lines", "opp_documents", "plant"])
+
+        # Send budget confirmation email
+        if budget_just_confirmed:
+            recipients = list(filter(None, [
+                opp.budget_confirmed_by,
+                opp.purchasing_owner,
+            ]))
+            # deduplicate while preserving order
+            seen: set = set()
+            recipients = [r for r in recipients if not (r in seen or seen.add(r))]
+            if recipients:
+                try:
+                    await send_email(
+                        subject=f"[Budget Confirmed] {opp.opportunity_name}",
+                        recipients=recipients,
+                        body_html=_build_budget_confirmed_email(opp),
+                    )
+                except Exception:
+                    pass
+
         return opp
 
     # ------------------------------------------------------------------
@@ -278,7 +363,10 @@ class PurchasingValueService:
         opp = await self.get_opportunity(opportunity_id)
         now = datetime.utcnow()
 
-        opp.validation_decision = payload.decision
+        # Store only Phase 0 gate decision in validation_decision (the primary Go/No Go)
+        # Later phases record their decision in comments to preserve Phase 0 outcome
+        if (opp.phase_status or "Phase 0") in ("Assigned", "Phase 0"):
+            opp.validation_decision = payload.decision
         opp.updated_at = now
         opp.updated_by = payload.decided_by
 
@@ -302,22 +390,23 @@ class PurchasingValueService:
             if current_phase in ("Assigned", "Phase 0"):
                 # Phase 0 Go: validate the opportunity
                 opp.phase_status = "Phase 1"
-                opp.status = "Validated"
+                opp.status = "Working on it"
                 opp.val_date = now.date()
                 if payload.comments:
                     opp.comments = (opp.comments or "") + f"\n[Phase 0 Go] {payload.comments}"
 
-                # R1 — auto-create FinancialLine
-                await self._create_financial_line(opp)
+                # R1 — auto-create FinancialLine only if none exists yet
+                # (guard: Review → rework → Go cycle must not create duplicates)
+                if not opp.financial_lines:
+                    await self._create_financial_line(opp)
 
                 # R2 — create Project for Sourcing / Technical Productivity
                 if opp.opportunity_type not in NO_PROJECT_TYPES:
                     if not payload.project_manager:
                         raise AppException(422, "project_manager email is required for this opportunity type.", "PM_REQUIRED")
                     opp.project_owner = payload.project_manager
-                    await self._create_project(opp, payload.project_manager)
-
-                opp.status = "Working on it"
+                    if not opp.projects:
+                        await self._create_project(opp, payload.project_manager)
 
             elif current_phase == "Phase 1":
                 opp.phase_status = "Phase 2"
@@ -387,16 +476,28 @@ class PurchasingValueService:
             f"\n[Submitted for PM validation by {payload.submitted_by or 'system'} on {datetime.utcnow().strftime('%Y-%m-%d')}]"
         )
 
-        body = _build_phase0_submit_email(opp, payload.message, payload.committee_type if hasattr(payload, "committee_type") else None)
-        try:
-            await send_email(
-                subject=f"[Phase 0 Review] Opportunity: {opp.opportunity_name}",
-                recipients=payload.to_emails,
-                body_html=body,
-                cc=payload.cc_emails or [],
-            )
-        except Exception:
-            pass
+        if payload.to_emails:
+            try:
+                import tempfile, os
+                body = _build_phase0_submit_email(opp, payload.message, payload.committee_type if hasattr(payload, "committee_type") else None)
+                pdf_bytes = generate_stp_pdf(opp, phase=0)
+                safe = (opp.opportunity_name or "STP").replace(" ", "_")[:50]
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf", prefix=f"STP_Phase0_{safe}_") as tmp:
+                    tmp.write(pdf_bytes)
+                    tmp_path = tmp.name
+                try:
+                    await send_email_with_attachment(
+                        subject=f"[Phase 0 Review] Opportunity: {opp.opportunity_name}",
+                        recipients=payload.to_emails,
+                        body_html=body,
+                        cc=payload.cc_emails or [],
+                        attachment_path=tmp_path,
+                        attachment_filename=f"STP_Phase0_{safe}.pdf",
+                    )
+                finally:
+                    os.unlink(tmp_path)
+            except Exception:
+                pass
 
         await self.db.flush()
         await self.db.refresh(opp, ["projects", "financial_lines", "opp_documents", "plant"])
@@ -425,13 +526,24 @@ class PurchasingValueService:
         # Email is optional: only sent if to_emails explicitly provided
         if payload.to_emails:
             try:
+                import tempfile, os
                 body = _build_committee_email(opp, payload.message, committee)
-                await send_email(
-                    subject=f"[Committee Review] Feasibility Study — {opp.opportunity_name}",
-                    recipients=payload.to_emails,
-                    body_html=body,
-                    cc=payload.cc_emails or [],
-                )
+                pdf_bytes = generate_stp_pdf(opp, phase=1)
+                safe = (opp.opportunity_name or "STP").replace(" ", "_")[:50]
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf", prefix=f"STP_Phase1_{safe}_") as tmp:
+                    tmp.write(pdf_bytes)
+                    tmp_path = tmp.name
+                try:
+                    await send_email_with_attachment(
+                        subject=f"[Committee Review] Feasibility Study — {opp.opportunity_name}",
+                        recipients=payload.to_emails,
+                        body_html=body,
+                        cc=payload.cc_emails or [],
+                        attachment_path=tmp_path,
+                        attachment_filename=f"STP_Phase1_{safe}.pdf",
+                    )
+                finally:
+                    os.unlink(tmp_path)
             except Exception:
                 pass
 
@@ -472,6 +584,15 @@ class PurchasingValueService:
 
     async def update_monthly_actual(self, month_id: int, payload: MonthlyActualUpdateRequest) -> MonthlyFinancial:
         row = await self.get_monthly_row(month_id)
+        line = await self.get_financial_line(row.financial_line_id)
+        opp = await self.get_opportunity(line.opportunity_id)
+
+        if opp.phase_status != "Phase 3":
+            raise AppException(
+                422,
+                "Monthly financial rows can only be edited while the opportunity is in Phase 3.",
+                "MONTHLY_ROWS_LOCKED_OUTSIDE_PHASE_3",
+            )
 
         _set_if(row, "actual_saving", payload.actual_saving)
         _set_if(row, "cash_actual", payload.cash_actual)
@@ -481,7 +602,7 @@ class PurchasingValueService:
         # qui soit moins de 200 puisqu'elle a déjà 200"
         if payload.forecast_eoy_saving is not None:
             # Get current cumulated actual (after setting new actual above)
-            cum_actual = _n(row.cumulated_actual) if row.cumulated_actual else _n(row.actual_saving or 0)
+            cum_actual = float(row.cumulated_actual) if row.cumulated_actual else float(row.actual_saving or 0)
             new_forecast = float(payload.forecast_eoy_saving)
             if new_forecast < cum_actual:
                 raise AppException(
@@ -499,7 +620,6 @@ class PurchasingValueService:
 
         await self._recalculate_ytd(row.financial_line_id)
 
-        line = await self.get_financial_line(row.financial_line_id)
         if payload.forecast_eoy_saving is not None:
             line.forecast_eoy_current = payload.forecast_eoy_saving
             line.forecast_eoy_last_update = datetime.utcnow().date()
@@ -517,7 +637,6 @@ class PurchasingValueService:
                 f"({row.period_month.strftime('%b %Y') if row.period_month else 'N/A'}): "
                 f"actual={row.actual_saving}, expected={row.expected_saving}"
             )
-            opp = await self.get_opportunity(line.opportunity_id)
             recipients = list(filter(None, [opp.purchasing_owner, opp.conversion_owner]))
             if recipients:
                 try:
@@ -592,8 +711,26 @@ class PurchasingValueService:
     async def set_recovery(self, line_id: int, payload: RecoveryUpdateRequest) -> FinancialLine:
         line = await self.get_financial_line(line_id)
         now = datetime.utcnow()
+
+        # Snapshot previous state into history before overwriting
+        if line.recovery_status:
+            amount_str = f"€{float(line.recovery_amount):,.0f}" if line.recovery_amount else "—"
+            target_str = str(line.recovery_target_date) if line.recovery_target_date else "—"
+            note_str = f'"{line.recovery_note}"' if line.recovery_note else "—"
+            entry = (
+                f"[{now.strftime('%Y-%m-%d')} by {payload.updated_by or 'system'}] "
+                f"Status: {line.recovery_status} | Amount: {amount_str} | "
+                f"Target: {target_str} | Note: {note_str}"
+            )
+            existing = line.recovery_history or ""
+            line.recovery_history = (existing + "\n" + entry).strip()
+
         line.recovery_status = payload.recovery_status
         line.recovery_note = payload.recovery_note
+        if payload.recovery_target_date is not None:
+            line.recovery_target_date = payload.recovery_target_date
+        if payload.recovery_amount is not None:
+            line.recovery_amount = Decimal(str(payload.recovery_amount))
         line.recovery_updated_at = now
         line.recovery_updated_by = payload.updated_by
         line.updated_at = now
@@ -736,7 +873,24 @@ class PurchasingValueService:
         new_start: date,
         duration_months: int,
     ) -> None:
-        """R9 — Delete rows that have no actual entered and regenerate from new_start date."""
+        """R9 — rebuild the monthly profile from the real start date.
+
+        Rows before the new start date no longer make business sense, so they are
+        removed even if they previously contained actuals. From the new start date
+        onward, entered actuals are preserved and only empty rows are regenerated.
+        """
+        # Remove any rows that sit before the new real start date.
+        result = await self.db.execute(
+            select(MonthlyFinancial).where(
+                MonthlyFinancial.financial_line_id == line.financial_line_id,
+                MonthlyFinancial.period_month < new_start,
+            )
+        )
+        obsolete_rows = result.scalars().all()
+        for row in obsolete_rows:
+            await self.db.delete(row)
+        await self.db.flush()
+
         result = await self.db.execute(
             select(MonthlyFinancial).where(
                 MonthlyFinancial.financial_line_id == line.financial_line_id,
@@ -753,6 +907,7 @@ class PurchasingValueService:
             select(MonthlyFinancial).where(
                 MonthlyFinancial.financial_line_id == line.financial_line_id,
                 MonthlyFinancial.actual_saving != None,
+                MonthlyFinancial.period_month >= new_start,
             ).order_by(MonthlyFinancial.period_month.desc())
         )
         last_actual = result2.scalars().first()
@@ -786,21 +941,33 @@ class PurchasingValueService:
 
         # Update the financial line real_start_date
         line.real_start_date = new_start
+
+        # If the rows that caused an auto-escalation were removed, clear the stale flag.
+        result3 = await self.db.execute(
+            select(MonthlyFinancial).where(
+                MonthlyFinancial.financial_line_id == line.financial_line_id,
+                MonthlyFinancial.monthly_outcome == "Escalate",
+            )
+        )
+        has_escalated_rows = result3.scalars().first() is not None
+        if not has_escalated_rows and line.escalation_reason and line.escalation_reason.startswith("Auto-escalated from monthly review"):
+            line.is_escalated = False
+            line.escalated_at = None
+            line.escalated_by = None
+            line.escalation_reason = None
+
         await self.db.flush()
 
     def _monthly_expected(self, annual: Decimal, duration_months: int) -> Decimal:
         """
-        Monthly expected = annual / duration_months.
-        Handles all cases:
-          - Recurring 12m: 2400/12 = 200/month (total 2400)
-          - One-shot 1m:   5000/1  = 5000/month (total 5000) <- Olivier bonus case
-          - 6 months:      1200/6  = 200/month  (total 1200)
-        Olivier: "si tu veux faire simple, tu divises par 12" applies to duration=12.
-        For duration=1 (one-shot bonus) the full amount goes in the single month.
+        Monthly expected = annual / 12  (annual saving is a per-year rate).
+        For sub-annual projects (duration < 12) divide by duration so the full
+        amount lands in the available months (one-shot rebate / short negotiation).
         """
         if duration_months <= 0:
             return Decimal("0")
-        return round(annual / Decimal(str(duration_months)), 2)
+        divisor = min(duration_months, 12)
+        return round(annual / Decimal(str(divisor)), 2)
 
     async def _generate_monthly_profile(
         self,
@@ -850,7 +1017,7 @@ class PurchasingValueService:
     async def revise_financial_line_baseline(
         self, line_id: int, revised_saving: Decimal, note: Optional[str], revised_by: Optional[str]
     ) -> FinancialLine:
-        """Phase 1 only — revise expected_annual_saving, rebuild monthly profile, keep budget_value."""
+        """Phase 1 or Phase 3 — revise expected_annual_saving, rebuild monthly profile, keep budget_value."""
         line = await self.get_financial_line(line_id)
         if line.status != "Active":
             raise AppException(422, "Can only revise an active financial line.", "LINE_NOT_ACTIVE")
@@ -976,15 +1143,26 @@ class PurchasingValueService:
         ]
 
     async def _recalculate_ytd(self, financial_line_id: int) -> None:
-        """Recalculate monthly cumulated fields AND push totals back to FinancialLine."""
+        """Recalculate monthly cumulated fields AND push totals back to FinancialLine.
+
+        delta_vs_expected_ytd = sum(actual or 0) - sum(expected)
+                                for all months from project start up to today.
+        Missing actuals (null) count as 0 so gaps are never hidden.
+        cumulated_real_saving = total actuals entered (all time).
+        """
         result = await self.db.execute(
             select(MonthlyFinancial)
             .where(MonthlyFinancial.financial_line_id == financial_line_id)
             .order_by(MonthlyFinancial.period_month)
         )
         rows = list(result.scalars().all())
+        today_first = date.today().replace(day=1)
+
         cum_exp = Decimal("0")
         cum_act = Decimal("0")
+        ytd_exp = Decimal("0")
+        ytd_act = Decimal("0")
+
         for row in rows:
             cum_exp += row.expected_saving or Decimal("0")
             row.cumulated_expected = cum_exp
@@ -992,6 +1170,11 @@ class PurchasingValueService:
                 cum_act += row.actual_saving
                 row.cumulated_actual = cum_act
                 row.delta_vs_expected = row.actual_saving - (row.expected_saving or Decimal("0"))
+
+            # YTD delta: all past months, null actual counts as 0 (gap stays visible)
+            if row.period_month and row.period_month <= today_first:
+                ytd_exp += row.expected_saving or Decimal("0")
+                ytd_act += row.actual_saving if row.actual_saving is not None else Decimal("0")
 
         # Also accumulate cash actuals (Gap 3)
         cum_cash = Decimal("0")
@@ -1007,7 +1190,7 @@ class PurchasingValueService:
         line = line_result.scalar_one_or_none()
         if line is not None:
             line.cumulated_real_saving = cum_act
-            line.delta_vs_expected_ytd = cum_act - cum_exp if cum_act > 0 else Decimal("0")
+            line.delta_vs_expected_ytd = ytd_act - ytd_exp
 
         await self.db.flush()
 
@@ -1015,6 +1198,38 @@ class PurchasingValueService:
 # ---------------------------------------------------------------------------
 # Utilities
 # ---------------------------------------------------------------------------
+
+def _build_budget_confirmed_email(opp: Opportunity) -> str:
+    saving = f"€{opp.expected_annual_saving:,.0f}" if opp.expected_annual_saving else "N/A"
+    plant = opp.plant.site_name if opp.plant else "N/A"
+    budget_year = str(int(opp.budget_year)) if opp.budget_year else "N/A"
+    confirmer = opp.budget_confirmed_by or "N/A"
+    confirmed_at = opp.budget_confirmed_at.strftime("%d %b %Y %H:%M") if opp.budget_confirmed_at else "N/A"
+    end_date = opp.planned_end_date.strftime("%d %b %Y") if opp.planned_end_date else "N/A"
+    start_date = opp.planned_start_date.strftime("%d %b %Y") if opp.planned_start_date else "N/A"
+    return f"""
+    <html><body style="font-family:Arial,sans-serif;color:#111827;max-width:620px;margin:0 auto">
+      <div style="background:#065f46;padding:20px 24px;border-radius:8px 8px 0 0">
+        <h2 style="color:#fff;margin:0;font-size:18px">✅ Opportunity Budgeted</h2>
+        <p style="color:#6ee7b7;margin:4px 0 0;font-size:13px">Purchasing Value Management — Budget Confirmation</p>
+      </div>
+      <div style="padding:24px;border:1px solid #d1fae5;border-top:none;border-radius:0 0 8px 8px">
+        <p>The following opportunity has been <strong>confirmed as Budgeted</strong> for {budget_year}:</p>
+        <table style="border-collapse:collapse;width:100%;font-size:13px;margin:16px 0">
+          <tr><td style="background:#ecfdf5;font-weight:600;padding:8px 12px;width:38%">Opportunity</td><td style="padding:8px 12px;border-bottom:1px solid #d1fae5">{opp.opportunity_name}</td></tr>
+          <tr><td style="background:#ecfdf5;font-weight:600;padding:8px 12px">Type</td><td style="padding:8px 12px;border-bottom:1px solid #d1fae5">{opp.opportunity_type}</td></tr>
+          <tr><td style="background:#ecfdf5;font-weight:600;padding:8px 12px">Plant</td><td style="padding:8px 12px;border-bottom:1px solid #d1fae5">{plant}</td></tr>
+          <tr><td style="background:#ecfdf5;font-weight:600;padding:8px 12px">Expected Annual Saving</td><td style="padding:8px 12px;border-bottom:1px solid #d1fae5;font-weight:700;color:#065f46">{saving}</td></tr>
+          <tr><td style="background:#ecfdf5;font-weight:600;padding:8px 12px">Budget Year</td><td style="padding:8px 12px;border-bottom:1px solid #d1fae5">{budget_year}</td></tr>
+          <tr><td style="background:#ecfdf5;font-weight:600;padding:8px 12px">Planned Start → End</td><td style="padding:8px 12px;border-bottom:1px solid #d1fae5">{start_date} → {end_date}</td></tr>
+          <tr><td style="background:#ecfdf5;font-weight:600;padding:8px 12px">Confirmed by</td><td style="padding:8px 12px;border-bottom:1px solid #d1fae5">{confirmer}</td></tr>
+          <tr><td style="background:#ecfdf5;font-weight:600;padding:8px 12px">Confirmed at</td><td style="padding:8px 12px">{confirmed_at} UTC</td></tr>
+        </table>
+        <p style="color:#6b7280;font-size:11px;margin-top:24px">Avocarbon · Purchasing Value Management</p>
+      </div>
+    </body></html>
+    """
+
 
 def _set_if(obj, attr: str, value) -> None:
     """Set attribute only when value is not None."""

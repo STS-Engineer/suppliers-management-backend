@@ -10,5 +10,6 @@ python-multipart
 azure-storage-blob
 azure-core
 openpyxl
+reportlab
 
 # azure-identity

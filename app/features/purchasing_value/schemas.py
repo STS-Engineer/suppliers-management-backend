@@ -2,9 +2,37 @@
 
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Optional, List
+from typing import Any, Optional, List
 
 from pydantic import BaseModel, Field
+
+
+# ---------------------------------------------------------------------------
+# STP nested JSON schemas
+# ---------------------------------------------------------------------------
+
+class STPRisks(BaseModel):
+    """Stored as a single JSONB column — stp_risks."""
+    material_indexation_before: Optional[str] = None
+    material_indexation_after: Optional[str] = None
+    exchange_rate_before: Optional[str] = None
+    exchange_rate_after: Optional[str] = None
+    local_content_before: Optional[str] = None
+    local_content_after: Optional[str] = None
+    quality_before: Optional[str] = None
+    quality_after: Optional[str] = None
+    other_before: Optional[str] = None
+    other_after: Optional[str] = None
+    # Spec questions
+    material_same_spec: Optional[str] = None   # Yes / No
+    same_tooling: Optional[str] = None         # Yes / No
+    same_dimension: Optional[str] = None       # Yes / No
+
+
+class STPBenefits(BaseModel):
+    """Stored as a single JSONB column — stp_benefits."""
+    if_we_do: Optional[str] = None
+    if_not: Optional[str] = None
 
 # ---------------------------------------------------------------------------
 # Reference values (single source of truth — mirrors the spec)
@@ -198,11 +226,20 @@ class OpportunityUpdateRequest(BaseModel):
     country_after: Optional[str] = None
     bonus_before: Optional[Decimal] = None
     bonus_after: Optional[Decimal] = None
+    consignment_before: Optional[str] = None
+    consignment_after: Optional[str] = None
+    # Before-prices for years N+1/N+2/N+3 (current supplier price evolution)
+    current_price_n1: Optional[Decimal] = None
+    current_price_n2: Optional[Decimal] = None
+    current_price_n3: Optional[Decimal] = None
     supplier_asked: Optional[bool] = None
     supplier_asked_result: Optional[str] = None
     tooling_cost: Optional[Decimal] = None
     travel_cost: Optional[Decimal] = None
     qualification_cost: Optional[Decimal] = None
+    other_cost: Optional[Decimal] = None
+    stp_risks: Optional[STPRisks] = None
+    stp_benefits: Optional[STPBenefits] = None
     phase1_weeks: Optional[int] = None
     phase2_weeks: Optional[int] = None
     phase3_weeks: Optional[int] = None
@@ -352,6 +389,8 @@ class EscalateRequest(BaseModel):
 class RecoveryUpdateRequest(BaseModel):
     recovery_status: str = Field(..., description="Planned | In Progress | Done")
     recovery_note: Optional[str] = None
+    recovery_target_date: Optional[date] = None
+    recovery_amount: Optional[float] = None
     updated_by: Optional[str] = None
 
 
@@ -397,6 +436,9 @@ class FinancialLineResponse(BaseModel):
     # Recovery
     recovery_status: Optional[str] = None
     recovery_note: Optional[str] = None
+    recovery_target_date: Optional[date] = None
+    recovery_amount: Optional[Decimal] = None
+    recovery_history: Optional[str] = None
     recovery_updated_at: Optional[datetime] = None
     monthly_financials: List[MonthlyFinancialResponse] = Field(default_factory=list)
 
@@ -430,10 +472,13 @@ class OpportunityResponse(BaseModel):
     duration_months: Optional[Decimal] = None
     budget_status: Optional[str] = None
     budget_year: Optional[Decimal] = None
+    budget_confirmed_at: Optional[datetime] = None
+    budget_confirmed_by: Optional[str] = None
+    planned_end_date: Optional[date] = None
     phase_status: Optional[str] = None
     validation_decision: Optional[str] = None
     val_date: Optional[date] = None
-    study_start_date: Optional[date] = None  # when buyer clicked "Start Study"
+    study_start_date: Optional[date] = None
     execution_start_date: Optional[date] = None
     change_mode: Optional[str] = None
     assumptions_summary: Optional[str] = None
@@ -469,15 +514,23 @@ class OpportunityResponse(BaseModel):
     country_after: Optional[str] = None
     bonus_before: Optional[Decimal] = None
     bonus_after: Optional[Decimal] = None
+    consignment_before: Optional[str] = None
+    consignment_after: Optional[str] = None
+    current_price_n1: Optional[Decimal] = None
+    current_price_n2: Optional[Decimal] = None
+    current_price_n3: Optional[Decimal] = None
     supplier_asked: Optional[bool] = None
     supplier_asked_result: Optional[str] = None
     tooling_cost: Optional[Decimal] = None
     travel_cost: Optional[Decimal] = None
     qualification_cost: Optional[Decimal] = None
+    other_cost: Optional[Decimal] = None
     total_investment: Optional[Decimal] = None
     roi_percent: Optional[Decimal] = None
     cash_inventory_gap: Optional[Decimal] = None
     cash_ap_gap: Optional[Decimal] = None
+    stp_risks: Optional[STPRisks] = None
+    stp_benefits: Optional[STPBenefits] = None
     phase1_weeks: Optional[int] = None
     phase2_weeks: Optional[int] = None
     phase3_weeks: Optional[int] = None

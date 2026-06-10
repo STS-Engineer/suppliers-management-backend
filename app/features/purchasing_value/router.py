@@ -1,14 +1,21 @@
 """Purchasing value management router."""
 
 from fastapi import APIRouter, Depends, File, Form, UploadFile
+from fastapi.responses import Response
+from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
+from datetime import date
+
+from app.db.models import FinancialLine, Opportunity
 
 from app.core.exceptions import AppException
 from app.features.purchasing_value import schemas
 from app.features.purchasing_value.schemas import opportunity_to_response
 from app.features.purchasing_value.service import PurchasingValueService
 from app.features.purchasing_value.kpi_service import PurchasingKpiService
+from app.features.purchasing_value.stp_pdf import generate_stp_pdf
 from app.shared.dependencies.auth import get_current_user
 from app.shared.dependencies.db import get_db
 
@@ -436,6 +443,32 @@ async def get_current_supplier_evaluation(
     }
 
 
+@router.get("/opportunities/{opportunity_id}/export-stp")
+async def export_stp_pdf(
+    opportunity_id: int,
+    phase: int = 0,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Generate and return the STP document as a downloadable PDF.
+    ``phase`` = 0 or 1 (controls the committee section heading).
+    """
+    import unicodedata
+    svc = PurchasingValueService(db)
+    opp = await svc.get_opportunity(opportunity_id)
+    pdf_bytes = generate_stp_pdf(opp, phase=phase)
+    raw_name = opp.opportunity_name or f"opp_{opportunity_id}"
+    # Normalise to ASCII — replaces accented/special chars, drops what can't map
+    ascii_name = unicodedata.normalize("NFKD", raw_name).encode("ascii", "ignore").decode("ascii")
+    safe_name = "".join(c if c.isalnum() or c in "-_." else "_" for c in ascii_name)[:60]
+    filename = f"STP_Phase{phase}_{safe_name}.pdf"
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @router.get("/suppliers-by-plant/{plant_id}", response_model=dict)
 async def get_suppliers_by_plant(
     plant_id: int,
@@ -487,6 +520,114 @@ async def upload_document(
         await db.rollback(); raise
     except Exception:
         await db.rollback(); raise
+
+
+# ---------------------------------------------------------------------------
+# Recovery plans — centralised tracking view
+# ---------------------------------------------------------------------------
+
+@router.get("/recovery-plans", response_model=dict)
+async def get_recovery_plans(
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Return all active financial lines that have a recovery plan (any status).
+    Includes full opportunity + plant context and computed progress fields.
+    """
+    today = date.today()
+    result = await db.execute(
+        select(FinancialLine)
+        .where(
+            FinancialLine.recovery_status.isnot(None),
+            FinancialLine.status == "Active",
+        )
+        .options(
+            selectinload(FinancialLine.opportunity).selectinload(Opportunity.plant),
+            selectinload(FinancialLine.monthly_financials),
+            selectinload(FinancialLine.plant),
+        )
+        .order_by(FinancialLine.financial_line_id.desc())
+    )
+    lines = list(result.scalars().all())
+
+    def _n(v):
+        return float(v) if v is not None else 0.0
+
+    items = []
+    for line in lines:
+        opp = line.opportunity
+        plant = line.plant
+
+        # Progress: how much has been recovered since recovery plan was set
+        # Use cumulated_real_saving vs expected_annual_saving as proxy
+        cum_actual = _n(line.cumulated_real_saving)
+        expected = _n(line.expected_annual_saving)
+        recovery_amount = _n(line.recovery_amount) if line.recovery_amount else None
+        delta_ytd = _n(line.delta_vs_expected_ytd)
+
+        # Overdue: has a target date that is in the past and status != Done
+        is_overdue = (
+            line.recovery_target_date is not None
+            and line.recovery_target_date < today
+            and line.recovery_status != "Done"
+        )
+        # Due soon: target date within next 30 days
+        days_to_target = (
+            (line.recovery_target_date - today).days
+            if line.recovery_target_date and line.recovery_status != "Done"
+            else None
+        )
+
+        items.append({
+            "financial_line_id": line.financial_line_id,
+            "line_name": line.line_name,
+            "opportunity_id": opp.opportunity_id if opp else None,
+            "opportunity_name": opp.opportunity_name if opp else None,
+            "opportunity_type": opp.opportunity_type if opp else None,
+            "plant_name": plant.site_name if plant else None,
+            "follower": line.follower,
+            "purchasing_owner": opp.purchasing_owner if opp else None,
+            # Financial
+            "expected_annual_saving": expected,
+            "cumulated_real_saving": cum_actual,
+            "delta_ytd": delta_ytd,
+            "forecast_eoy_current": _n(line.forecast_eoy_current),
+            # Recovery plan
+            "recovery_status": line.recovery_status,
+            "recovery_note": line.recovery_note,
+            "recovery_target_date": str(line.recovery_target_date) if line.recovery_target_date else None,
+            "recovery_amount": recovery_amount,
+            "recovery_history": line.recovery_history,
+            "recovery_updated_at": str(line.recovery_updated_at) if line.recovery_updated_at else None,
+            # Computed
+            "is_overdue": is_overdue,
+            "days_to_target": days_to_target,
+            "progress_pct": round((cum_actual / recovery_amount) * 100, 1) if recovery_amount and recovery_amount > 0 else None,
+            "is_escalated": line.is_escalated,
+        })
+
+    # Summary stats for the header
+    total = len(items)
+    by_status = {
+        "Planned": sum(1 for i in items if i["recovery_status"] == "Planned"),
+        "In Progress": sum(1 for i in items if i["recovery_status"] == "In Progress"),
+        "Done": sum(1 for i in items if i["recovery_status"] == "Done"),
+    }
+    total_amount = sum(i["recovery_amount"] for i in items if i["recovery_amount"])
+    overdue_count = sum(1 for i in items if i["is_overdue"])
+
+    return {
+        "status": "success",
+        "data": {
+            "items": items,
+            "summary": {
+                "total": total,
+                "by_status": by_status,
+                "total_amount_to_recover": round(total_amount, 2),
+                "overdue_count": overdue_count,
+            },
+        },
+    }
 
 
 @router.delete("/documents/{doc_id}", response_model=dict)
