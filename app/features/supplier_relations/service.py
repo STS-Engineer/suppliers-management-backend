@@ -1137,6 +1137,790 @@ class SupplierRelationService:
         await self.db.refresh(plan)
         return plan
 
+    async def send_development_plan_reminder(
+        self,
+        relation_id: int,
+        plan_id: int,
+        data: schemas.SupplierDevelopmentPlanSendReminder,
+    ) -> SupplierDevelopmentPlan:
+        relation = await self.get_relation(relation_id)
+        plan = await self.db.get(SupplierDevelopmentPlan, plan_id)
+        if not plan or plan.id_relation != relation_id:
+            raise AppException(
+                f"Supplier development plan with ID {plan_id} not found",
+                status_code=404,
+            )
+        if not plan.due_date:
+            raise AppException(
+                "A due date is required before sending a reminder.",
+                status_code=400,
+            )
+
+        if data.to_emails:
+            to_recipients = [e.strip() for e in data.to_emails if e.strip() and "@" in e]
+            cc_recipients = [e.strip() for e in (data.extra_cc_emails or []) if e.strip() and "@" in e]
+        else:
+            to_recipients, cc_recipients = await self._resolve_development_plan_email_targets(relation)
+            for extra in data.extra_cc_emails or []:
+                extra = extra.strip()
+                if extra and "@" in extra and extra not in to_recipients and extra not in cc_recipients:
+                    cc_recipients.append(extra)
+        if not to_recipients:
+            raise AppException(
+                "No supplier recipient email was found for this relation.",
+                status_code=400,
+            )
+
+        site_stmt = select(AvocarbonSite).where(AvocarbonSite.id_site == relation.id_site)
+        site = (await self.db.execute(site_stmt)).scalars().first()
+        site_name = site.site_name if site and site.site_name else f"Site #{relation.id_site}"
+
+        unit_stmt = select(SupplierUnit).where(SupplierUnit.id_supplier_unit == relation.id_supplier_unit)
+        unit = (await self.db.execute(unit_stmt)).scalars().first()
+        group_name: Optional[str] = None
+        if unit and unit.id_group:
+            group_stmt = select(SupplierGroup).where(SupplierGroup.id_group == unit.id_group)
+            group = (await self.db.execute(group_stmt)).scalars().first()
+            if group:
+                group_name = group.nom
+        supplier_display = (
+            group_name
+            or (unit.supplier_code if unit else None)
+            or f"Unit #{relation.id_supplier_unit}"
+        )
+
+        today = date.today()
+        due_date_str = plan.due_date.strftime("%d %B %Y")
+        days_overdue = (today - plan.due_date).days if plan.due_date < today else 0
+        plan_title = plan.plan_title or f"Development Plan #{plan.id_development_plan}"
+        custom_message = (data.custom_message or "").strip()
+
+        overdue_banner = ""
+        if days_overdue > 0:
+            overdue_banner = f"""
+            <tr>
+              <td style="padding:0 32px 24px;">
+                <table width="100%" cellpadding="0" cellspacing="0" border="0"
+                       style="background:#fef2f2;border:1px solid #fecaca;border-radius:10px;">
+                  <tr>
+                    <td style="padding:14px 20px;">
+                      <p style="margin:0;font-size:13px;font-weight:700;color:#991b1b;">
+                        ⚠ Overdue by {days_overdue} day{"s" if days_overdue != 1 else ""}
+                      </p>
+                      <p style="margin:4px 0 0;font-size:13px;color:#b91c1c;">
+                        The deadline for submitting your action plan was {due_date_str}.
+                        Immediate submission is required.
+                      </p>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>"""
+
+        custom_message_block = ""
+        if custom_message:
+            custom_message_block = f"""
+            <tr>
+              <td style="padding:0 32px 24px;">
+                <table width="100%" cellpadding="0" cellspacing="0" border="0"
+                       style="background:#fffbeb;border:1px solid #fde68a;border-radius:10px;">
+                  <tr>
+                    <td style="padding:16px 20px;">
+                      <p style="margin:0 0 4px;font-size:11px;font-weight:700;
+                                letter-spacing:0.08em;text-transform:uppercase;color:#92400e;">
+                        Message from Avocarbon Purchasing
+                      </p>
+                      <p style="margin:0;font-size:14px;line-height:1.6;color:#78350f;">
+                        {custom_message}
+                      </p>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>"""
+
+        subject = f"[Reminder] Development Plan Submission — {supplier_display} · {site_name}"
+        body_html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Development Plan Reminder</title>
+</head>
+<body style="margin:0;padding:0;background-color:#f1f5f9;font-family:'Segoe UI',Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" border="0"
+         style="background-color:#f1f5f9;padding:32px 16px;">
+    <tr>
+      <td align="center">
+        <table width="600" cellpadding="0" cellspacing="0" border="0"
+               style="max-width:600px;width:100%;background:#ffffff;
+                      border-radius:16px;overflow:hidden;
+                      box-shadow:0 4px 24px rgba(15,39,68,0.10);">
+          <!-- Header -->
+          <tr>
+            <td style="background:linear-gradient(135deg,#7c2d12 0%,#c2410c 100%);
+                        padding:32px 32px 28px;">
+              <table width="100%" cellpadding="0" cellspacing="0" border="0">
+                <tr>
+                  <td>
+                    <p style="margin:0;font-size:13px;font-weight:700;
+                               letter-spacing:0.18em;text-transform:uppercase;
+                               color:rgba(255,255,255,0.55);">
+                      Avocarbon · Supplier Management
+                    </p>
+                    <h1 style="margin:8px 0 0;font-size:22px;font-weight:700;
+                                color:#ffffff;line-height:1.3;">
+                      {supplier_display}
+                    </h1>
+                    <p style="margin:6px 0 0;font-size:13px;color:rgba(255,255,255,0.70);">
+                      Reminder: Development Plan Submission &nbsp;·&nbsp; {site_name}
+                    </p>
+                  </td>
+                  <td align="right" valign="top" style="padding-top:4px;white-space:nowrap;">
+                    <span style="display:inline-block;background:rgba(255,255,255,0.15);
+                                  border:1px solid rgba(255,255,255,0.25);
+                                  border-radius:6px;padding:6px 14px;
+                                  font-size:12px;font-weight:700;
+                                  color:#ffffff;letter-spacing:0.04em;">
+                      REMINDER
+                    </span>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+          <!-- Body -->
+          <tr>
+            <td style="padding:28px 32px 8px;">
+              <p style="margin:0;font-size:15px;line-height:1.7;color:#1e293b;">
+                This is a reminder that your development action plan for
+                <strong>{site_name}</strong> is awaiting submission.
+                Avocarbon Purchasing has not yet received your plan.
+              </p>
+            </td>
+          </tr>
+          {overdue_banner}
+          {custom_message_block}
+          <!-- Plan details -->
+          <tr>
+            <td style="padding:0 32px 24px;">
+              <table width="100%" cellpadding="0" cellspacing="0" border="0"
+                     style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;">
+                <tr>
+                  <td style="padding:12px 20px;border-bottom:1px solid #e2e8f0;">
+                    <table width="100%" cellpadding="0" cellspacing="0" border="0">
+                      <tr>
+                        <td style="font-size:12px;color:#64748b;font-weight:600;">Plan</td>
+                        <td align="right" style="font-size:13px;font-weight:600;color:#1e293b;">{plan_title}</td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+                <tr>
+                  <td style="padding:12px 20px;">
+                    <table width="100%" cellpadding="0" cellspacing="0" border="0">
+                      <tr>
+                        <td style="font-size:12px;color:#64748b;font-weight:600;">Deadline</td>
+                        <td align="right">
+                          <span style="font-size:13px;font-weight:700;
+                                        color:{'#dc2626' if days_overdue > 0 else '#0f172a'};">
+                            {due_date_str}{'  (overdue)' if days_overdue > 0 else ''}
+                          </span>
+                        </td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+          <!-- Call to action -->
+          <tr>
+            <td style="padding:0 32px 32px;">
+              <p style="margin:0;font-size:14px;line-height:1.7;color:#475569;">
+                Please submit your action plan as soon as possible.
+                Contact Avocarbon Purchasing if you have any questions.
+              </p>
+            </td>
+          </tr>
+          <!-- Footer -->
+          <tr>
+            <td style="background:#f8fafc;border-top:1px solid #e2e8f0;
+                        padding:20px 32px;text-align:center;">
+              <p style="margin:0;font-size:11px;color:#94a3b8;">
+                This reminder was sent automatically by Avocarbon Supplier Management.
+              </p>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>"""
+
+        await send_email(
+            subject=subject,
+            recipients=to_recipients,
+            cc=cc_recipients or None,
+            body_html=body_html,
+            db=None,
+        )
+
+        plan.updated_at = datetime.now()
+        plan.updated_by = data.changed_by or "SYSTEM"
+        await self.db.commit()
+        await self.db.refresh(plan)
+        return plan
+
+    async def send_revision_request(
+        self,
+        relation_id: int,
+        plan_id: int,
+        data: schemas.SupplierDevelopmentPlanRevisionRequest,
+    ) -> SupplierDevelopmentPlan:
+        """Send a revision-request email to the supplier after plan rejection."""
+        relation = await self.get_relation(relation_id)
+        plan = await self.db.get(SupplierDevelopmentPlan, plan_id)
+        if not plan or plan.id_relation != relation_id:
+            raise AppException(
+                f"Supplier development plan with ID {plan_id} not found",
+                status_code=404,
+            )
+        if not plan.due_date:
+            raise AppException(
+                "A due date is required before sending the revision request.",
+                status_code=400,
+            )
+
+        if data.to_emails:
+            to_recipients = [e.strip() for e in data.to_emails if e.strip() and "@" in e]
+            cc_recipients = [e.strip() for e in (data.extra_cc_emails or []) if e.strip() and "@" in e]
+        else:
+            to_recipients, cc_recipients = await self._resolve_development_plan_email_targets(relation)
+            for extra in data.extra_cc_emails or []:
+                extra = extra.strip()
+                if extra and "@" in extra and extra not in to_recipients and extra not in cc_recipients:
+                    cc_recipients.append(extra)
+        if not to_recipients:
+            raise AppException(
+                "No supplier recipient email was found for this relation.",
+                status_code=400,
+            )
+
+        site_stmt = select(AvocarbonSite).where(AvocarbonSite.id_site == relation.id_site)
+        site = (await self.db.execute(site_stmt)).scalars().first()
+        site_name = site.site_name if site and site.site_name else f"Site #{relation.id_site}"
+
+        unit_stmt = select(SupplierUnit).where(SupplierUnit.id_supplier_unit == relation.id_supplier_unit)
+        unit = (await self.db.execute(unit_stmt)).scalars().first()
+        group_name: Optional[str] = None
+        if unit and unit.id_group:
+            group_stmt = select(SupplierGroup).where(SupplierGroup.id_group == unit.id_group)
+            group = (await self.db.execute(group_stmt)).scalars().first()
+            if group:
+                group_name = group.nom
+        supplier_display = (
+            group_name
+            or (unit.supplier_code if unit else None)
+            or f"Unit #{relation.id_supplier_unit}"
+        )
+
+        due_date_str = plan.due_date.strftime("%d %B %Y")
+        plan_title = plan.plan_title or f"Development Plan #{plan.id_development_plan}"
+        rejected_by = plan.rejected_by or "Avocarbon Committee"
+        rejection_reason = (plan.internal_comments or "").strip()
+        custom_message = (data.custom_message or "").strip()
+        relation_code = relation.relation_code or f"REL-{relation.id_relation:06d}"
+
+        rejection_block = ""
+        if rejection_reason:
+            rejection_block = f"""
+            <tr>
+              <td style="padding:0 32px 24px;">
+                <table width="100%" cellpadding="0" cellspacing="0" border="0"
+                       style="background:#fef2f2;border:1px solid #fecaca;border-radius:10px;">
+                  <tr>
+                    <td style="padding:16px 20px;">
+                      <p style="margin:0 0 6px;font-size:11px;font-weight:700;
+                                letter-spacing:0.08em;text-transform:uppercase;color:#991b1b;">
+                        Reason for Rejection
+                      </p>
+                      <p style="margin:0;font-size:14px;line-height:1.6;color:#7f1d1d;">
+                        {rejection_reason}
+                      </p>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>"""
+
+        custom_message_block = ""
+        if custom_message:
+            custom_message_block = f"""
+            <tr>
+              <td style="padding:0 32px 24px;">
+                <table width="100%" cellpadding="0" cellspacing="0" border="0"
+                       style="background:#fffbeb;border:1px solid #fde68a;border-radius:10px;">
+                  <tr>
+                    <td style="padding:16px 20px;">
+                      <p style="margin:0 0 4px;font-size:11px;font-weight:700;
+                                letter-spacing:0.08em;text-transform:uppercase;color:#92400e;">
+                        Message from Avocarbon Purchasing
+                      </p>
+                      <p style="margin:0;font-size:14px;line-height:1.6;color:#78350f;">
+                        {custom_message}
+                      </p>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>"""
+
+        subject = f"[Action Required] Development Plan Revision — {supplier_display} · {site_name}"
+        body_html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Development Plan Revision Required</title>
+</head>
+<body style="margin:0;padding:0;background-color:#f1f5f9;font-family:'Segoe UI',Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" border="0"
+         style="background-color:#f1f5f9;padding:32px 16px;">
+    <tr>
+      <td align="center">
+        <table width="600" cellpadding="0" cellspacing="0" border="0"
+               style="max-width:600px;width:100%;background:#ffffff;
+                      border-radius:16px;overflow:hidden;
+                      box-shadow:0 4px 24px rgba(15,39,68,0.10);">
+          <!-- Header -->
+          <tr>
+            <td style="background:linear-gradient(135deg,#78350f 0%,#d97706 100%);
+                        padding:32px 32px 28px;">
+              <table width="100%" cellpadding="0" cellspacing="0" border="0">
+                <tr>
+                  <td>
+                    <p style="margin:0;font-size:13px;font-weight:700;
+                               letter-spacing:0.18em;text-transform:uppercase;
+                               color:rgba(255,255,255,0.55);">
+                      Avocarbon · Supplier Management
+                    </p>
+                    <h1 style="margin:8px 0 0;font-size:22px;font-weight:700;
+                                color:#ffffff;line-height:1.3;">
+                      {supplier_display}
+                    </h1>
+                    <p style="margin:6px 0 0;font-size:13px;color:rgba(255,255,255,0.75);">
+                      Plan Revision Required &nbsp;·&nbsp; {site_name}
+                    </p>
+                  </td>
+                  <td align="right" valign="top" style="padding-top:4px;white-space:nowrap;">
+                    <span style="display:inline-block;background:rgba(255,255,255,0.15);
+                                  border:1px solid rgba(255,255,255,0.25);border-radius:6px;
+                                  padding:6px 14px;font-size:12px;font-weight:700;
+                                  color:#ffffff;letter-spacing:0.04em;">
+                      REVISION
+                    </span>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+          <!-- Rejection banner -->
+          <tr>
+            <td style="background:#dc2626;padding:10px 32px;">
+              <p style="margin:0;font-size:12px;font-weight:700;
+                         letter-spacing:0.12em;text-transform:uppercase;color:#ffffff;">
+                ✗&nbsp; Previous submission was not accepted &nbsp;·&nbsp; Rejected by {rejected_by}
+              </p>
+            </td>
+          </tr>
+          <!-- Greeting -->
+          <tr>
+            <td style="padding:28px 32px 16px;">
+              <p style="margin:0;font-size:15px;line-height:1.7;color:#1e293b;">
+                Dear <strong style="color:#062B49;">{supplier_display}</strong>,
+              </p>
+              <p style="margin:12px 0 0;font-size:15px;line-height:1.7;color:#334155;">
+                The development plan you submitted for the
+                <strong style="color:#062B49;">{site_name}</strong> plant has been reviewed
+                by the Avocarbon committee and was <strong style="color:#dc2626;">not accepted</strong>.
+                Please review the reason below and submit a revised plan before the new deadline.
+              </p>
+            </td>
+          </tr>
+          {rejection_block}
+          <!-- Plan details -->
+          <tr>
+            <td style="padding:0 32px 24px;">
+              <table width="100%" cellpadding="0" cellspacing="0" border="0"
+                     style="border:1px solid #e2e8f0;border-radius:10px;overflow:hidden;font-size:13px;">
+                <thead>
+                  <tr style="background:#f8fafc;">
+                    <th colspan="2" style="padding:10px 16px;text-align:left;
+                               font-size:10px;font-weight:700;letter-spacing:0.14em;
+                               text-transform:uppercase;color:#64748b;
+                               border-bottom:1px solid #e2e8f0;">
+                      Plan Details
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr style="border-bottom:1px solid #f1f5f9;">
+                    <td style="padding:11px 16px;color:#64748b;font-weight:600;width:38%;">Supplier</td>
+                    <td style="padding:11px 16px;color:#0f172a;font-weight:700;">{supplier_display}</td>
+                  </tr>
+                  <tr style="background:#f8fafc;border-bottom:1px solid #f1f5f9;">
+                    <td style="padding:11px 16px;color:#64748b;font-weight:600;">Plan</td>
+                    <td style="padding:11px 16px;color:#0f172a;">{plan_title}</td>
+                  </tr>
+                  <tr style="border-bottom:1px solid #f1f5f9;">
+                    <td style="padding:11px 16px;color:#64748b;font-weight:600;">Reference</td>
+                    <td style="padding:11px 16px;color:#64748b;font-family:monospace;font-size:12px;">{relation_code}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding:11px 16px;color:#64748b;font-weight:600;">New Deadline</td>
+                    <td style="padding:11px 16px;">
+                      <strong style="color:#dc2626;font-size:14px;">{due_date_str}</strong>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </td>
+          </tr>
+          {custom_message_block}
+          <!-- What to do -->
+          <tr>
+            <td style="padding:0 32px 28px;">
+              <table width="100%" cellpadding="0" cellspacing="0" border="0"
+                     style="background:#fffbeb;border:1px solid #fde68a;border-radius:10px;">
+                <tr>
+                  <td style="padding:16px 20px;">
+                    <p style="margin:0 0 10px;font-size:13px;font-weight:700;color:#92400e;">
+                      What you need to do
+                    </p>
+                    <table cellpadding="0" cellspacing="0" border="0">
+                      <tr>
+                        <td valign="top" style="padding:3px 10px 3px 0;font-size:14px;color:#d97706;">&#10003;</td>
+                        <td style="padding:3px 0;font-size:13px;line-height:1.6;color:#78350f;">
+                          Review the reason for rejection above
+                        </td>
+                      </tr>
+                      <tr>
+                        <td valign="top" style="padding:3px 10px 3px 0;font-size:14px;color:#d97706;">&#10003;</td>
+                        <td style="padding:3px 0;font-size:13px;line-height:1.6;color:#78350f;">
+                          Prepare a revised development plan addressing the committee's feedback
+                        </td>
+                      </tr>
+                      <tr>
+                        <td valign="top" style="padding:3px 10px 3px 0;font-size:14px;color:#d97706;">&#10003;</td>
+                        <td style="padding:3px 0;font-size:13px;line-height:1.6;color:#78350f;">
+                          Submit the revised plan before <strong>{due_date_str}</strong>
+                        </td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+          <!-- Footer -->
+          <tr>
+            <td style="background:#f8fafc;border-top:1px solid #e2e8f0;padding:20px 32px;text-align:center;">
+              <p style="margin:0;font-size:12px;line-height:1.6;color:#94a3b8;">
+                This message was sent automatically by the Avocarbon Supplier Management platform.<br/>
+                Please do not reply directly to this email — contact your Avocarbon purchasing representative.
+              </p>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>"""
+
+        await send_email(
+            subject=subject,
+            recipients=to_recipients,
+            cc=cc_recipients or None,
+            body_html=body_html,
+            db=None,
+        )
+
+        plan.updated_at = datetime.now()
+        plan.updated_by = data.changed_by or "SYSTEM"
+        await self.db.commit()
+        await self.db.refresh(plan)
+        return plan
+
+    async def send_decision_notification(
+        self,
+        relation_id: int,
+        plan_id: int,
+        data: schemas.SupplierDevelopmentPlanDecisionNotification,
+    ) -> None:
+        """Notify the supplier of the committee's Approved or Rejected decision."""
+        relation = await self.get_relation(relation_id)
+        plan = await self.db.get(SupplierDevelopmentPlan, plan_id)
+        if not plan or plan.id_relation != relation_id:
+            raise AppException(
+                f"Supplier development plan with ID {plan_id} not found",
+                status_code=404,
+            )
+
+        if data.to_emails:
+            to_recipients = [e.strip() for e in data.to_emails if e.strip() and "@" in e]
+            cc_recipients = [e.strip() for e in (data.extra_cc_emails or []) if e.strip() and "@" in e]
+        else:
+            to_recipients, cc_recipients = await self._resolve_development_plan_email_targets(relation)
+            for extra in data.extra_cc_emails or []:
+                extra = extra.strip()
+                if extra and "@" in extra and extra not in to_recipients and extra not in cc_recipients:
+                    cc_recipients.append(extra)
+        if not to_recipients:
+            raise AppException(
+                "No supplier recipient email was found for this relation.",
+                status_code=400,
+            )
+
+        site_stmt = select(AvocarbonSite).where(AvocarbonSite.id_site == relation.id_site)
+        site = (await self.db.execute(site_stmt)).scalars().first()
+        site_name = site.site_name if site and site.site_name else f"Site #{relation.id_site}"
+
+        unit_stmt = select(SupplierUnit).where(SupplierUnit.id_supplier_unit == relation.id_supplier_unit)
+        unit = (await self.db.execute(unit_stmt)).scalars().first()
+        group_name: Optional[str] = None
+        if unit and unit.id_group:
+            group_stmt = select(SupplierGroup).where(SupplierGroup.id_group == unit.id_group)
+            group = (await self.db.execute(group_stmt)).scalars().first()
+            if group:
+                group_name = group.nom
+        supplier_display = (
+            group_name
+            or (unit.supplier_code if unit else None)
+            or f"Unit #{relation.id_supplier_unit}"
+        )
+
+        plan_title = plan.plan_title or f"Development Plan #{plan.id_development_plan}"
+        relation_code = relation.relation_code or f"REL-{relation.id_relation:06d}"
+        decision = (data.decision or "").strip().lower()
+        is_approved = decision == "approved"
+        decided_by = (
+            plan.approved_by if is_approved else plan.rejected_by
+        ) or "Avocarbon Committee"
+        custom_message = (data.custom_message or "").strip()
+
+        decision_date_str = ""
+        decision_date_val = plan.decision_date or date.today()
+        decision_date_str = decision_date_val.strftime("%d %B %Y")
+
+        custom_message_block = ""
+        if custom_message:
+            custom_message_block = f"""
+            <tr>
+              <td style="padding:0 32px 24px;">
+                <table width="100%" cellpadding="0" cellspacing="0" border="0"
+                       style="background:#fffbeb;border:1px solid #fde68a;border-radius:10px;">
+                  <tr>
+                    <td style="padding:16px 20px;">
+                      <p style="margin:0 0 4px;font-size:11px;font-weight:700;
+                                letter-spacing:0.08em;text-transform:uppercase;color:#92400e;">
+                        Message from Avocarbon Purchasing
+                      </p>
+                      <p style="margin:0;font-size:14px;line-height:1.6;color:#78350f;">
+                        {custom_message}
+                      </p>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>"""
+
+        if is_approved:
+            header_gradient = "linear-gradient(135deg,#14532d 0%,#16a34a 100%)"
+            banner_bg = "#16a34a"
+            banner_icon = "✓"
+            banner_text = f"Plan Approved &nbsp;·&nbsp; {decided_by} &nbsp;·&nbsp; {decision_date_str}"
+            greeting_body = (
+                f"We are pleased to inform you that your development plan for the "
+                f"<strong style='color:#062B49;'>{site_name}</strong> plant has been "
+                f"<strong style='color:#15803d;'>approved</strong> by the Avocarbon committee. "
+                f"Thank you for your commitment to continuous improvement."
+            )
+            badge_label = "APPROVED"
+            outcome_block = """
+            <tr>
+              <td style="padding:0 32px 28px;">
+                <table width="100%" cellpadding="0" cellspacing="0" border="0"
+                       style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;">
+                  <tr>
+                    <td style="padding:16px 20px;">
+                      <p style="margin:0 0 8px;font-size:13px;font-weight:700;color:#14532d;">
+                        Next Steps
+                      </p>
+                      <p style="margin:0;font-size:13px;line-height:1.6;color:#166534;">
+                        Please proceed with the implementation of the agreed actions in your plan.
+                        Avocarbon Purchasing will follow up on progress during the next evaluation cycle.
+                      </p>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>"""
+        else:
+            rejection_reason = (plan.internal_comments or "").strip()
+            header_gradient = "linear-gradient(135deg,#7f1d1d 0%,#dc2626 100%)"
+            banner_bg = "#dc2626"
+            banner_icon = "✗"
+            banner_text = f"Plan Not Accepted &nbsp;·&nbsp; {decided_by} &nbsp;·&nbsp; {decision_date_str}"
+            greeting_body = (
+                f"Following the committee review, your development plan for the "
+                f"<strong style='color:#062B49;'>{site_name}</strong> plant has "
+                f"<strong style='color:#dc2626;'>not been accepted</strong>. "
+                f"You will receive a separate email shortly with instructions to submit a revised plan."
+            )
+            badge_label = "REJECTED"
+            reason_content = (
+                f"<p style='margin:0 0 4px;font-size:11px;font-weight:700;"
+                f"letter-spacing:0.08em;text-transform:uppercase;color:#991b1b;'>Reason</p>"
+                f"<p style='margin:0;font-size:14px;line-height:1.6;color:#7f1d1d;'>{rejection_reason}</p>"
+            ) if rejection_reason else (
+                "<p style='margin:0;font-size:13px;color:#7f1d1d;'>Contact your Avocarbon purchasing representative for details.</p>"
+            )
+            outcome_block = f"""
+            <tr>
+              <td style="padding:0 32px 28px;">
+                <table width="100%" cellpadding="0" cellspacing="0" border="0"
+                       style="background:#fef2f2;border:1px solid #fecaca;border-radius:10px;">
+                  <tr>
+                    <td style="padding:16px 20px;">
+                      {reason_content}
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>"""
+
+        subject = (
+            f"[Decision] Development Plan {'Approved' if is_approved else 'Not Accepted'} "
+            f"— {supplier_display} · {site_name}"
+        )
+        body_html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Development Plan Decision</title>
+</head>
+<body style="margin:0;padding:0;background-color:#f1f5f9;font-family:'Segoe UI',Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" border="0"
+         style="background-color:#f1f5f9;padding:32px 16px;">
+    <tr>
+      <td align="center">
+        <table width="600" cellpadding="0" cellspacing="0" border="0"
+               style="max-width:600px;width:100%;background:#ffffff;
+                      border-radius:16px;overflow:hidden;
+                      box-shadow:0 4px 24px rgba(15,39,68,0.10);">
+          <!-- Header -->
+          <tr>
+            <td style="background:{header_gradient};padding:32px 32px 28px;">
+              <table width="100%" cellpadding="0" cellspacing="0" border="0">
+                <tr>
+                  <td>
+                    <p style="margin:0;font-size:13px;font-weight:700;
+                               letter-spacing:0.18em;text-transform:uppercase;
+                               color:rgba(255,255,255,0.55);">
+                      Avocarbon · Supplier Management
+                    </p>
+                    <h1 style="margin:8px 0 0;font-size:22px;font-weight:700;
+                                color:#ffffff;line-height:1.3;">
+                      {supplier_display}
+                    </h1>
+                    <p style="margin:6px 0 0;font-size:13px;color:rgba(255,255,255,0.75);">
+                      Committee Decision &nbsp;·&nbsp; {site_name}
+                    </p>
+                  </td>
+                  <td align="right" valign="top" style="padding-top:4px;white-space:nowrap;">
+                    <span style="display:inline-block;background:rgba(255,255,255,0.15);
+                                  border:1px solid rgba(255,255,255,0.25);border-radius:6px;
+                                  padding:6px 14px;font-size:12px;font-weight:700;
+                                  color:#ffffff;letter-spacing:0.04em;">
+                      {badge_label}
+                    </span>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+          <!-- Decision banner -->
+          <tr>
+            <td style="background:{banner_bg};padding:10px 32px;">
+              <p style="margin:0;font-size:12px;font-weight:700;
+                         letter-spacing:0.12em;text-transform:uppercase;color:#ffffff;">
+                {banner_icon}&nbsp; {banner_text}
+              </p>
+            </td>
+          </tr>
+          <!-- Greeting -->
+          <tr>
+            <td style="padding:28px 32px 20px;">
+              <p style="margin:0;font-size:15px;line-height:1.7;color:#1e293b;">
+                Dear <strong style="color:#062B49;">{supplier_display}</strong>,
+              </p>
+              <p style="margin:12px 0 0;font-size:15px;line-height:1.7;color:#334155;">
+                {greeting_body}
+              </p>
+            </td>
+          </tr>
+          <!-- Plan details -->
+          <tr>
+            <td style="padding:0 32px 24px;">
+              <table width="100%" cellpadding="0" cellspacing="0" border="0"
+                     style="border:1px solid #e2e8f0;border-radius:10px;overflow:hidden;font-size:13px;">
+                <tbody>
+                  <tr style="border-bottom:1px solid #f1f5f9;">
+                    <td style="padding:11px 16px;color:#64748b;font-weight:600;width:38%;">Plan</td>
+                    <td style="padding:11px 16px;color:#0f172a;">{plan_title}</td>
+                  </tr>
+                  <tr style="background:#f8fafc;border-bottom:1px solid #f1f5f9;">
+                    <td style="padding:11px 16px;color:#64748b;font-weight:600;">Plant</td>
+                    <td style="padding:11px 16px;color:#0f172a;">{site_name}</td>
+                  </tr>
+                  <tr>
+                    <td style="padding:11px 16px;color:#64748b;font-weight:600;">Reference</td>
+                    <td style="padding:11px 16px;color:#64748b;font-family:monospace;font-size:12px;">{relation_code}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </td>
+          </tr>
+          {outcome_block}
+          {custom_message_block}
+          <!-- Footer -->
+          <tr>
+            <td style="background:#f8fafc;border-top:1px solid #e2e8f0;padding:20px 32px;text-align:center;">
+              <p style="margin:0;font-size:12px;line-height:1.6;color:#94a3b8;">
+                This message was sent automatically by the Avocarbon Supplier Management platform.<br/>
+                Please do not reply directly — contact your Avocarbon purchasing representative for any questions.
+              </p>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>"""
+
+        await send_email(
+            subject=subject,
+            recipients=to_recipients,
+            cc=cc_recipients or None,
+            body_html=body_html,
+            db=None,
+        )
+
     async def send_development_plan_review_notification(
         self,
         relation_id: int,
@@ -2625,11 +3409,9 @@ class SupplierRelationService:
             plan_status=PLAN_STATUS_MUST_BE_SEND,
             issue_date=evaluation_date,
             due_date=evaluation_date + timedelta(days=30),
-            business_hold_active=True,
             internal_comments=reason
             or (
-                f"Auto-created: supplier status moved to '{STATUS_NEW_BUSINESS_ON_HOLD}' "
-                f"(final grade: {final_grade_label})."
+                f"Auto-created: evaluation grade {final_grade_label} triggered a development plan."
             ),
             updated_by=changed_by or "SYSTEM",
         )

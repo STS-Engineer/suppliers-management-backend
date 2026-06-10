@@ -641,7 +641,7 @@ async def ingest_batch(
             existing_plan_stmt = select(SupplierDevelopmentPlan).where(
                 SupplierDevelopmentPlan.id_relation == relation.id_relation,
                 SupplierDevelopmentPlan.plan_status.in_(
-                    ["Required", "Requested", "In Progress"]
+                    ["Must be send", "Request sent", "Received", "Under Review"]
                 ),
                 SupplierDevelopmentPlan.is_deleted.is_(False),
             )
@@ -668,7 +668,7 @@ async def ingest_batch(
                 dev_plan = SupplierDevelopmentPlan(
                     id_relation=relation.id_relation,
                     plan_title=title,
-                    plan_status="Required",
+                    plan_status="Must be send",
                     issue_date=row.evaluation_date,
                     due_date=plan_due,
                     internal_comments=internal_note,

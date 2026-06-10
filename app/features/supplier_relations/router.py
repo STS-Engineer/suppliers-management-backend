@@ -373,6 +373,63 @@ async def delete_plan_document(
         raise
 
 
+@router.post("/{relation_id}/development-plans/{plan_id}/send-reminder", response_model=dict)
+async def send_development_plan_reminder(
+    relation_id: int,
+    plan_id: int,
+    data: schemas.SupplierDevelopmentPlanSendReminder,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    try:
+        service = SupplierRelationService(db)
+        await service.send_development_plan_reminder(relation_id, plan_id, data)
+        return {
+            "status": "success",
+            "message": "Reminder email sent to supplier.",
+        }
+    except AppException:
+        raise
+    except Exception:
+        raise
+
+
+@router.post("/{relation_id}/development-plans/{plan_id}/send-revision-request", response_model=dict)
+async def send_revision_request(
+    relation_id: int,
+    plan_id: int,
+    data: schemas.SupplierDevelopmentPlanRevisionRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    try:
+        service = SupplierRelationService(db)
+        await service.send_revision_request(relation_id, plan_id, data)
+        return {"status": "success", "message": "Revision request email sent to supplier."}
+    except AppException:
+        raise
+    except Exception:
+        raise
+
+
+@router.post("/{relation_id}/development-plans/{plan_id}/send-decision-notification", response_model=dict)
+async def send_decision_notification(
+    relation_id: int,
+    plan_id: int,
+    data: schemas.SupplierDevelopmentPlanDecisionNotification,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    try:
+        service = SupplierRelationService(db)
+        await service.send_decision_notification(relation_id, plan_id, data)
+        return {"status": "success", "message": "Decision notification email sent to supplier."}
+    except AppException:
+        raise
+    except Exception:
+        raise
+
+
 @router.post(
     "/{relation_id}/development-plans/{plan_id}/send-received-notification",
     response_model=dict,

@@ -100,6 +100,28 @@ class SupplierDevelopmentPlanSendRequest(BaseModel):
     extra_cc_emails: Optional[list[str]] = None
 
 
+class SupplierDevelopmentPlanSendReminder(BaseModel):
+    changed_by: Optional[str] = None
+    custom_message: Optional[str] = None
+    to_emails: Optional[list[str]] = None
+    extra_cc_emails: Optional[list[str]] = None
+
+
+class SupplierDevelopmentPlanRevisionRequest(BaseModel):
+    changed_by: Optional[str] = None
+    custom_message: Optional[str] = None
+    to_emails: Optional[list[str]] = None
+    extra_cc_emails: Optional[list[str]] = None
+
+
+class SupplierDevelopmentPlanDecisionNotification(BaseModel):
+    decision: str = Field(..., pattern="^(approved|rejected)$")
+    changed_by: Optional[str] = None
+    custom_message: Optional[str] = None
+    to_emails: Optional[list[str]] = None
+    extra_cc_emails: Optional[list[str]] = None
+
+
 class SupplierDevelopmentPlanReviewNotificationRequest(BaseModel):
     changed_by: Optional[str] = None
     custom_message: Optional[str] = None
