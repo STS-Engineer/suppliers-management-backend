@@ -2011,9 +2011,12 @@ class Opportunity(GovernanceMixin, Base):
     validation_request_sent_by: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
     # Budget & validation tracking
     budget_status: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    budget_confirmed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    budget_confirmed_by: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
     val_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    # Computed end date: planned_start_date + duration_months
+    planned_end_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
     # Study start date = when buyer clicked "Start Study" (Assigned → Working on it)
-    # Olivier: "je clique sur working on it et du coup ça me valide la date de l'opportunité"
     study_start_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
     # Phase 2: when execution work began (tooling ordered, supplier contacted)
     execution_start_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
@@ -2063,6 +2066,20 @@ class Opportunity(GovernanceMixin, Base):
     # Cash savings components
     cash_inventory_gap: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2), nullable=True)
     cash_ap_gap: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2), nullable=True)
+    # Consignment (Yes/No) — used in inventory gap formula
+    consignment_before: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    consignment_after: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    # Before-prices for years N+1, N+2, N+3 (current supplier price evolution)
+    current_price_n1: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 6), nullable=True)
+    current_price_n2: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 6), nullable=True)
+    current_price_n3: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 6), nullable=True)
+    # 4th investment cost line ("Other")
+    other_cost: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2), nullable=True)
+    # Risks — JSONB: keys material_indexation/exchange_rate/local_content/quality/other (before+after)
+    # plus spec questions: material_same_spec / same_tooling / same_dimension (Yes/No)
+    stp_risks: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    # Benefits narrative — JSONB: keys if_we_do / if_not
+    stp_benefits: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
     # Planning (weeks per phase)
     phase1_weeks: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     phase2_weeks: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
@@ -2191,6 +2208,9 @@ class FinancialLine(GovernanceMixin, Base):
     # Recovery
     recovery_status: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     recovery_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    recovery_target_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    recovery_amount: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2), nullable=True)
+    recovery_history: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     recovery_updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     recovery_updated_by: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
 
