@@ -478,24 +478,33 @@ class PurchasingValueService:
 
         if payload.to_emails:
             try:
-                import tempfile, os
-                body = _build_phase0_submit_email(opp, payload.message, payload.committee_type if hasattr(payload, "committee_type") else None)
-                pdf_bytes = generate_stp_pdf(opp, phase=0)
-                safe = (opp.opportunity_name or "STP").replace(" ", "_")[:50]
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf", prefix=f"STP_Phase0_{safe}_") as tmp:
-                    tmp.write(pdf_bytes)
-                    tmp_path = tmp.name
-                try:
-                    await send_email_with_attachment(
+                body = _build_phase0_submit_email(opp, payload.message, None)
+                non_stp = opp.opportunity_type in ("Negotiation", "Cash")
+                if non_stp:
+                    await send_email(
                         subject=f"[Phase 0 Review] Opportunity: {opp.opportunity_name}",
                         recipients=payload.to_emails,
                         body_html=body,
                         cc=payload.cc_emails or [],
-                        attachment_path=tmp_path,
-                        attachment_filename=f"STP_Phase0_{safe}.pdf",
                     )
-                finally:
-                    os.unlink(tmp_path)
+                else:
+                    import tempfile, os
+                    pdf_bytes = generate_stp_pdf(opp, phase=0)
+                    safe = (opp.opportunity_name or "opp").replace(" ", "_")[:50]
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf", prefix=f"STP_Phase0_{safe}_") as tmp:
+                        tmp.write(pdf_bytes)
+                        tmp_path = tmp.name
+                    try:
+                        await send_email_with_attachment(
+                            subject=f"[Phase 0 Review] Opportunity: {opp.opportunity_name}",
+                            recipients=payload.to_emails,
+                            body_html=body,
+                            cc=payload.cc_emails or [],
+                            attachment_path=tmp_path,
+                            attachment_filename=f"STP_Phase0_{safe}.pdf",
+                        )
+                    finally:
+                        os.unlink(tmp_path)
             except Exception:
                 pass
 
@@ -526,24 +535,33 @@ class PurchasingValueService:
         # Email is optional: only sent if to_emails explicitly provided
         if payload.to_emails:
             try:
-                import tempfile, os
                 body = _build_committee_email(opp, payload.message, committee)
-                pdf_bytes = generate_stp_pdf(opp, phase=1)
-                safe = (opp.opportunity_name or "STP").replace(" ", "_")[:50]
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf", prefix=f"STP_Phase1_{safe}_") as tmp:
-                    tmp.write(pdf_bytes)
-                    tmp_path = tmp.name
-                try:
-                    await send_email_with_attachment(
+                non_stp = opp.opportunity_type in ("Negotiation", "Cash")
+                if non_stp:
+                    await send_email(
                         subject=f"[Committee Review] Feasibility Study — {opp.opportunity_name}",
                         recipients=payload.to_emails,
                         body_html=body,
                         cc=payload.cc_emails or [],
-                        attachment_path=tmp_path,
-                        attachment_filename=f"STP_Phase1_{safe}.pdf",
                     )
-                finally:
-                    os.unlink(tmp_path)
+                else:
+                    import tempfile, os
+                    pdf_bytes = generate_stp_pdf(opp, phase=1)
+                    safe = (opp.opportunity_name or "opp").replace(" ", "_")[:50]
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf", prefix=f"STP_Phase1_{safe}_") as tmp:
+                        tmp.write(pdf_bytes)
+                        tmp_path = tmp.name
+                    try:
+                        await send_email_with_attachment(
+                            subject=f"[Committee Review] Feasibility Study — {opp.opportunity_name}",
+                            recipients=payload.to_emails,
+                            body_html=body,
+                            cc=payload.cc_emails or [],
+                            attachment_path=tmp_path,
+                            attachment_filename=f"STP_Phase1_{safe}.pdf",
+                        )
+                    finally:
+                        os.unlink(tmp_path)
             except Exception:
                 pass
 
