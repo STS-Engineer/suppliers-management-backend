@@ -13,6 +13,12 @@ class AppException(Exception):
         error_code: Optional[str] = None,
         details: Optional[Dict[str, Any]] = None,
     ):
+        # Backward-compatible with the (status_code, message, error_code) call order
+        # used in some feature modules (e.g. purchasing_value): if the first arg is an
+        # int status code and the second a string message, swap them so status_code
+        # always ends up an int.
+        if isinstance(message, int) and not isinstance(status_code, int):
+            message, status_code = status_code, message
         self.message = message
         self.status_code = status_code
         self.error_code = error_code or self.__class__.__name__
