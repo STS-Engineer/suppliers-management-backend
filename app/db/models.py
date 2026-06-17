@@ -316,6 +316,16 @@ class SupplierUnit(TimestampMixin, GovernanceMixin, Base):
     green_electricity_pct: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
     copper_brass_pct: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
     category: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    continent: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    area: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    main_plants: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    supplier_email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    commodity_responsible: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    scope1_ghg: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 4), nullable=True)
+    scope2_ghg: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 4), nullable=True)
+    ghg_comments: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    ghg_requested_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    ghg_completion_pct: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     amount_value: Mapped[Optional[Decimal]] = mapped_column(
         Numeric(18, 2), nullable=True
     )
@@ -335,6 +345,9 @@ class SupplierUnit(TimestampMixin, GovernanceMixin, Base):
         back_populates="supplier_unit",
         cascade="all, delete-orphan",
         passive_deletes=True,
+    )
+    carbon_footprints: Mapped[List["SupplierCarbonFootprint"]] = relationship(
+        back_populates="supplier_unit",
     )
     certifications: Mapped[List["SupplierCertification"]] = relationship(
         back_populates="supplier_unit",
@@ -408,6 +421,19 @@ class SupplierSiteRelation(GovernanceMixin, Base):
     evaluation_suggestion: Mapped[Optional[str]] = mapped_column(
         String(255), nullable=True
     )
+    last_eval_score: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    transit_days: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    transport_mode: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    real_ap_days: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    real_ap_days_validated: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    incoterm_place: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    consignment: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    preferred_dev_supplier: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    data_validity: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    quality_cert_required: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    delivery_status: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    req_ap_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    sb1_item_name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
     created_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime, server_default=func.current_timestamp(), nullable=True
     )
@@ -495,12 +521,41 @@ class SupplierSiteRelation(GovernanceMixin, Base):
     development_plans: Mapped[List["SupplierDevelopmentPlan"]] = relationship(
         back_populates="relation", cascade="all, delete-orphan", passive_deletes=True
     )
+    carbon_footprints: Mapped[List["SupplierCarbonFootprint"]] = relationship(
+        back_populates="relation",
+    )
 
     def __repr__(self) -> str:
         return (
             f"<SupplierSiteRelation id={self.id_relation} "
             f"site={self.id_site} unit={self.id_supplier_unit}>"
         )
+
+
+class SupplierCarbonFootprint(Base):
+    """Carbon footprint data per supplier entity × plant × year (from SB8 board)."""
+    __tablename__ = "supplier_carbon_footprint"
+
+    id_carbon_footprint: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id_supplier_unit: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("supplier_unit.id_supplier_unit"), nullable=True)
+    id_relation: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("supplier_site_relation.id_relation"), nullable=True)
+    year: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    carbon_fp_grade: Mapped[Optional[str]] = mapped_column(String(5), nullable=True)
+    purchase_amount: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2), nullable=True)
+    weighted_footprint: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 6), nullable=True)
+    production_fp_grade: Mapped[Optional[str]] = mapped_column(String(5), nullable=True)
+    transport_impact: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 4), nullable=True)
+    global_fp_impact: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 4), nullable=True)
+    supplier_origin: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    supplier_continent: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    site_location: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    site_continent: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    is_deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[Optional[datetime]] = mapped_column(DateTime, server_default=func.current_timestamp(), nullable=True)
+    updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    supplier_unit: Mapped[Optional["SupplierUnit"]] = relationship(back_populates="carbon_footprints")
+    relation: Mapped[Optional["SupplierSiteRelation"]] = relationship(back_populates="carbon_footprints")
 
 
 class SupplierStatusHistory(TimestampMixin, Base):
@@ -579,6 +634,9 @@ class SupplierDevelopmentPlan(TimestampMixin, GovernanceMixin, Base):
     file_notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     supplier_comments: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     internal_comments: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    decision: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    commodity: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    plant: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
 
     relation: Mapped["SupplierSiteRelation"] = relationship(
         back_populates="development_plans"
@@ -1987,6 +2045,10 @@ class Opportunity(GovernanceMixin, Base):
     )
     status2: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     change_mode: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    # Transaction currency of the monetary figures + rate to the group reporting
+    # currency (EUR). Consolidated views convert via amount × fx_rate_to_eur.
+    currency: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    fx_rate_to_eur: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 6), nullable=True)
     assumptions_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     # PLD prioritization — P × L × D scoring (1–5 each, max 125)
     payback_score: Mapped[Optional[Decimal]] = mapped_column(
@@ -2062,8 +2124,21 @@ class Opportunity(GovernanceMixin, Base):
     travel_cost: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2), nullable=True)
     qualification_cost: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2), nullable=True)
     total_investment: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2), nullable=True)
+    # ROI per Excel "format STP rev 1.2": full year F51 = (D51-D45)/D51, period F52 = (D52-D41)/D41
     roi_percent: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2), nullable=True)
-    # Cash savings components
+    roi_period_percent: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2), nullable=True)
+    # EBITDA savings "Period" (Excel D52) — 4-year saving over quantities N1..N4
+    period_saving: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2), nullable=True)
+    # Estimated saving per year (Excel D52 broken out). saving_year_n == expected_annual_saving
+    # (year N, incl. bonus); the four columns sum to period_saving.
+    saving_year_n: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2), nullable=True)
+    saving_year_n1: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2), nullable=True)
+    saving_year_n2: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2), nullable=True)
+    saving_year_n3: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2), nullable=True)
+    # Calendar-year prorated estimate {"2026": 1234.56, ...}, anchored on planned_start_date.
+    # A mid-year start puts a partial amount in the first calendar year, remainder rolls forward.
+    saving_by_year: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    # Cash savings components — auto-computed (Excel D55/D56)
     cash_inventory_gap: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2), nullable=True)
     cash_ap_gap: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2), nullable=True)
     # Consignment (Yes/No) — used in inventory gap formula
@@ -2090,6 +2165,10 @@ class Opportunity(GovernanceMixin, Base):
     reason_quality: Mapped[bool] = mapped_column(Boolean, server_default="false", nullable=False)
     reason_capacity: Mapped[bool] = mapped_column(Boolean, server_default="false", nullable=False)
     reason_other: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    # Excel Phase 0 row 8 — secondary Avocarbon plants impacted (free text, comma-separated)
+    secondary_plants: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Excel Phase 0 C67 — "Conditions / Actions requested" at the committee gate
+    gate_conditions: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     plant: Mapped[Optional["AvocarbonSite"]] = relationship(
         back_populates="opportunities"
@@ -2108,6 +2187,9 @@ class Opportunity(GovernanceMixin, Base):
         back_populates="opportunity", cascade="all, delete-orphan", passive_deletes=True
     )
     opp_documents: Mapped[List["OpportunityDocument"]] = relationship(
+        back_populates="opportunity", cascade="all, delete-orphan", passive_deletes=True
+    )
+    budget_years: Mapped[List["OpportunityBudgetYear"]] = relationship(
         back_populates="opportunity", cascade="all, delete-orphan", passive_deletes=True
     )
 
@@ -2293,6 +2375,40 @@ class OpportunityDocument(TimestampMixin, Base):
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     opportunity: Mapped["Opportunity"] = relationship(back_populates="opp_documents")
+
+
+class OpportunityBudgetYear(GovernanceMixin, Base):
+    """One budget record per opportunity per fiscal year.
+
+    The opportunity's annual saving is pro-rata-split across the fiscal years its
+    project runs (see compute_budget_year_portions). `budget_status` is the per-year
+    buyer decision (Empty | Opportunity | Budgeted) and is NEVER overwritten by the
+    recompute; `suggested_status` is the phase-derived default. Source of truth for
+    the budgeting module; `Opportunity.budget_status` is a derived rollup.
+    """
+
+    __tablename__ = "opportunity_budget_year"
+    __table_args__ = (
+        UniqueConstraint("opportunity_id", "fiscal_year", name="uq_oby_opp_year"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    opportunity_id: Mapped[int] = mapped_column(
+        ForeignKey("opportunity.opportunity_id", ondelete="CASCADE"), nullable=False
+    )
+    fiscal_year: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Pro-rata saving landing in this fiscal year
+    applicable_amount: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2), nullable=True)
+    # "Applicable" (partial start) | "Total" (full year) | "Residual" (partial tail)
+    portion_kind: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    # Phase-derived default ("Opportunity" pre-Phase 3, "Budgeted" Phase 3+)
+    suggested_status: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    # Buyer decision — overrides the suggestion, never clobbered by recompute
+    budget_status: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    status_locked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    status_locked_by: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+
+    opportunity: Mapped["Opportunity"] = relationship(back_populates="budget_years")
 
 
 class EmailDeliveryHistory(Base):
