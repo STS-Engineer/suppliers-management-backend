@@ -298,8 +298,9 @@ async def rebuild_monthly_profile(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
-    """Rebuild monthly expected rows using days-based pro-ration (× days/365).
-    Use this to correct existing lines that were created with the old ÷12 formula."""
+    """Rebuild monthly expected rows using equal monthly distribution (annual ÷ duration,
+    escalating per STP year-window where applicable). Use this to regenerate the monthly
+    profile for an existing line after its baseline or start date changed."""
     try:
         from app.db.models import FinancialLine as FL
         from sqlalchemy import select
@@ -315,7 +316,7 @@ async def rebuild_monthly_profile(
         await svc._rebuild_monthly_profile(line, line.expected_annual_saving, start, duration)
         await svc._recalculate_ytd(line_id)
         await db.commit()
-        return {"status": "success", "message": f"Rebuilt {duration} monthly rows using days-based pro-ration."}
+        return {"status": "success", "message": f"Rebuilt {duration} monthly rows using equal monthly distribution."}
     except AppException:
         await db.rollback(); raise
     except Exception:
@@ -641,6 +642,72 @@ async def delete_document(
         await svc.delete_document(doc_id)
         await db.commit()
         return {"status": "success", "message": "Document deleted"}
+    except AppException:
+        await db.rollback(); raise
+    except Exception:
+        await db.rollback(); raise
+
+
+# ── Per-fiscal-year budgeting ──────────────────────────────────────────────
+
+@router.get("/budget-years", response_model=dict)
+async def list_budget_years(
+    fiscal_year: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Opportunities with a budget record in the given fiscal year, for the
+    budgeting page (year filter)."""
+    svc = PurchasingValueService(db)
+    items = await svc.list_budget_years(fiscal_year)
+    # Consolidated totals are in EUR (group reporting currency) — opportunities may be
+    # recorded in EUR/USD/RMB/INR, so we sum the EUR-converted amounts.
+    def eur(i):
+        return i.get("applicable_amount_eur") or 0
+    total = sum(eur(i) for i in items)
+    budgeted = sum(eur(i) for i in items if i["budget_status"] == "Budgeted")
+    opportunity = sum(eur(i) for i in items if i["budget_status"] == "Opportunity")
+    validated = sum(eur(i) for i in items if i["suggested_status"] == "Validate")
+    return {
+        "status": "success",
+        "data": {
+            "items": items,
+            "fiscal_year": fiscal_year,
+            "reporting_currency": "EUR",
+            "summary": {
+                "total": len(items),
+                "total_applicable": round(total, 2),
+                "total_budgeted": round(budgeted, 2),
+                "total_opportunity": round(opportunity, 2),
+                "total_validated": round(validated, 2),
+            },
+        },
+    }
+
+
+@router.post("/budgets/{fiscal_year}/assign", response_model=dict)
+async def assign_budget(
+    fiscal_year: int,
+    payload: schemas.BudgetAssignRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Create Budget — set each chosen opportunity's per-year budget status
+    (Empty / Opportunity / Budgeted) for the given fiscal year. The decision is locked
+    so it survives recompute."""
+    decided_by = (
+        payload.decided_by
+        or current_user.get("email")
+        or current_user.get("upn")
+        or current_user.get("sub")
+    )
+    try:
+        svc = PurchasingValueService(db)
+        result = await svc.assign_budget_year(
+            fiscal_year, [d.model_dump() for d in payload.decisions], decided_by
+        )
+        await db.commit()
+        return {"status": "success", "data": result}
     except AppException:
         await db.rollback(); raise
     except Exception:

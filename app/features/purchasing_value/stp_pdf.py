@@ -246,7 +246,8 @@ def generate_stp_pdf(opp, phase: int = 0) -> bytes:
     story.append(_kv_table([
         ("Opportunity",  opp.opportunity_name or "—"),
         ("Type",         opp.opportunity_type or "—"),
-        ("Plant",        opp.plant.site_name if opp.plant else "—"),
+        ("Main Avocarbon Plant", opp.plant.site_name if opp.plant else "—"),
+        ("Secondary plants",     opp.secondary_plants or "—"),
         ("Description",  opp.description or "—"),
         ("Why",          "  ".join(filter(None, [
             "Productivity" if opp.reason_productivity else None,
@@ -374,14 +375,18 @@ def generate_stp_pdf(opp, phase: int = 0) -> bytes:
     story.append(cost_tbl)
     story.append(sp())
 
-    # ── EBITDA savings ───────────────────────────────────────────────────────
+    # ── EBITDA savings — Excel D51/D52 with ROI F51/F52 ─────────────────────
     story.append(_section_header("EBITDA Savings", [W]))
-    roi_str = _fmt(opp.roi_percent, suffix="%") if opp.roi_percent else "—"
+    roi_full_str = _fmt(opp.roi_percent, suffix="%") if opp.roi_percent is not None else "—"
+    roi_period_str = _fmt(opp.roi_period_percent, suffix="%") if opp.roi_period_percent is not None else "—"
     saving_data = [
         [_cell("Metric", bold=True), _cell("Value", bold=True), _cell("ROI", bold=True)],
         [_cell("Full year (1st)"),
          _cell(_fmt(opp.expected_annual_saving, prefix="€")),
-         _cell(roi_str)],
+         _cell(roi_full_str)],
+        [_cell("Period (N1–N4)"),
+         _cell(_fmt(opp.period_saving, prefix="€")),
+         _cell(roi_period_str)],
         [_cell("Duration"),
          _cell(f"{opp.duration_months or '—'} months"), _cell("")],
     ]
@@ -389,6 +394,17 @@ def generate_stp_pdf(opp, phase: int = 0) -> bytes:
     saving_tbl.setStyle(_tbl_style(header_rows=1, num_rows=len(saving_data)))
     story.append(saving_tbl)
     story.append(sp(0.2))
+
+    # Estimated saving by calendar year (start-date prorated)
+    by_year = opp.saving_by_year or {}
+    if by_year:
+        year_rows = [[_cell("Year", bold=True), _cell("Est. Saving", bold=True)]]
+        for yr in sorted(by_year.keys()):
+            year_rows.append([_cell(str(yr)), _cell(_fmt(by_year[yr], prefix="€"))])
+        year_tbl = Table(year_rows, colWidths=[W * 0.45, W * 0.55])
+        year_tbl.setStyle(_tbl_style(header_rows=1, num_rows=len(year_rows)))
+        story.append(year_tbl)
+        story.append(sp(0.2))
 
     # ── Cash savings ─────────────────────────────────────────────────────────
     story.append(_section_header("Cash Savings", [W]))
@@ -456,6 +472,7 @@ def generate_stp_pdf(opp, phase: int = 0) -> bytes:
 
     gate_rows = [
         ("Type of change",  opp.change_mode or "—"),
+        ("Conditions / Actions requested", opp.gate_conditions or "—"),
         ("Participants",    participants),
     ]
     if phase == 1 and opp.projects:
