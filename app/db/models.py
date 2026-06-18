@@ -2199,8 +2199,36 @@ class Opportunity(GovernanceMixin, Base):
         back_populates="opportunity", cascade="all, delete-orphan", passive_deletes=True
     )
 
+    phase_snapshots: Mapped[List["OpportunityPhaseSnapshot"]] = relationship(
+        back_populates="opportunity", cascade="all, delete-orphan", passive_deletes=True
+    )
+
     def __repr__(self) -> str:
         return f"<Opportunity id={self.opportunity_id} name={self.opportunity_name!r}>"
+
+
+class OpportunityPhaseSnapshot(GovernanceMixin, Base):
+    """Immutable audit record captured at every gate decision (Go / No Go / Review)."""
+
+    __tablename__ = "opportunity_phase_snapshot"
+
+    snapshot_id: Mapped[int] = mapped_column(
+        Integer, primary_key=True, autoincrement=True
+    )
+    opportunity_id: Mapped[int] = mapped_column(
+        ForeignKey("opportunity.opportunity_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    phase_from: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    phase_to: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    gate_decision: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    decided_by: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    decided_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    gate_comments: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    opportunity_snapshot: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+
+    opportunity: Mapped["Opportunity"] = relationship(back_populates="phase_snapshots")
 
 
 class Project(GovernanceMixin, Base):
@@ -2227,6 +2255,9 @@ class Project(GovernanceMixin, Base):
     off_tool_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
     committee_review_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
     committee_members: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Change type — per-phase value set in the Project tab
+    change_mode: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    change_mode_comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     opportunity: Mapped[Optional["Opportunity"]] = relationship(
         back_populates="projects"

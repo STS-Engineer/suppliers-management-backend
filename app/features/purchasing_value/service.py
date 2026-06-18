@@ -20,6 +20,7 @@ from app.db.models import (
     Opportunity,
     OpportunityBudgetYear,
     OpportunityDocument,
+    OpportunityPhaseSnapshot,
     Project,
     SupplierSiteRelation,
     SupplierUnit,
@@ -593,6 +594,56 @@ class PurchasingValueService:
     # Gate decision — core workflow engine
     # ------------------------------------------------------------------
 
+    _STP_SNAPSHOT_FIELDS: tuple = (
+        # Identity & status
+        "opportunity_name", "opportunity_type", "phase_status", "status",
+        "validation_decision", "idea_owner", "project_owner",
+        "budget_year", "supplier_id", "plant_id",
+        "change_mode",               # Standard | Silent — per-phase value at gate time
+        # Dates
+        "planned_start_date", "real_start_date",
+        "planned_end_date",          # computed: planned_start + duration_months
+        "val_date",                  # date of Phase 0 Go
+        "duration_months",
+        # STP price baseline
+        "current_price", "proposed_price",
+        "current_price_n1", "current_price_n2", "current_price_n3",
+        "proposed_price_n1", "proposed_price_n2", "proposed_price_n3",
+        # Quantities
+        "annual_quantity_n1", "annual_quantity_n2", "annual_quantity_n3", "annual_quantity_n4",
+        # Logistics
+        "incoterms_before", "incoterms_after",
+        "top_days_before", "top_days_after",
+        "transit_days_before", "transit_days_after",
+        "bonus_before", "bonus_after",
+        "consignment_before", "consignment_after",
+        # Costs
+        "tooling_cost", "travel_cost", "qualification_cost", "other_cost",
+        # Savings & ROI calculations
+        "saving_year_n", "saving_year_n1", "saving_year_n2", "saving_year_n3",
+        "period_saving",
+        "saving_by_year",            # JSONB — prorated by calendar year
+        "expected_annual_saving",
+        "roi_percent", "roi_period_percent",
+        "total_investment",
+        # Cash
+        "cash_impact", "cash_inventory_gap", "cash_ap_gap",
+    )
+
+    def _build_opportunity_snapshot(self, opp: "Opportunity") -> dict:
+        result: dict = {}
+        for field in self._STP_SNAPSHOT_FIELDS:
+            val = getattr(opp, field, None)
+            if val is None:
+                continue
+            if hasattr(val, "isoformat"):
+                result[field] = val.isoformat()
+            elif hasattr(val, "__round__"):
+                result[field] = float(val)
+            else:
+                result[field] = val
+        return result
+
     async def apply_gate_decision(
         self, opportunity_id: int, payload: GateDecisionRequest
     ) -> Opportunity:
@@ -603,6 +654,7 @@ class PurchasingValueService:
 
         opp = await self.get_opportunity(opportunity_id)
         now = datetime.utcnow()
+        phase_before = opp.phase_status or "Phase 0"
 
         # Store only Phase 0 gate decision in validation_decision (the primary Go/No Go)
         # Later phases record their decision in comments to preserve Phase 0 outcome
@@ -720,12 +772,35 @@ class PurchasingValueService:
         # Phase change shifts the suggested per-year status (e.g. → "Budgeted" at Phase 3)
         await self._sync_budget_years(opp)
 
+        _snap = OpportunityPhaseSnapshot(
+            opportunity_id=opp.opportunity_id,
+            phase_from=phase_before,
+            phase_to=opp.phase_status,
+            gate_decision=payload.decision,
+            decided_by=payload.decided_by,
+            decided_at=now,
+            gate_comments=payload.comments,
+            opportunity_snapshot=self._build_opportunity_snapshot(opp),
+            created_at=now,
+            created_by=payload.decided_by,
+        )
+        self.db.add(_snap)
+
         await self.db.flush()
         await self.db.refresh(
             opp,
             ["projects", "financial_lines", "opp_documents", "budget_years", "plant"],
         )
         return opp
+
+    async def get_phase_history(self, opportunity_id: int) -> list:
+        from sqlalchemy import select as _select
+        res = await self.db.execute(
+            _select(OpportunityPhaseSnapshot)
+            .where(OpportunityPhaseSnapshot.opportunity_id == opportunity_id)
+            .order_by(OpportunityPhaseSnapshot.decided_at)
+        )
+        return res.scalars().all()
 
     # ------------------------------------------------------------------
     # Start Phase 0 study (Assigned → Working on it)

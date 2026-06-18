@@ -4,7 +4,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Dict, Optional, List
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # ---------------------------------------------------------------------------
@@ -560,10 +560,26 @@ class ProjectResponse(BaseModel):
     off_tool_date: Optional[date] = None
     committee_review_date: Optional[date] = None
     committee_members: Optional[str] = None
+    change_mode: Optional[str] = None
+    change_mode_comment: Optional[str] = None
     created_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
+
+
+class PhaseSnapshotResponse(BaseModel):
+    snapshot_id: int
+    opportunity_id: int
+    phase_from: Optional[str] = None
+    phase_to: Optional[str] = None
+    gate_decision: Optional[str] = None
+    decided_by: Optional[str] = None
+    decided_at: Optional[datetime] = None
+    gate_comments: Optional[str] = None
+    opportunity_snapshot: Optional[dict] = None
+
+    model_config = ConfigDict(from_attributes=True)
 
 
 class ProjectUpdateRequest(BaseModel):
@@ -577,6 +593,8 @@ class ProjectUpdateRequest(BaseModel):
     off_tool_date: Optional[date] = None
     committee_review_date: Optional[date] = None
     committee_members: Optional[str] = None
+    change_mode: Optional[str] = Field(None, description="Standard | Silent")
+    change_mode_comment: Optional[str] = None
     updated_by: Optional[str] = None
 
 

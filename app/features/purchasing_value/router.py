@@ -247,6 +247,21 @@ async def apply_gate_decision(
         raise
 
 
+@router.get("/opportunities/{opportunity_id}/phase-history", response_model=dict)
+async def get_phase_history(
+    opportunity_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Gate decision history with full data snapshots for an opportunity."""
+    svc = PurchasingValueService(db)
+    snapshots = await svc.get_phase_history(opportunity_id)
+    return {
+        "status": "success",
+        "data": [schemas.PhaseSnapshotResponse.model_validate(s) for s in snapshots],
+    }
+
+
 @router.post(
     "/opportunities/{opportunity_id}/send-validation-request", response_model=dict
 )
