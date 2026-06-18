@@ -94,7 +94,7 @@ async def update_opportunity(
 ):
     try:
         svc = PurchasingValueService(db)
-        opp = await svc.update_opportunity(opportunity_id, payload)
+        await svc.update_opportunity(opportunity_id, payload)
         await db.commit()
         # Re-fetch after commit — avoids stale session cache (R9 monthly rebuilds, etc.)
         fresh_opp = await svc.get_opportunity(opportunity_id)
@@ -116,7 +116,7 @@ async def start_study(
 ):
     try:
         svc = PurchasingValueService(db)
-        opp = await svc.start_study(opportunity_id, payload)
+        await svc.start_study(opportunity_id, payload)
         await db.commit()
         # Re-fetch after commit — avoids stale session cache (R9 monthly rebuilds, etc.)
         fresh_opp = await svc.get_opportunity(opportunity_id)
@@ -140,7 +140,7 @@ async def submit_for_validation(
 ):
     try:
         svc = PurchasingValueService(db)
-        opp = await svc.submit_for_validation(opportunity_id, payload)
+        await svc.submit_for_validation(opportunity_id, payload)
         await db.commit()
         fresh_opp = await svc.get_opportunity(opportunity_id)
         return {
@@ -165,7 +165,7 @@ async def submit_to_committee(
 ):
     try:
         svc = PurchasingValueService(db)
-        opp = await svc.submit_to_committee(opportunity_id, payload)
+        await svc.submit_to_committee(opportunity_id, payload)
         await db.commit()
         fresh_opp = await svc.get_opportunity(opportunity_id)
         return {
@@ -190,7 +190,7 @@ async def apply_gate_decision(
 ):
     try:
         svc = PurchasingValueService(db)
-        opp = await svc.apply_gate_decision(opportunity_id, payload)
+        await svc.apply_gate_decision(opportunity_id, payload)
         await db.commit()
         # Re-fetch after commit — avoids stale session cache (R9 monthly rebuilds, etc.)
         fresh_opp = await svc.get_opportunity(opportunity_id)
@@ -214,7 +214,7 @@ async def send_validation_request(
 ):
     try:
         svc = PurchasingValueService(db)
-        opp = await svc.send_validation_request(opportunity_id, payload)
+        await svc.send_validation_request(opportunity_id, payload)
         await db.commit()
         fresh_opp = await svc.get_opportunity(opportunity_id)
         return {

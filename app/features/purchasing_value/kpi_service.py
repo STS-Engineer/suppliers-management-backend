@@ -53,11 +53,11 @@ class PurchasingKpiService:
             )
         )
         all_lines: list[FinancialLine] = list(lines_result.scalars().all())
-        active_lines = [l for l in all_lines if l.status == "Active"]
+        active_lines = [line for line in all_lines if line.status == "Active"]
 
         opps_result = await self.db.execute(
             select(Opportunity)
-            .where(Opportunity.is_deleted == False)
+            .where(Opportunity.is_deleted.is_(False))
             .options(
                 selectinload(Opportunity.plant),
                 selectinload(Opportunity.budget_years),
@@ -89,7 +89,7 @@ class PurchasingKpiService:
             return r if r > 0 else 1.0
 
         rate_by_line: dict[int, float] = {
-            l.financial_line_id: _rate(l) for l in all_lines
+            line.financial_line_id: _rate(line) for line in all_lines
         }
 
         # EOY forecast falls back to the expected baseline when no manual forecast has
@@ -103,13 +103,13 @@ class PurchasingKpiService:
         # the count so a missing rate is visible rather than silently distorting totals.
         non_eur_missing_rate = len(
             [
-                l
-                for l in all_lines
-                if l.opportunity
-                and (l.opportunity.currency or "EUR") != "EUR"
+                line
+                for line in all_lines
+                if line.opportunity
+                and (line.opportunity.currency or "EUR") != "EUR"
                 and not (
-                    l.opportunity.fx_rate_to_eur
-                    and float(l.opportunity.fx_rate_to_eur) > 0
+                    line.opportunity.fx_rate_to_eur
+                    and float(line.opportunity.fx_rate_to_eur) > 0
                 )
             ]
         )
@@ -136,33 +136,33 @@ class PurchasingKpiService:
 
         # ── FORECAST KPIs ─────────────────────────────────────────────────
 
-        total_eoy_forecast = sum(_eoy(l) * _rate(l) for l in active_lines)
+        total_eoy_forecast = sum(_eoy(line) * _rate(line) for line in active_lines)
         # Budgeted lines = lines whose opportunity is committed "Budgeted" this year.
         budgeted_lines = [
-            l for l in active_lines if l.opportunity_id in committed_opp_ids
+            line for line in active_lines if line.opportunity_id in committed_opp_ids
         ]
         # Total budget = the committed per-year applicable amount (not line baselines).
         total_budget = sum(committed_budget_by_opp.values())
-        total_expected = sum(_n(l.expected_annual_saving) * _rate(l) for l in active_lines)
+        total_expected = sum(_n(line.expected_annual_saving) * _rate(line) for line in active_lines)
         budgeted_expected_annual = sum(
-            _n(l.expected_annual_saving) * _rate(l) for l in budgeted_lines
+            _n(line.expected_annual_saving) * _rate(line) for line in budgeted_lines
         )
 
-        budgeted_eoy_forecast = sum(_eoy(l) * _rate(l) for l in budgeted_lines)
+        budgeted_eoy_forecast = sum(_eoy(line) * _rate(line) for line in budgeted_lines)
 
         # Over budget: a committed line whose EOY forecast (EUR) exceeds the committed
         # per-year budget for its opportunity (over-delivery — favorable). One line per
         # opportunity, so the line maps directly to its committed amount.
         over_budget_lines = [
-            l
-            for l in budgeted_lines
-            if committed_budget_by_opp.get(l.opportunity_id, 0) > 0
-            and _eoy(l) * _rate(l) > committed_budget_by_opp[l.opportunity_id]
+            line
+            for line in budgeted_lines
+            if committed_budget_by_opp.get(line.opportunity_id, 0) > 0
+            and _eoy(line) * _rate(line) > committed_budget_by_opp[line.opportunity_id]
         ]
         over_budget_count = len(over_budget_lines)
         over_budget_amount = sum(
-            _eoy(l) * _rate(l) - committed_budget_by_opp[l.opportunity_id]
-            for l in over_budget_lines
+            _eoy(line) * _rate(line) - committed_budget_by_opp[line.opportunity_id]
+            for line in over_budget_lines
         )
 
         eoy_vs_budget_pct = _pct(budgeted_eoy_forecast, total_budget)
@@ -176,8 +176,8 @@ class PurchasingKpiService:
                     r.period_month,
                     _n(r.forecast_eoy_saving) * rate_by_line.get(r.financial_line_id, 1.0),
                 )
-                for l in active_lines
-                for r in l.monthly_financials
+                for line in active_lines
+                for r in line.monthly_financials
                 if r.forecast_eoy_saving is not None and r.period_month
             ],
             key=lambda x: x[0],
@@ -211,8 +211,8 @@ class PurchasingKpiService:
             o
             for o in validated_opps
             if any(
-                _n(l.cumulated_real_saving) > 0
-                for l in lines_by_opp.get(o.opportunity_id, [])
+                _n(line.cumulated_real_saving) > 0
+                for line in lines_by_opp.get(o.opportunity_id, [])
             )
         ]
         conversion_rate_pct = _pct(len(converted_opps), len(validated_opps))
@@ -221,9 +221,9 @@ class PurchasingKpiService:
         # Olivier: months before planned_start_date are expected 0 — don't count them in KPIs
         def ytd_rows_for(lines):
             rows = []
-            for l in lines:
-                savings_start = l.real_start_date or l.planned_start_date
-                for r in l.monthly_financials:
+            for line in lines:
+                savings_start = line.real_start_date or line.planned_start_date
+                for r in line.monthly_financials:
                     if not r.period_month:
                         continue
                     if r.period_month.year != current_year:
@@ -248,7 +248,7 @@ class PurchasingKpiService:
         )
 
         budgeted_ytd_rows = ytd_rows_for(
-            [l for l in active_lines if l.opportunity_id in committed_opp_ids]
+            [line for line in active_lines if line.opportunity_id in committed_opp_ids]
         )
         budget_actual_ytd = sum(
             _n(r.actual_saving) * rate_by_line.get(r.financial_line_id, 1.0)
@@ -279,14 +279,14 @@ class PurchasingKpiService:
         project_on_time_rate_pct = _pct(len(on_time_projects), len(active_projects))
 
         lines_with_current_update = [
-            l
-            for l in active_lines
+            line
+            for line in active_lines
             if any(
                 r.period_month
                 and r.period_month.year == today.year
                 and r.period_month.month == today.month
                 and r.actual_saving is not None
-                for r in l.monthly_financials
+                for r in line.monthly_financials
             )
         ]
         monthly_update_pct = _pct(len(lines_with_current_update), len(active_lines))

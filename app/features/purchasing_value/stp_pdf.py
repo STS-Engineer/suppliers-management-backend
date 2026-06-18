@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import io
 from datetime import date, datetime
-from decimal import Decimal
 from typing import Optional
 
 from reportlab.lib import colors
@@ -159,7 +158,7 @@ def _before_after_table(
     """Three-column label | before | after table."""
     cw = col_widths or [5 * cm, (W - 5 * cm) / 2, (W - 5 * cm) / 2]
     header = [_cell("Field", bold=True), _cell("Before", bold=True), _cell("After", bold=True)]
-    data = [header] + [[_cell(l, bold=True), _cell(b), _cell(a)] for l, b, a in rows]
+    data = [header] + [[_cell(lbl, bold=True), _cell(b), _cell(a)] for lbl, b, a in rows]
     t = Table(data, colWidths=cw)
     t.setStyle(_tbl_style(header_rows=1, num_rows=len(data)))
     t.setStyle(_label_col_style())
@@ -222,7 +221,8 @@ def generate_stp_pdf(opp, phase: int = 0) -> bytes:
     doc.addPageTemplates([_make_page_template(doc, opp.opportunity_name or "", phase)])
 
     story = []
-    sp = lambda n=0.2: Spacer(1, n * cm)
+    def sp(n=0.2):
+        return Spacer(1, n * cm)
 
     # ── Shorthand accessors ──────────────────────────────────────────────────
     risks: dict    = opp.stp_risks    or {}

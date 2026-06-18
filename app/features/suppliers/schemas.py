@@ -6,8 +6,6 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.features.suppliers.options import (
     CERTIFICATION_TYPE_OPTIONS,
-    CERTIFICATION_STANDARD_TYPE_OPTIONS,
-    CERT_TYPES_BY_STANDARD,
     CONS_OR_WD_OPTIONS,
     FAMILY_COVERAGE_OPTIONS,
     FINANCIAL_HEALTH_OPTIONS,

@@ -1042,7 +1042,7 @@ class SupplierService:
         stmt = (
             select(SupplierCarbonFootprint)
             .options(selectinload(SupplierCarbonFootprint.supplier_unit))
-            .where(SupplierCarbonFootprint.is_deleted == False)
+            .where(SupplierCarbonFootprint.is_deleted.is_(False))
         )
         if unit_id is not None:
             stmt = stmt.where(SupplierCarbonFootprint.id_supplier_unit == unit_id)
@@ -1087,7 +1087,7 @@ class SupplierService:
             .options(selectinload(SupplierCarbonFootprint.supplier_unit))
             .where(
                 SupplierCarbonFootprint.id_carbon_footprint == fp_id,
-                SupplierCarbonFootprint.is_deleted == False,
+                SupplierCarbonFootprint.is_deleted.is_(False),
             )
         )
         result = await self.db.execute(stmt)
@@ -1120,7 +1120,7 @@ class SupplierService:
         from datetime import date, timedelta
         stmt = (
             select(SupplierCertification)
-            .where(SupplierCertification.is_deleted == False)
+            .where(SupplierCertification.is_deleted.is_(False))
         )
         if standard_type:
             stmt = stmt.where(SupplierCertification.standard_type == standard_type)

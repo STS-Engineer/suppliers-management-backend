@@ -2,7 +2,7 @@
 
 from datetime import date, datetime, timedelta
 from decimal import Decimal
-from typing import Any, Dict, Optional, List
+from typing import Dict, Optional, List
 
 from pydantic import BaseModel, Field
 
@@ -95,11 +95,11 @@ FINANCIAL_LINE_STATUSES = ["Draft", "Active", "Completed", "Cancelled"]
 # PLD helpers
 # ---------------------------------------------------------------------------
 
-def compute_priority(p: Optional[float], l: Optional[float], d: Optional[float]):
+def compute_priority(p: Optional[float], lead: Optional[float], d: Optional[float]):
     """Returns (priority_score, priority_category) or (None, None)."""
-    if p is None or l is None or d is None:
+    if p is None or lead is None or d is None:
         return None, None
-    score = float(p) * float(l) * float(d)
+    score = float(p) * float(lead) * float(d)
     if score >= 75:
         cat = "High"
     elif score >= 25:
@@ -234,7 +234,8 @@ def compute_stp_financials(opp) -> dict:
                              - f(opp.top_days_after) * price_after[0]) / 360
 
     # round to 2dp; snap negative-zero / sub-cent magnitudes to 0.0 (avoids "-0" display)
-    rnd = lambda v: (0.0 if abs(round(v, 2)) < 0.005 else round(v, 2)) if v is not None else None
+    def rnd(v):
+        return (0.0 if abs(round(v, 2)) < 0.005 else round(v, 2)) if v is not None else None
     return {
         "full_year_saving": rnd(full_year),
         "period_saving": rnd(period),

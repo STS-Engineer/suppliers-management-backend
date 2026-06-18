@@ -21,7 +21,6 @@ from app.db.models import (
     Project,
     SupplierSiteRelation,
     SupplierUnit,
-    SupplierGroup,
 )
 import calendar
 
@@ -34,8 +33,6 @@ from app.features.purchasing_value.schemas import (
     OpportunityUpdateRequest,
     RecoveryUpdateRequest,
     StartStudyRequest,
-    STPBenefits,
-    STPRisks,
     SubmitForValidationRequest,
     SubmitToCommitteeRequest,
     ValidationRequestPayload,
@@ -82,7 +79,7 @@ class PurchasingValueService:
     async def list_opportunities(self) -> List[Opportunity]:
         result = await self.db.execute(
             select(Opportunity)
-            .where(Opportunity.is_deleted == False)
+            .where(Opportunity.is_deleted.is_(False))
             .options(
                 selectinload(Opportunity.projects),
                 selectinload(Opportunity.financial_lines).selectinload(
@@ -101,7 +98,7 @@ class PurchasingValueService:
             select(Opportunity)
             .where(
                 Opportunity.opportunity_id == opportunity_id,
-                Opportunity.is_deleted == False,
+                Opportunity.is_deleted.is_(False),
             )
             .options(
                 selectinload(Opportunity.projects),
@@ -157,7 +154,7 @@ class PurchasingValueService:
         ]:
             raise AppException(
                 422,
-                f"Invalid type. Must be one of: Negotiation, Sourcing, Technical Productivity, Cash",
+                "Invalid type. Must be one of: Negotiation, Sourcing, Technical Productivity, Cash",
                 "INVALID_TYPE",
             )
 
@@ -704,7 +701,8 @@ class PurchasingValueService:
                         cc=payload.cc_emails or [],
                     )
                 else:
-                    import tempfile, os
+                    import tempfile
+                    import os
 
                     pdf_bytes = generate_stp_pdf(opp, phase=0)
                     safe = (opp.opportunity_name or "opp").replace(" ", "_")[:50]
@@ -777,7 +775,8 @@ class PurchasingValueService:
                         cc=payload.cc_emails or [],
                     )
                 else:
-                    import tempfile, os
+                    import tempfile
+                    import os
 
                     pdf_bytes = generate_stp_pdf(opp, phase=1)
                     safe = (opp.opportunity_name or "opp").replace(" ", "_")[:50]
@@ -1081,7 +1080,7 @@ class PurchasingValueService:
                 MonthlyFinancial.financial_line_id == line.financial_line_id,
                 MonthlyFinancial.period_month >= savings_start.replace(day=1),
                 MonthlyFinancial.period_month < today.replace(day=1),
-                MonthlyFinancial.actual_saving == None,
+                MonthlyFinancial.actual_saving.is_(None),
             )
         )
         missing_rows = result.scalars().all()
@@ -1311,7 +1310,7 @@ class PurchasingValueService:
             select(OpportunityBudgetYear)
             .where(
                 OpportunityBudgetYear.fiscal_year == fiscal_year,
-                OpportunityBudgetYear.is_deleted == False,
+                OpportunityBudgetYear.is_deleted.is_(False),
             )
             .options(
                 selectinload(OpportunityBudgetYear.opportunity).selectinload(
@@ -1379,7 +1378,7 @@ class PurchasingValueService:
                     select(OpportunityBudgetYear)
                     .where(
                         OpportunityBudgetYear.fiscal_year == fiscal_year,
-                        OpportunityBudgetYear.is_deleted == False,
+                        OpportunityBudgetYear.is_deleted.is_(False),
                     )
                     .options(selectinload(OpportunityBudgetYear.opportunity))
                 )
@@ -1435,8 +1434,7 @@ class PurchasingValueService:
         result = await self.db.execute(
             select(MonthlyFinancial).where(
                 MonthlyFinancial.financial_line_id == line.financial_line_id,
-                MonthlyFinancial.actual_saving
-                == None,  # only delete rows with no actual
+                MonthlyFinancial.actual_saving.is_(None),  # only delete rows with no actual
             )
         )
         empty_rows = result.scalars().all()
@@ -1449,7 +1447,7 @@ class PurchasingValueService:
             select(MonthlyFinancial)
             .where(
                 MonthlyFinancial.financial_line_id == line.financial_line_id,
-                MonthlyFinancial.actual_saving != None,
+                MonthlyFinancial.actual_saving.is_not(None),
                 MonthlyFinancial.period_month >= new_start,
             )
             .order_by(MonthlyFinancial.period_month.desc())
@@ -1840,7 +1838,7 @@ class PurchasingValueService:
             )
             .where(
                 SupplierSiteRelation.id_site == plant_id,
-                SupplierUnit.is_deleted == False,
+                SupplierUnit.is_deleted.is_(False),
             )
             .options(selectinload(SupplierUnit.group))
             .order_by(SupplierUnit.id_supplier_unit)
