@@ -36,6 +36,7 @@ async def get_kpis(
 # Opportunities
 # ---------------------------------------------------------------------------
 
+
 @router.get("/opportunities", response_model=dict)
 async def list_opportunities(
     db: AsyncSession = Depends(get_db),
@@ -66,9 +67,11 @@ async def create_opportunity(
         fresh_opp = await svc.get_opportunity(opp.opportunity_id)
         return {"status": "success", "data": opportunity_to_response(fresh_opp)}
     except AppException:
-        await db.rollback(); raise
+        await db.rollback()
+        raise
     except Exception:
-        await db.rollback(); raise
+        await db.rollback()
+        raise
 
 
 @router.get("/opportunities/{opportunity_id}", response_model=dict)
@@ -97,9 +100,11 @@ async def update_opportunity(
         fresh_opp = await svc.get_opportunity(opportunity_id)
         return {"status": "success", "data": opportunity_to_response(fresh_opp)}
     except AppException:
-        await db.rollback(); raise
+        await db.rollback()
+        raise
     except Exception:
-        await db.rollback(); raise
+        await db.rollback()
+        raise
 
 
 @router.post("/opportunities/{opportunity_id}/start-study", response_model=dict)
@@ -117,12 +122,16 @@ async def start_study(
         fresh_opp = await svc.get_opportunity(opportunity_id)
         return {"status": "success", "data": opportunity_to_response(fresh_opp)}
     except AppException:
-        await db.rollback(); raise
+        await db.rollback()
+        raise
     except Exception:
-        await db.rollback(); raise
+        await db.rollback()
+        raise
 
 
-@router.post("/opportunities/{opportunity_id}/submit-for-validation", response_model=dict)
+@router.post(
+    "/opportunities/{opportunity_id}/submit-for-validation", response_model=dict
+)
 async def submit_for_validation(
     opportunity_id: int,
     payload: schemas.SubmitForValidationRequest,
@@ -134,11 +143,17 @@ async def submit_for_validation(
         opp = await svc.submit_for_validation(opportunity_id, payload)
         await db.commit()
         fresh_opp = await svc.get_opportunity(opportunity_id)
-        return {"status": "success", "data": opportunity_to_response(fresh_opp), "message": "Submitted for PM validation"}
+        return {
+            "status": "success",
+            "data": opportunity_to_response(fresh_opp),
+            "message": "Submitted for PM validation",
+        }
     except AppException:
-        await db.rollback(); raise
+        await db.rollback()
+        raise
     except Exception:
-        await db.rollback(); raise
+        await db.rollback()
+        raise
 
 
 @router.post("/opportunities/{opportunity_id}/submit-to-committee", response_model=dict)
@@ -153,11 +168,17 @@ async def submit_to_committee(
         opp = await svc.submit_to_committee(opportunity_id, payload)
         await db.commit()
         fresh_opp = await svc.get_opportunity(opportunity_id)
-        return {"status": "success", "data": opportunity_to_response(fresh_opp), "message": "Submitted to committee"}
+        return {
+            "status": "success",
+            "data": opportunity_to_response(fresh_opp),
+            "message": "Submitted to committee",
+        }
     except AppException:
-        await db.rollback(); raise
+        await db.rollback()
+        raise
     except Exception:
-        await db.rollback(); raise
+        await db.rollback()
+        raise
 
 
 @router.post("/opportunities/{opportunity_id}/gate-decision", response_model=dict)
@@ -175,12 +196,16 @@ async def apply_gate_decision(
         fresh_opp = await svc.get_opportunity(opportunity_id)
         return {"status": "success", "data": opportunity_to_response(fresh_opp)}
     except AppException:
-        await db.rollback(); raise
+        await db.rollback()
+        raise
     except Exception:
-        await db.rollback(); raise
+        await db.rollback()
+        raise
 
 
-@router.post("/opportunities/{opportunity_id}/send-validation-request", response_model=dict)
+@router.post(
+    "/opportunities/{opportunity_id}/send-validation-request", response_model=dict
+)
 async def send_validation_request(
     opportunity_id: int,
     payload: schemas.ValidationRequestPayload,
@@ -192,16 +217,23 @@ async def send_validation_request(
         opp = await svc.send_validation_request(opportunity_id, payload)
         await db.commit()
         fresh_opp = await svc.get_opportunity(opportunity_id)
-        return {"status": "success", "data": opportunity_to_response(fresh_opp), "message": "Validation request sent"}
+        return {
+            "status": "success",
+            "data": opportunity_to_response(fresh_opp),
+            "message": "Validation request sent",
+        }
     except AppException:
-        await db.rollback(); raise
+        await db.rollback()
+        raise
     except Exception:
-        await db.rollback(); raise
+        await db.rollback()
+        raise
 
 
 # ---------------------------------------------------------------------------
 # Monthly financial updates
 # ---------------------------------------------------------------------------
+
 
 @router.put("/projects/{project_id}", response_model=dict)
 async def update_project(
@@ -214,11 +246,16 @@ async def update_project(
         svc = PurchasingValueService(db)
         proj = await svc.update_project(project_id, payload)
         await db.commit()
-        return {"status": "success", "data": schemas.ProjectResponse.model_validate(proj)}
+        return {
+            "status": "success",
+            "data": schemas.ProjectResponse.model_validate(proj),
+        }
     except AppException:
-        await db.rollback(); raise
+        await db.rollback()
+        raise
     except Exception:
-        await db.rollback(); raise
+        await db.rollback()
+        raise
 
 
 @router.post("/financial-lines/{line_id}/escalate", response_model=dict)
@@ -232,11 +269,16 @@ async def escalate_financial_line(
         svc = PurchasingValueService(db)
         line = await svc.escalate_financial_line(line_id, payload)
         await db.commit()
-        return {"status": "success", "data": schemas.FinancialLineResponse.model_validate(line)}
+        return {
+            "status": "success",
+            "data": schemas.FinancialLineResponse.model_validate(line),
+        }
     except AppException:
-        await db.rollback(); raise
+        await db.rollback()
+        raise
     except Exception:
-        await db.rollback(); raise
+        await db.rollback()
+        raise
 
 
 @router.post("/financial-lines/{line_id}/deescalate", response_model=dict)
@@ -249,11 +291,16 @@ async def deescalate_financial_line(
         svc = PurchasingValueService(db)
         line = await svc.deescalate_financial_line(line_id, None)
         await db.commit()
-        return {"status": "success", "data": schemas.FinancialLineResponse.model_validate(line)}
+        return {
+            "status": "success",
+            "data": schemas.FinancialLineResponse.model_validate(line),
+        }
     except AppException:
-        await db.rollback(); raise
+        await db.rollback()
+        raise
     except Exception:
-        await db.rollback(); raise
+        await db.rollback()
+        raise
 
 
 @router.put("/financial-lines/{line_id}/recovery", response_model=dict)
@@ -267,11 +314,16 @@ async def set_recovery(
         svc = PurchasingValueService(db)
         line = await svc.set_recovery(line_id, payload)
         await db.commit()
-        return {"status": "success", "data": schemas.FinancialLineResponse.model_validate(line)}
+        return {
+            "status": "success",
+            "data": schemas.FinancialLineResponse.model_validate(line),
+        }
     except AppException:
-        await db.rollback(); raise
+        await db.rollback()
+        raise
     except Exception:
-        await db.rollback(); raise
+        await db.rollback()
+        raise
 
 
 @router.post("/opportunities/{opportunity_id}/financial-lines", response_model=dict)
@@ -285,11 +337,16 @@ async def create_component_line(
         svc = PurchasingValueService(db)
         line = await svc.create_component_line(opportunity_id, payload)
         await db.commit()
-        return {"status": "success", "data": schemas.FinancialLineResponse.model_validate(line)}
+        return {
+            "status": "success",
+            "data": schemas.FinancialLineResponse.model_validate(line),
+        }
     except AppException:
-        await db.rollback(); raise
+        await db.rollback()
+        raise
     except Exception:
-        await db.rollback(); raise
+        await db.rollback()
+        raise
 
 
 @router.post("/financial-lines/{line_id}/rebuild-profile", response_model=dict)
@@ -304,6 +361,7 @@ async def rebuild_monthly_profile(
     try:
         from app.db.models import FinancialLine as FL
         from sqlalchemy import select
+
         result = await db.execute(select(FL).where(FL.financial_line_id == line_id))
         line = result.scalar_one_or_none()
         if not line:
@@ -311,16 +369,27 @@ async def rebuild_monthly_profile(
         svc = PurchasingValueService(db)
         start = line.real_start_date or line.planned_start_date
         if not start or not line.expected_annual_saving:
-            raise AppException(422, "Line needs planned_start_date and expected_annual_saving.", "MISSING_DATA")
+            raise AppException(
+                422,
+                "Line needs planned_start_date and expected_annual_saving.",
+                "MISSING_DATA",
+            )
         duration = int(line.duration_months or 12)
-        await svc._rebuild_monthly_profile(line, line.expected_annual_saving, start, duration)
+        await svc._rebuild_monthly_profile(
+            line, line.expected_annual_saving, start, duration
+        )
         await svc._recalculate_ytd(line_id)
         await db.commit()
-        return {"status": "success", "message": f"Rebuilt {duration} monthly rows using equal monthly distribution."}
+        return {
+            "status": "success",
+            "message": f"Rebuilt {duration} monthly rows using days-based pro-ration.",
+        }
     except AppException:
-        await db.rollback(); raise
+        await db.rollback()
+        raise
     except Exception:
-        await db.rollback(); raise
+        await db.rollback()
+        raise
 
 
 @router.post("/financial-lines/{line_id}/revise-baseline", response_model=dict)
@@ -332,13 +401,20 @@ async def revise_financial_line_baseline(
 ):
     try:
         svc = PurchasingValueService(db)
-        line = await svc.revise_financial_line_baseline(line_id, payload.revised_saving, payload.note, payload.revised_by)
+        line = await svc.revise_financial_line_baseline(
+            line_id, payload.revised_saving, payload.note, payload.revised_by
+        )
         await db.commit()
-        return {"status": "success", "data": schemas.FinancialLineResponse.model_validate(line)}
+        return {
+            "status": "success",
+            "data": schemas.FinancialLineResponse.model_validate(line),
+        }
     except AppException:
-        await db.rollback(); raise
+        await db.rollback()
+        raise
     except Exception:
-        await db.rollback(); raise
+        await db.rollback()
+        raise
 
 
 @router.post("/financial-lines/{line_id}/complete", response_model=dict)
@@ -352,11 +428,16 @@ async def complete_financial_line(
         svc = PurchasingValueService(db)
         line = await svc.complete_financial_line(line_id, payload)
         await db.commit()
-        return {"status": "success", "data": schemas.FinancialLineResponse.model_validate(line)}
+        return {
+            "status": "success",
+            "data": schemas.FinancialLineResponse.model_validate(line),
+        }
     except AppException:
-        await db.rollback(); raise
+        await db.rollback()
+        raise
     except Exception:
-        await db.rollback(); raise
+        await db.rollback()
+        raise
 
 
 @router.put("/monthly/{month_id}", response_model=dict)
@@ -370,18 +451,26 @@ async def update_monthly_actual(
         svc = PurchasingValueService(db)
         row = await svc.update_monthly_actual(month_id, payload)
         await db.commit()
-        return {"status": "success", "data": schemas.MonthlyFinancialResponse.model_validate(row)}
+        return {
+            "status": "success",
+            "data": schemas.MonthlyFinancialResponse.model_validate(row),
+        }
     except AppException:
-        await db.rollback(); raise
+        await db.rollback()
+        raise
     except Exception:
-        await db.rollback(); raise
+        await db.rollback()
+        raise
 
 
 # ---------------------------------------------------------------------------
 # Suppliers filtered by plant
 # ---------------------------------------------------------------------------
 
-@router.get("/opportunities/{opportunity_id}/current-supplier-evaluation", response_model=dict)
+
+@router.get(
+    "/opportunities/{opportunity_id}/current-supplier-evaluation", response_model=dict
+)
 async def get_current_supplier_evaluation(
     opportunity_id: int,
     db: AsyncSession = Depends(get_db),
@@ -431,7 +520,9 @@ async def get_current_supplier_evaluation(
             "geo_coverage": evaluation.geo_coverage,
             "cons_or_wd": evaluation.cons_or_wd,
             "financial_health": evaluation.financial_health,
-            "class_score": str(evaluation.class_score) if evaluation.class_score else None,
+            "class_score": str(evaluation.class_score)
+            if evaluation.class_score
+            else None,
             "class_value": evaluation.class_value,
             "impact_score": evaluation.impact_score,
             # Also read supplier_status and grade from the relation
@@ -455,13 +546,20 @@ async def export_stp_pdf(
     ``phase`` = 0 or 1 (controls the committee section heading).
     """
     import unicodedata
+
     svc = PurchasingValueService(db)
     opp = await svc.get_opportunity(opportunity_id)
     pdf_bytes = generate_stp_pdf(opp, phase=phase)
     raw_name = opp.opportunity_name or f"opp_{opportunity_id}"
     # Normalise to ASCII — replaces accented/special chars, drops what can't map
-    ascii_name = unicodedata.normalize("NFKD", raw_name).encode("ascii", "ignore").decode("ascii")
-    safe_name = "".join(c if c.isalnum() or c in "-_." else "_" for c in ascii_name)[:60]
+    ascii_name = (
+        unicodedata.normalize("NFKD", raw_name)
+        .encode("ascii", "ignore")
+        .decode("ascii")
+    )
+    safe_name = "".join(c if c.isalnum() or c in "-_." else "_" for c in ascii_name)[
+        :60
+    ]
     filename = f"STP_Phase{phase}_{safe_name}.pdf"
     return Response(
         content=pdf_bytes,
@@ -487,6 +585,7 @@ async def get_suppliers_by_plant(
 # ---------------------------------------------------------------------------
 # Document upload / list / delete
 # ---------------------------------------------------------------------------
+
 
 @router.get("/opportunities/{opportunity_id}/documents", response_model=dict)
 async def list_documents(
@@ -514,18 +613,26 @@ async def upload_document(
 ):
     try:
         svc = PurchasingValueService(db)
-        doc = await svc.upload_document(opportunity_id, file, phase_label, notes, uploaded_by)
+        doc = await svc.upload_document(
+            opportunity_id, file, phase_label, notes, uploaded_by
+        )
         await db.commit()
-        return {"status": "success", "data": schemas.OpportunityDocumentResponse.model_validate(doc)}
+        return {
+            "status": "success",
+            "data": schemas.OpportunityDocumentResponse.model_validate(doc),
+        }
     except AppException:
-        await db.rollback(); raise
+        await db.rollback()
+        raise
     except Exception:
-        await db.rollback(); raise
+        await db.rollback()
+        raise
 
 
 # ---------------------------------------------------------------------------
 # Recovery plans — centralised tracking view
 # ---------------------------------------------------------------------------
+
 
 @router.get("/recovery-plans", response_model=dict)
 async def get_recovery_plans(
@@ -579,33 +686,41 @@ async def get_recovery_plans(
             else None
         )
 
-        items.append({
-            "financial_line_id": line.financial_line_id,
-            "line_name": line.line_name,
-            "opportunity_id": opp.opportunity_id if opp else None,
-            "opportunity_name": opp.opportunity_name if opp else None,
-            "opportunity_type": opp.opportunity_type if opp else None,
-            "plant_name": plant.site_name if plant else None,
-            "follower": line.follower,
-            "purchasing_owner": opp.purchasing_owner if opp else None,
-            # Financial
-            "expected_annual_saving": expected,
-            "cumulated_real_saving": cum_actual,
-            "delta_ytd": delta_ytd,
-            "forecast_eoy_current": _n(line.forecast_eoy_current),
-            # Recovery plan
-            "recovery_status": line.recovery_status,
-            "recovery_note": line.recovery_note,
-            "recovery_target_date": str(line.recovery_target_date) if line.recovery_target_date else None,
-            "recovery_amount": recovery_amount,
-            "recovery_history": line.recovery_history,
-            "recovery_updated_at": str(line.recovery_updated_at) if line.recovery_updated_at else None,
-            # Computed
-            "is_overdue": is_overdue,
-            "days_to_target": days_to_target,
-            "progress_pct": round((cum_actual / recovery_amount) * 100, 1) if recovery_amount and recovery_amount > 0 else None,
-            "is_escalated": line.is_escalated,
-        })
+        items.append(
+            {
+                "financial_line_id": line.financial_line_id,
+                "line_name": line.line_name,
+                "opportunity_id": opp.opportunity_id if opp else None,
+                "opportunity_name": opp.opportunity_name if opp else None,
+                "opportunity_type": opp.opportunity_type if opp else None,
+                "plant_name": plant.site_name if plant else None,
+                "follower": line.follower,
+                "purchasing_owner": opp.purchasing_owner if opp else None,
+                # Financial
+                "expected_annual_saving": expected,
+                "cumulated_real_saving": cum_actual,
+                "delta_ytd": delta_ytd,
+                "forecast_eoy_current": _n(line.forecast_eoy_current),
+                # Recovery plan
+                "recovery_status": line.recovery_status,
+                "recovery_note": line.recovery_note,
+                "recovery_target_date": str(line.recovery_target_date)
+                if line.recovery_target_date
+                else None,
+                "recovery_amount": recovery_amount,
+                "recovery_history": line.recovery_history,
+                "recovery_updated_at": str(line.recovery_updated_at)
+                if line.recovery_updated_at
+                else None,
+                # Computed
+                "is_overdue": is_overdue,
+                "days_to_target": days_to_target,
+                "progress_pct": round((cum_actual / recovery_amount) * 100, 1)
+                if recovery_amount and recovery_amount > 0
+                else None,
+                "is_escalated": line.is_escalated,
+            }
+        )
 
     # Summary stats for the header
     total = len(items)
@@ -643,12 +758,15 @@ async def delete_document(
         await db.commit()
         return {"status": "success", "message": "Document deleted"}
     except AppException:
-        await db.rollback(); raise
+        await db.rollback()
+        raise
     except Exception:
-        await db.rollback(); raise
+        await db.rollback()
+        raise
 
 
 # ── Per-fiscal-year budgeting ──────────────────────────────────────────────
+
 
 @router.get("/budget-years", response_model=dict)
 async def list_budget_years(
@@ -660,10 +778,12 @@ async def list_budget_years(
     budgeting page (year filter)."""
     svc = PurchasingValueService(db)
     items = await svc.list_budget_years(fiscal_year)
+
     # Consolidated totals are in EUR (group reporting currency) — opportunities may be
     # recorded in EUR/USD/RMB/INR, so we sum the EUR-converted amounts.
     def eur(i):
         return i.get("applicable_amount_eur") or 0
+
     total = sum(eur(i) for i in items)
     budgeted = sum(eur(i) for i in items if i["budget_status"] == "Budgeted")
     opportunity = sum(eur(i) for i in items if i["budget_status"] == "Opportunity")
@@ -709,6 +829,8 @@ async def assign_budget(
         await db.commit()
         return {"status": "success", "data": result}
     except AppException:
-        await db.rollback(); raise
+        await db.rollback()
+        raise
     except Exception:
-        await db.rollback(); raise
+        await db.rollback()
+        raise
