@@ -456,6 +456,102 @@ class PurchasingKpiService:
                 }
             )
 
+        # ── C2 — BY SAVING TYPE (STP run-rate vs Flat annual) ────────────
+        # STP types (Sourcing / Technical Productivity): the comparable unit is the
+        # Year-N run-rate (saving_year_n), NOT expected_annual_saving which may hold
+        # the multi-year EBITDA Period in legacy rows.  Flat types (Negotiation / Cash)
+        # use expected_annual_saving as a true annual figure.
+        STP_TYPES  = {"Sourcing", "Technical Productivity"}
+        FLAT_TYPES = {"Negotiation", "Cash"}
+
+        def _stp_annual(line) -> float:
+            opp = line.opportunity
+            if opp and opp.saving_year_n is not None:
+                return _n(opp.saving_year_n) * _rate(line)
+            return _n(line.expected_annual_saving) * _rate(line)
+
+        stp_lines  = [ln for ln in active_lines if (ln.opportunity and (ln.opportunity.opportunity_type or "") in STP_TYPES)]
+        flat_lines = [ln for ln in active_lines if (ln.opportunity and (ln.opportunity.opportunity_type or "") in FLAT_TYPES)]
+
+        stp_ytd_rows  = ytd_rows_for(stp_lines)
+        flat_ytd_rows = ytd_rows_for(flat_lines)
+
+        by_saving_type = {
+            "stp": {
+                "label": "STP Run-rate (Year N)",
+                "types": sorted(STP_TYPES),
+                "line_count": len(stp_lines),
+                "expected_annual": round(sum(_stp_annual(ln) for ln in stp_lines), 2),
+                "actual_ytd": round(sum(
+                    _n(r.actual_saving) * rate_by_line.get(r.financial_line_id, 1.0)
+                    for r in stp_ytd_rows if r.actual_saving is not None
+                ), 2),
+                "expected_ytd": round(sum(
+                    _n(r.expected_saving) * rate_by_line.get(r.financial_line_id, 1.0)
+                    for r in stp_ytd_rows
+                ), 2),
+                "eoy_forecast": round(sum(_eoy(ln) * _rate(ln) for ln in stp_lines), 2),
+                "program_value_lifetime": round(sum(
+                    _n(ln.opportunity.period_saving) * _rate(ln)
+                    for ln in stp_lines
+                    if ln.opportunity and ln.opportunity.period_saving
+                ), 2),
+            },
+            "flat": {
+                "label": "Flat Annual Saving (Negotiation / Cash)",
+                "types": sorted(FLAT_TYPES),
+                "line_count": len(flat_lines),
+                "expected_annual": round(sum(_n(ln.expected_annual_saving) * _rate(ln) for ln in flat_lines), 2),
+                "actual_ytd": round(sum(
+                    _n(r.actual_saving) * rate_by_line.get(r.financial_line_id, 1.0)
+                    for r in flat_ytd_rows if r.actual_saving is not None
+                ), 2),
+                "expected_ytd": round(sum(
+                    _n(r.expected_saving) * rate_by_line.get(r.financial_line_id, 1.0)
+                    for r in flat_ytd_rows
+                ), 2),
+                "eoy_forecast": round(sum(_eoy(ln) * _rate(ln) for ln in flat_lines), 2),
+                "program_value_lifetime": None,
+            },
+        }
+        # Attach ytd attainment %
+        for seg in by_saving_type.values():
+            seg["actual_vs_expected_ytd_pct"] = _pct(seg["actual_ytd"], seg["expected_ytd"])
+
+        # ── D2 — CASH TRACKING ───────────────────────────────────────────
+        # cash_actual / cash_expected are distinct monthly fields on Cash-type lines.
+        # They were being captured in the DB but never surfaced in the KPI payload —
+        # Finance was blind to Cash attainment in the dashboard.
+        cash_lines = [
+            ln for ln in active_lines
+            if (ln.opportunity and (ln.opportunity.opportunity_type or "") == "Cash")
+        ]
+        cash_ytd_rows = [
+            (r, rate_by_line.get(r.financial_line_id, 1.0))
+            for ln in cash_lines
+            for r in ln.monthly_financials
+            if r.period_month
+            and r.period_month.year == current_year
+            and r.period_month <= today
+            and (
+                (ln.real_start_date or ln.planned_start_date) is None
+                or r.period_month >= (ln.real_start_date or ln.planned_start_date).replace(day=1)
+            )
+        ]
+        _cash_actual_ytd   = round(sum(_n(r.cash_actual)   * fx for r, fx in cash_ytd_rows if r.cash_actual   is not None), 2)
+        _cash_expected_ytd = round(sum(_n(r.cash_expected) * fx for r, fx in cash_ytd_rows), 2)
+        cash_kpis = {
+            "line_count":           len(cash_lines),
+            "expected_annual":      round(sum(_n(ln.expected_annual_saving) * _rate(ln) for ln in cash_lines), 2),
+            "cash_actual_ytd":      _cash_actual_ytd,
+            "cash_expected_ytd":    _cash_expected_ytd,
+            "cash_attainment_pct":  _pct(_cash_actual_ytd, _cash_expected_ytd),
+            "saving_actual_ytd":    round(sum(
+                _n(r.actual_saving) * fx
+                for r, fx in cash_ytd_rows if r.actual_saving is not None
+            ), 2),
+        }
+
         # ── BY TYPE ───────────────────────────────────────────────────────
 
         type_map: dict[str, dict] = {}
@@ -651,6 +747,8 @@ class PurchasingKpiService:
             "monthly_actuals": monthly_actuals,
             "year_split": year_split,
             "estimate_saving_by_year": estimate_saving_by_year,
+            "by_saving_type": by_saving_type,
+            "cash_kpis": cash_kpis,
             "by_plant": by_plant,
             "by_type": by_type,
             "late_projects": late_projects,

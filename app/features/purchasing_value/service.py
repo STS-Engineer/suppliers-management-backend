@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import calendar
+import logging
 from datetime import datetime, date
 from decimal import Decimal
 from math import ceil
@@ -22,8 +24,6 @@ from app.db.models import (
     SupplierSiteRelation,
     SupplierUnit,
 )
-import calendar
-
 from app.features.purchasing_value.schemas import (
     EscalateRequest,
     FinancialLineCompleteRequest,
@@ -35,6 +35,8 @@ from app.features.purchasing_value.schemas import (
     StartStudyRequest,
     SubmitForValidationRequest,
     SubmitToCommitteeRequest,
+    STPRevisionDecisionPayload,
+    STPRevisionRequestPayload,
     ValidationRequestPayload,
     add_months,
     compute_priority,
@@ -52,6 +54,8 @@ from app.shared.utils.blob_storage import (
     _extract_blob_name,
 )
 from app.features.purchasing_value.stp_pdf import generate_stp_pdf
+
+logger = logging.getLogger(__name__)
 
 # Phase progression order
 PHASE_ORDER = [
@@ -176,7 +180,7 @@ class PurchasingValueService:
             plant_id=payload.plant_id,
             supplier_id=payload.supplier_id,
             budget_year=payload.budget_year,
-            budget_status="Empty",
+            validation_status="Empty",
             status="Assigned",
             phase_status="Phase 0",
             validation_decision=None,
@@ -243,6 +247,23 @@ class PurchasingValueService:
                 "BASELINE_LOCKED_ACTUALS",
             )
 
+        # STP revision approval gate — Phase 2/3 requires Director sign-off before
+        # baseline figures can change.  Current values remain active while the request
+        # is pending; the buyer must use POST /request-stp-revision instead.
+        if (
+            opp.opportunity_type in ("Sourcing", "Technical Productivity")
+            and opp.phase_status in ("Phase 2", "Phase 3")
+            and not line_has_actuals   # Phase 3 with actuals already caught above
+            and _baseline_change_attempted()
+        ):
+            raise AppException(
+                422,
+                "STP baseline changes in Phase 2 and Phase 3 require Director approval. "
+                "Use 'Request Revision' to submit the proposed values for sign-off — "
+                "current figures remain active until the Director approves.",
+                "STP_REQUIRES_APPROVAL",
+            )
+
         # The STP is locked while it is awaiting a gate decision (submitted to a PM /
         # committee), so the approved document cannot be silently changed out from
         # under the reviewer. Returning it for rework moves the status off these values
@@ -287,12 +308,47 @@ class PurchasingValueService:
             and payload.real_start_date != old_real_start
         )
 
-        # Budget status / budget year are DERIVED from validation (see
-        # _sync_budget_years → _derive_opp_budget) — no manual setting. Any
+        # Validation status / budget year are DERIVED from workflow state (see
+        # _sync_budget_years) — no manual setting. Any compatibility
         # budget_status/budget_year sent by the client is ignored.
         _set_if(opp, "change_mode", payload.change_mode)
-        _set_if(opp, "currency", payload.currency)
-        _set_if(opp, "fx_rate_to_eur", payload.fx_rate_to_eur)
+
+        # C1 — FX freeze: currency and fx_rate_to_eur are immutable once a director has
+        # committed a "Budgeted" row or once the first actual saving has been recorded.
+        # Changing the rate after commitment would retroactively reprice all historical
+        # EUR-consolidated figures without any audit trail.
+        def _fx_is_locked() -> bool:
+            if any(
+                getattr(by, "budget_status", None) == "Budgeted"
+                for by in (opp.budget_years or [])
+            ):
+                return True
+            return any(
+                m.actual_saving is not None
+                for fl in (opp.financial_lines or [])
+                if fl.status in ("Active", "Completed")
+                for m in (fl.monthly_financials or [])
+            )
+
+        if _fx_is_locked():
+            if payload.currency is not None and payload.currency != (opp.currency or "EUR"):
+                raise AppException(
+                    422,
+                    "Currency is frozen after the first budget commitment or actual saving "
+                    "is recorded. It cannot be changed without voiding the financial audit trail.",
+                    "CURRENCY_LOCKED",
+                )
+            if payload.fx_rate_to_eur is not None and payload.fx_rate_to_eur != opp.fx_rate_to_eur:
+                raise AppException(
+                    422,
+                    "FX rate is frozen after the first budget commitment or actual saving "
+                    "is recorded. Historical EUR-consolidated figures must remain stable.",
+                    "FX_RATE_LOCKED",
+                )
+        else:
+            _set_if(opp, "currency", payload.currency)
+            _set_if(opp, "fx_rate_to_eur", payload.fx_rate_to_eur)
+
         # EUR is the reporting currency — its rate is always 1. Force it so a stale rate
         # left over from a previous currency can never distort consolidated EUR totals.
         if (opp.currency or "EUR") == "EUR":
@@ -373,6 +429,17 @@ class PurchasingValueService:
 
         # STP financials — exact formulas from Excel "format STP rev 1.2" (D51/D52/F51/F52/D55/D56)
         stp_fin = compute_stp_financials(opp)
+        # D4 — guard: price_after > price_before inverts the saving to a cost increase.
+        # Reject early so corrupted data never reaches the DB.
+        _year_n_raw = (stp_fin.get("saving_per_year") or [None])[0]
+        if _year_n_raw is not None and float(_year_n_raw) < 0:
+            raise AppException(
+                422,
+                f"Year-N saving is negative ({float(_year_n_raw):,.0f} €) — "
+                "price_after exceeds price_before for at least one STP component. "
+                "Please review the prices before saving.",
+                "STP_NEGATIVE_SAVING",
+            )
         if stp_fin["period_saving"] is not None:
             # The multi-year EBITDA Period (sum of years N..N+3) lives in period_saving.
             opp.period_saving = Decimal(str(stp_fin["period_saving"]))
@@ -551,6 +618,37 @@ class PurchasingValueService:
             if payload.comments:
                 opp.comments = (opp.comments or "") + f"\n[No Go] {payload.comments}"
 
+            # B1 — zero out / unlock all per-year budget rows so a cancelled project
+            # never inflates committed-budget totals on the Budgeting page.
+            # Locked rows (director decision) are reset — the commitment is voided.
+            for by in list(opp.budget_years or []):
+                by.applicable_amount = Decimal("0")
+                by.budget_status = "Empty"
+                by.status_locked_at = None
+                by.status_locked_by = None
+                by.updated_at = now
+
+            # B1/B3 — cascade to financial lines and recovery plans.
+            for fl in list(opp.financial_lines or []):
+                if fl.status == "Active":
+                    fl.status = "Cancelled"
+                    fl.updated_at = now
+                    fl.updated_by = payload.decided_by
+                # B3 — auto-close any open recovery plan so it stops appearing as
+                # overdue on the Recovery Plans page.
+                if fl.recovery_status and fl.recovery_status != "Done":
+                    if fl.recovery_history:
+                        fl.recovery_history = (fl.recovery_history + "\n").lstrip()
+                    entry = (
+                        f"[{now.strftime('%Y-%m-%d')} by system] "
+                        f"Auto-closed — opportunity cancelled (No Go)."
+                    )
+                    fl.recovery_history = (
+                        (fl.recovery_history or "") + entry
+                    ).strip()
+                    fl.recovery_status = "Done"
+                    fl.updated_at = now
+
         # ------ REVIEW → needs rework, buyer/PM must resubmit ------
         elif payload.decision == "Review":
             opp.status = "Needs Rework"
@@ -667,16 +765,21 @@ class PurchasingValueService:
         self, opportunity_id: int, payload: SubmitForValidationRequest
     ) -> Opportunity:
         opp = await self.get_opportunity(opportunity_id)
-        if opp.status not in ("Working on it", "Needs Rework"):
+        # A1 — phase-agnostic: allow re-submission from any phase when returned for
+        # rework. The PM re-reviews whatever phase the project is currently at.
+        # Guard: only in-progress or rework states may submit — not terminal states.
+        allowed_statuses = ("Working on it", "Needs Rework")
+        if opp.status not in allowed_statuses:
             raise AppException(
                 422,
-                "Opportunity must be 'Working on it' to submit for validation.",
+                f"Opportunity must be in one of {allowed_statuses} to submit for validation "
+                f"(current status: '{opp.status}').",
                 "WRONG_STATUS",
             )
-        if opp.phase_status != "Phase 0":
+        if opp.phase_status in ("Closed", "Assigned"):
             raise AppException(
                 422,
-                "Only Phase 0 opportunities can be submitted for PM validation.",
+                "Closed or unstarted opportunities cannot be submitted for validation.",
                 "WRONG_PHASE",
             )
 
@@ -722,8 +825,8 @@ class PurchasingValueService:
                         )
                     finally:
                         os.unlink(tmp_path)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("Phase-0 submit email failed for opp %s: %s", opportunity_id, exc)
 
         await self.db.flush()
         await self.db.refresh(
@@ -796,8 +899,8 @@ class PurchasingValueService:
                         )
                     finally:
                         os.unlink(tmp_path)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("Committee email failed for opp %s: %s", opportunity_id, exc)
 
         await self.db.flush()
         await self.db.refresh(
@@ -823,8 +926,8 @@ class PurchasingValueService:
                 body_html=body_html,
                 cc=payload.extra_cc_emails or [],
             )
-        except Exception:
-            pass  # don't block the flow — email is best-effort
+        except Exception as exc:
+            logger.warning("Validation-request email failed for opp %s: %s", opportunity_id, exc)
 
         opp.validation_request_sent_at = datetime.utcnow()
         opp.validation_request_sent_by = payload.sent_by
@@ -926,8 +1029,8 @@ class PurchasingValueService:
                             opp, line, line.escalation_reason
                         ),
                     )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning("Auto-escalation email failed for line %s: %s", row.financial_line_id, exc)
 
         # monthly_outcome = "Recover" → prompt recovery (advisory — user fills details in UI)
         # No auto-action needed, recovery_status is set manually via /recovery endpoint
@@ -974,8 +1077,8 @@ class PurchasingValueService:
                         opp, line, payload.escalation_reason
                     ),
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("Manual escalation email failed for line %s: %s", line_id, exc)
 
         await self.db.flush()
         await self.db.refresh(line, ["monthly_financials"])
@@ -1102,8 +1205,8 @@ class PurchasingValueService:
                 recipients=recipients,
                 body_html=_build_delay_alert_email(opp, line, months_missing),
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Delay-alert email failed for line %s: %s", line.financial_line_id, exc)
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -1178,15 +1281,16 @@ class PurchasingValueService:
         await self.db.flush()
         await self.db.refresh(opp, ["budget_years"])
 
-        # Opportunity-level budget status is DERIVED from the same validation state —
-        # no manual toggle. "Validate" → Budgeted (KPIs/baseline-lock); else Empty.
-        opp.budget_status = "Budgeted" if status == "Validate" else "Empty"
+        # Opportunity-level validation status is DERIVED from the same validation
+        # state — no manual toggle. "Validate" → Budgeted (KPIs/baseline-lock);
+        # else Empty.
+        opp.validation_status = "Budgeted" if status == "Validate" else "Empty"
         if opp.budget_years:
             opp.budget_year = Decimal(
                 str(min(by.fiscal_year for by in opp.budget_years))
             )
 
-        # Propagate the derived budget status onto the opportunity's financial lines.
+        # Propagate the derived validation status onto the opportunity's financial lines.
         # line.budget_status is a denormalized copy set once at creation; without this
         # it never flips to "Budgeted" and every budgeted-track KPI reads empty. Query
         # the lines directly so a line just created in the same gate flow (not yet on
@@ -1198,7 +1302,7 @@ class PurchasingValueService:
             )
         )
         for line in lines_result.scalars().all():
-            line.budget_status = opp.budget_status
+            line.budget_status = opp.validation_status
         await self.db.flush()
 
     async def _create_financial_line(self, opp: Opportunity) -> FinancialLine:
@@ -1219,7 +1323,7 @@ class PurchasingValueService:
             plant_id=opp.plant_id,
             line_name=line_name,
             component_name="Default",
-            budget_status=opp.budget_status or "Empty",
+            budget_status=opp.validation_status or "Empty",
             expected_annual_saving=annual,
             budget_value=annual,
             planned_start_date=start,
@@ -1280,7 +1384,7 @@ class PurchasingValueService:
             line_name=f"{payload.component_name} ({payload.component_pn or 'no PN'})",
             component_name=payload.component_name,
             component_pn=payload.component_pn,
-            budget_status=opp.budget_status or "Empty",
+            budget_status=opp.validation_status or "Empty",
             expected_annual_saving=payload.expected_annual_saving,
             budget_value=payload.expected_annual_saving,
             planned_start_date=start,
@@ -1323,6 +1427,10 @@ class PurchasingValueService:
         for r in result.scalars().all():
             opp = r.opportunity
             if opp is None or opp.is_deleted:
+                continue
+            # B1 — exclude cancelled / closed opportunities so directors never see
+            # phantom budget commitments on dead projects.
+            if opp.status == "Cancelled" or opp.phase_status == "Closed":
                 continue
             items.append(
                 {
@@ -1402,6 +1510,21 @@ class PurchasingValueService:
             counts[new_status] += 1
 
         await self.db.flush()
+
+        # B2 — re-sync FinancialLine.budget_status immediately after a Create-Budget
+        # decision so KPIs read the correct budgeted flag without waiting for the next
+        # opportunity save.  Deduplicated: one _sync per opp even if multiple rows.
+        synced_opp_ids: set = set()
+        for r in rows:
+            opp = r.opportunity
+            if opp is None or opp.is_deleted:
+                continue
+            if by_opp.get(opp.opportunity_id) is None:
+                continue
+            if opp.opportunity_id not in synced_opp_ids:
+                await self._sync_budget_years(opp)
+                synced_opp_ids.add(opp.opportunity_id)
+
         return {"fiscal_year": fiscal_year, "counts": counts}
 
     async def _rebuild_monthly_profile(
@@ -1695,6 +1818,198 @@ class PurchasingValueService:
         return project
 
     # ------------------------------------------------------------------
+    # STP revision approval (Phase 2 / Phase 3)
+    # ------------------------------------------------------------------
+
+    _STP_BASELINE_FIELDS = (
+        "current_price", "proposed_price",
+        "current_price_n1", "current_price_n2", "current_price_n3",
+        "proposed_price_n1", "proposed_price_n2", "proposed_price_n3",
+        "annual_quantity_n1", "annual_quantity_n2", "annual_quantity_n3", "annual_quantity_n4",
+        "bonus_before", "bonus_after",
+    )
+
+    async def request_stp_revision(
+        self,
+        opportunity_id: int,
+        payload: STPRevisionRequestPayload,
+    ) -> Opportunity:
+        """Buyer submits proposed STP price/volume changes for Purchasing Director approval.
+
+        Current values remain active.  Proposed values are stored in
+        `pending_stp_revision` JSONB; a preview of the resulting savings is computed
+        and included so the Director can assess the impact before deciding.
+        """
+        opp = await self.get_opportunity(opportunity_id)
+
+        if opp.opportunity_type not in ("Sourcing", "Technical Productivity"):
+            raise AppException(422, "STP revision approval only applies to STP opportunity types.", "NOT_STP_TYPE")
+        if opp.phase_status not in ("Phase 2", "Phase 3"):
+            raise AppException(422, "STP revision approval is only available in Phase 2 and Phase 3.", "WRONG_PHASE")
+        if opp.pending_stp_revision:
+            raise AppException(409, "A revision request is already pending for this opportunity. The Director must decide before a new request can be submitted.", "REVISION_ALREADY_PENDING")
+
+        # Collect only the fields actually provided by the buyer
+        proposed: dict = {}
+        for field in self._STP_BASELINE_FIELDS:
+            val = getattr(payload, field, None)
+            if val is not None:
+                proposed[field] = float(val) if isinstance(val, Decimal) else val
+
+        if not proposed:
+            raise AppException(422, "At least one STP baseline field must be provided in the revision request.", "NO_FIELDS_PROVIDED")
+
+        # Compute a savings preview by overlaying the proposed values on the current opportunity
+        import types as _types
+        proxy = _types.SimpleNamespace(**{
+            f: getattr(opp, f) for f in self._STP_BASELINE_FIELDS + (
+                "consignment_before", "consignment_after",
+                "top_days_before", "top_days_after",
+                "transit_days_before", "transit_days_after",
+                "tooling_cost", "travel_cost", "qualification_cost", "other_cost",
+                "opportunity_type",
+            ) if hasattr(opp, f)
+        })
+        for field, value in proposed.items():
+            setattr(proxy, field, Decimal(str(value)) if isinstance(value, (int, float)) else value)
+
+        preview_fin = compute_stp_financials(proxy)
+        preview_year_n = preview_fin.get("saving_per_year", [None])[0]
+        if preview_year_n is not None and float(preview_year_n) < 0:
+            raise AppException(
+                422,
+                f"The proposed values produce a negative Year-N saving ({float(preview_year_n):,.0f} €) — "
+                "proposed_price exceeds current_price. Please review before submitting.",
+                "STP_NEGATIVE_SAVING",
+            )
+
+        now = datetime.utcnow()
+        per_year = preview_fin.get("saving_per_year") or [None, None, None, None]
+        opp.pending_stp_revision = {
+            "requested_by":    payload.requested_by,
+            "requested_at":    now.isoformat(),
+            "director_email":  payload.director_email,
+            "note":            payload.note,
+            "proposed_fields": proposed,
+            "current_snapshot": {
+                f: float(getattr(opp, f)) if getattr(opp, f) is not None else None
+                for f in self._STP_BASELINE_FIELDS
+            },
+            "computed_preview": {
+                "saving_year_n":  float(per_year[0]) if per_year[0] is not None else None,
+                "saving_year_n1": float(per_year[1]) if per_year[1] is not None else None,
+                "saving_year_n2": float(per_year[2]) if per_year[2] is not None else None,
+                "saving_year_n3": float(per_year[3]) if per_year[3] is not None else None,
+                "period_saving":  float(preview_fin["period_saving"]) if preview_fin.get("period_saving") is not None else None,
+            },
+        }
+        opp.updated_at = now
+        opp.updated_by = payload.requested_by
+
+        # Notify Director by email
+        try:
+            body = _build_stp_revision_request_email(opp, payload, opp.pending_stp_revision["computed_preview"])
+            await send_email(
+                subject=f"[STP Revision Approval] {opp.opportunity_name}",
+                recipients=[payload.director_email],
+                body_html=body,
+            )
+        except Exception as exc:
+            logger.warning("STP revision request email failed for opp %s: %s", opportunity_id, exc)
+
+        await self.db.flush()
+        await self.db.refresh(opp, ["projects", "financial_lines", "opp_documents", "budget_years", "plant"])
+        return opp
+
+    async def decide_stp_revision(
+        self,
+        opportunity_id: int,
+        payload: STPRevisionDecisionPayload,
+    ) -> Opportunity:
+        """Purchasing Director approves or rejects a pending STP revision request.
+
+        Approved  → proposed values applied, STP financials recomputed, monthly
+                    profile rebuilt (if financial line active and no actuals yet).
+        Rejected  → pending revision discarded, current values unchanged.
+        Both      → audit entry appended to opp.comments, requester notified by email.
+        """
+        if payload.decision not in ("Approved", "Rejected"):
+            raise AppException(422, "Decision must be 'Approved' or 'Rejected'.", "INVALID_DECISION")
+
+        opp = await self.get_opportunity(opportunity_id)
+        if not opp.pending_stp_revision:
+            raise AppException(404, "No pending STP revision found for this opportunity.", "NO_PENDING_REVISION")
+
+        pending = opp.pending_stp_revision
+        now = datetime.utcnow()
+        stamp = f"[{now.strftime('%Y-%m-%d')} by {payload.decided_by or 'Director'}]"
+
+        if payload.decision == "Approved":
+            # Apply proposed field values to the opportunity
+            for field, value in (pending.get("proposed_fields") or {}).items():
+                if value is not None:
+                    setattr(opp, field, Decimal(str(value)) if isinstance(value, (int, float)) else value)
+
+            # Recompute STP financials — same chain as update_opportunity
+            stp_fin = compute_stp_financials(opp)
+            if stp_fin["period_saving"] is not None:
+                opp.period_saving = Decimal(str(stp_fin["period_saving"]))
+                year_n = stp_fin["saving_per_year"][0]
+                if year_n is not None:
+                    opp.expected_annual_saving = Decimal(str(year_n))
+            for idx, attr in enumerate(("saving_year_n", "saving_year_n1", "saving_year_n2", "saving_year_n3")):
+                yr = stp_fin["saving_per_year"][idx]
+                setattr(opp, attr, Decimal(str(yr)) if yr is not None else None)
+            opp.saving_by_year = compute_saving_by_calendar_year(opp) or None
+
+            # Rebuild monthly profile if Phase 3, line is active, and no actuals yet
+            if opp.phase_status == "Phase 3":
+                for fl in (opp.financial_lines or []):
+                    if fl.status != "Active":
+                        continue
+                    has_actuals = any(m.actual_saving is not None for m in (fl.monthly_financials or []))
+                    if not has_actuals and fl.real_start_date:
+                        stp_windows = self._stp_year_windows(opp)
+                        await self._rebuild_monthly_profile(
+                            fl, opp.expected_annual_saving or Decimal("0"),
+                            fl.real_start_date, int(fl.duration_months or 12),
+                            is_period_total=True, windows=stp_windows,
+                        )
+
+            opp.comments = (opp.comments or "") + (
+                f"\n{stamp} STP revision APPROVED. "
+                f"Reason: {payload.note or 'N/A'}. "
+                f"Proposed by: {pending.get('requested_by', 'unknown')}."
+            )
+        else:
+            opp.comments = (opp.comments or "") + (
+                f"\n{stamp} STP revision REJECTED. "
+                f"Reason: {payload.note or 'N/A'}. "
+                f"Proposed by: {pending.get('requested_by', 'unknown')}."
+            )
+
+        opp.pending_stp_revision = None
+        opp.updated_at = now
+        opp.updated_by = payload.decided_by
+
+        # Notify requester
+        requester_email = pending.get("requested_by")
+        if requester_email and "@" in requester_email:
+            try:
+                body = _build_stp_revision_decision_email(opp, payload, pending)
+                await send_email(
+                    subject=f"[STP Revision {payload.decision}] {opp.opportunity_name}",
+                    recipients=[requester_email],
+                    body_html=body,
+                )
+            except Exception as exc:
+                logger.warning("STP revision decision email failed for opp %s: %s", opportunity_id, exc)
+
+        await self.db.flush()
+        await self.db.refresh(opp, ["projects", "financial_lines", "opp_documents", "budget_years", "plant"])
+        return opp
+
+    # ------------------------------------------------------------------
     # Document management
     # ------------------------------------------------------------------
 
@@ -1722,20 +2037,28 @@ class PurchasingValueService:
         line.updated_at = datetime.utcnow()
         line.updated_by = revised_by
 
-        # Rebuild monthly profile with equal monthly distribution (annual ÷ duration)
         duration = int(line.duration_months or 12)
         start = (
             line.real_start_date
             or line.planned_start_date
             or date.today().replace(day=1)
         )
-        # The revised value is a single ANNUAL run-rate (the UI asks for "Revised
-        # Annual Saving"), so rebuild as a flat annual profile (annual/12 repeated each
-        # year). Passing is_period_total=True with no STP windows would spread the
-        # annual figure across the whole duration as if it were a multi-year period
-        # total — understating multi-year STP savings. (Audit follow-up — STP revise.)
+        # D1 — preserve STP escalating window structure on revision.
+        # For STP types the per-year windows are derived from the stored STP formulas
+        # (prices × quantities). Passing is_period_total=True + windows keeps the
+        # Year-N / N+1 / N+2 / N+3 escalation intact after a revision, instead of
+        # collapsing it to a flat annual/12 profile that under-states later years.
+        # For flat types (Negotiation / Cash) the existing flat behaviour is preserved.
+        opp_result = await self.db.execute(
+            select(Opportunity).where(Opportunity.opportunity_id == line.opportunity_id)
+        )
+        opp = opp_result.scalar_one_or_none()
+        is_stp = self._is_period(opp) if opp else False
+        stp_windows = self._stp_year_windows(opp) if is_stp else None
         await self._rebuild_monthly_profile(
-            line, revised_saving, start, duration, is_period_total=False
+            line, revised_saving, start, duration,
+            is_period_total=is_stp,
+            windows=stp_windows,
         )
         await self._recalculate_ytd(line_id)
 
@@ -1820,8 +2143,8 @@ class PurchasingValueService:
             if blob_name:
                 try:
                     await delete_blob(blob_name)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning("Blob delete failed for %s: %s", blob_name, exc)
         await self.db.delete(doc)
         await self.db.flush()
 
@@ -2094,6 +2417,68 @@ def _build_committee_email(
       </div>
     </body></html>"""
 
+
+def _build_stp_revision_request_email(opp: Opportunity, payload, preview: dict) -> str:
+    def _fmt(v): return f"€{v:,.0f}" if v is not None else "N/A"
+    rows = ""
+    labels = {
+        "current_price": "Current Price (Year N)", "proposed_price": "Proposed Price (Year N)",
+        "current_price_n1": "Current Price N+1", "proposed_price_n1": "Proposed Price N+1",
+        "annual_quantity_n1": "Qty Year N", "annual_quantity_n2": "Qty Year N+1",
+        "bonus_before": "Bonus Before", "bonus_after": "Bonus After",
+    }
+    for field, label in labels.items():
+        val = payload.proposed_fields.get(field) if hasattr(payload, "proposed_fields") else getattr(payload, field, None)
+        if val is not None:
+            rows += f'<tr><td style="background:#fefce8;font-weight:600;padding:8px 12px;width:40%">{label}</td><td style="padding:8px 12px;border-bottom:1px solid #fef08a">{val}</td></tr>'
+    return f"""
+    <html><body style="font-family:Arial,sans-serif;color:#111827;max-width:640px;margin:0 auto">
+      <div style="background:#d97706;padding:20px 24px;border-radius:8px 8px 0 0">
+        <h2 style="color:#fff;margin:0;font-size:18px">STP Revision Request — Director Approval Required</h2>
+        <p style="color:#fef3c7;margin:4px 0 0;font-size:13px">{opp.opportunity_name} · {opp.phase_status}</p>
+      </div>
+      <div style="padding:24px;border:1px solid #fde68a;border-top:none;border-radius:0 0 8px 8px">
+        <p>A buyer has submitted a revision of the STP baseline and requires your <strong>approval</strong> before the new values take effect.</p>
+        <p><strong>Justification :</strong> {payload.note}</p>
+        <p><strong>Requested by :</strong> {payload.requested_by or "N/A"}</p>
+        <h3 style="font-size:13px;margin:20px 0 8px;color:#92400e">Proposed Changes</h3>
+        <table style="border-collapse:collapse;width:100%;font-size:13px">{rows}</table>
+        <h3 style="font-size:13px;margin:20px 0 8px;color:#92400e">Savings Impact Preview</h3>
+        <table style="border-collapse:collapse;width:100%;font-size:13px;margin-bottom:16px">
+          <tr><td style="background:#fefce8;font-weight:600;padding:8px 12px;width:40%">Year N (run-rate)</td><td style="padding:8px 12px;border-bottom:1px solid #fef08a">{_fmt(preview.get("saving_year_n"))}</td></tr>
+          <tr><td style="background:#fefce8;font-weight:600;padding:8px 12px">Year N+1</td><td style="padding:8px 12px;border-bottom:1px solid #fef08a">{_fmt(preview.get("saving_year_n1"))}</td></tr>
+          <tr><td style="background:#fefce8;font-weight:600;padding:8px 12px">Period Saving (N→N+3)</td><td style="padding:8px 12px;font-weight:700">{_fmt(preview.get("period_saving"))}</td></tr>
+        </table>
+        <p>Please log in to Purchasing Value Management and <strong>Approve or Reject</strong> this revision.</p>
+        <p style="color:#6b7280;font-size:11px;margin-top:24px">Avocarbon · Purchasing Value Management</p>
+      </div>
+    </body></html>"""
+
+
+def _build_stp_revision_decision_email(opp: Opportunity, payload, pending: dict) -> str:
+    color = "#16a34a" if payload.decision == "Approved" else "#dc2626"
+    icon  = "✅" if payload.decision == "Approved" else "❌"
+    preview = pending.get("computed_preview", {})
+    def _fmt(v): return f"€{v:,.0f}" if v is not None else "N/A"
+    return f"""
+    <html><body style="font-family:Arial,sans-serif;color:#111827;max-width:640px;margin:0 auto">
+      <div style="background:{color};padding:20px 24px;border-radius:8px 8px 0 0">
+        <h2 style="color:#fff;margin:0;font-size:18px">{icon} STP Revision {payload.decision}</h2>
+        <p style="color:#d1fae5 if payload.decision == 'Approved' else #fee2e2;margin:4px 0 0;font-size:13px">{opp.opportunity_name}</p>
+      </div>
+      <div style="padding:24px;border:1px solid #e5e7eb;border-top:none;border-radius:0 0 8px 8px">
+        <p>Your STP revision request for <strong>{opp.opportunity_name}</strong> has been <strong>{payload.decision}</strong>.</p>
+        <p><strong>Director decision by :</strong> {payload.decided_by or "Director"}</p>
+        <p><strong>Reason :</strong> {payload.note or "N/A"}</p>
+        {'<p style="color:#16a34a;font-weight:600">The proposed values have been applied. The monthly savings profile has been updated accordingly.</p>' if payload.decision == "Approved" else '<p style="color:#dc2626;font-weight:600">The current values remain unchanged.</p>'}
+        <h3 style="font-size:13px;margin:20px 0 8px">Savings Preview (submitted)</h3>
+        <table style="border-collapse:collapse;width:100%;font-size:13px">
+          <tr><td style="background:#f9fafb;font-weight:600;padding:8px 12px;width:40%">Year N (run-rate)</td><td style="padding:8px 12px;border-bottom:1px solid #e5e7eb">{_fmt(preview.get("saving_year_n"))}</td></tr>
+          <tr><td style="background:#f9fafb;font-weight:600;padding:8px 12px">Period Saving</td><td style="padding:8px 12px">{_fmt(preview.get("period_saving"))}</td></tr>
+        </table>
+        <p style="color:#6b7280;font-size:11px;margin-top:24px">Avocarbon · Purchasing Value Management</p>
+      </div>
+    </body></html>"""
 
 def _build_validation_email(opp: Opportunity, custom_message: Optional[str]) -> str:
     saving = (

@@ -306,10 +306,14 @@ def compute_budget_year_portions(per_year_savings, savings_start, duration_month
 
     Returns [{"fiscal_year": int, "amount": float, "kind": str}], sorted by year.
     Empty when inputs are missing.
+
+    All internal arithmetic uses Decimal to avoid IEEE 754 float accumulation drift.
+    A residual plug on the last row guarantees sum(amounts) == round(sum(windows), 2)
+    to the cent — same reconciliation contract as _rounded_series().
     """
     if savings_start is None or not per_year_savings:
         return []
-    windows = [float(s) for s in per_year_savings if s is not None]
+    windows = [Decimal(str(s)) for s in per_year_savings if s is not None]
     if not windows:
         return []
     max_months = 12 * len(windows)
@@ -317,12 +321,15 @@ def compute_budget_year_portions(per_year_savings, savings_start, duration_month
     if months <= 0:
         return []
 
+    TWELVE = Decimal("12")
+    TWO_DP = Decimal("0.01")
+
     amount: dict = {}
     mcount: dict = {}
     for t in range(months):
-        monthly = windows[t // 12] / 12.0
+        monthly = windows[t // 12] / TWELVE
         yr = add_months(savings_start, t).year
-        amount[yr] = amount.get(yr, 0.0) + monthly
+        amount[yr] = amount.get(yr, Decimal("0")) + monthly
         mcount[yr] = mcount.get(yr, 0) + 1
 
     years = sorted(amount.keys())
@@ -334,7 +341,21 @@ def compute_budget_year_portions(per_year_savings, savings_start, duration_month
             kind = "Applicable"
         else:
             kind = "Residual"
-        out.append({"fiscal_year": yr, "amount": round(amount[yr], 2), "kind": kind})
+        out.append({"fiscal_year": yr, "amount": amount[yr].quantize(TWO_DP), "kind": kind})
+
+    # Residual plug: absorb any rounding drift into the last row.
+    # Target is the rounded sum of monthly amounts ACTUALLY flowed (not
+    # the sum of all annual windows, which would be wrong when duration_months
+    # truncates the period short of the full window count).
+    target = sum(amount.values()).quantize(TWO_DP)
+    computed = sum(r["amount"] for r in out)
+    residual = target - computed
+    if residual != 0 and out:
+        out[-1]["amount"] = (out[-1]["amount"] + residual).quantize(TWO_DP)
+
+    # Return as float for backward compatibility with callers that expect float.
+    for r in out:
+        r["amount"] = float(r["amount"])
     return out
 
 
@@ -362,7 +383,9 @@ class OpportunityCreateRequest(BaseModel):
     plant_id: Optional[int] = None
     supplier_id: Optional[int] = None
     budget_year: Optional[int] = None
-    budget_status: Optional[str] = Field(None, description="Budgeted | Empty")
+    budget_status: Optional[str] = Field(
+        None, description="Deprecated compatibility field; ignored by the backend."
+    )
 
 
 class OpportunityUpdateRequest(BaseModel):
@@ -378,7 +401,9 @@ class OpportunityUpdateRequest(BaseModel):
     execution_start_date: Optional[date] = Field(None, description="Phase 2 — when execution work began")
     real_start_date: Optional[date] = Field(None, description="Phase 3 — when savings started flowing (triggers R9 profile rebuild)")
     # Contextual
-    budget_status: Optional[str] = None
+    budget_status: Optional[str] = Field(
+        None, description="Deprecated compatibility field; ignored by the backend."
+    )
     budget_year: Optional[int] = None
     change_mode: Optional[str] = Field(None, description="Standard | Silent")
     currency: Optional[str] = Field(None, description="EUR | USD | RMB | INR")
@@ -443,6 +468,35 @@ class OpportunityUpdateRequest(BaseModel):
     secondary_plants: Optional[str] = None
     gate_conditions: Optional[str] = Field(None, description="Conditions / Actions requested at the gate")
     changed_by: Optional[str] = None
+
+
+class STPRevisionRequestPayload(BaseModel):
+    """Buyer submits proposed STP price/volume changes for Director approval."""
+    director_email: str = Field(..., description="Email of the Purchasing Director who will approve")
+    note: str = Field(..., min_length=1, description="Justification — mandatory for audit trail")
+    requested_by: Optional[str] = None
+    # Proposed STP baseline fields (any subset — only provided fields are changed)
+    current_price:      Optional[Decimal] = None
+    proposed_price:     Optional[Decimal] = None
+    current_price_n1:   Optional[Decimal] = None
+    current_price_n2:   Optional[Decimal] = None
+    current_price_n3:   Optional[Decimal] = None
+    proposed_price_n1:  Optional[Decimal] = None
+    proposed_price_n2:  Optional[Decimal] = None
+    proposed_price_n3:  Optional[Decimal] = None
+    annual_quantity_n1: Optional[int] = None
+    annual_quantity_n2: Optional[int] = None
+    annual_quantity_n3: Optional[int] = None
+    annual_quantity_n4: Optional[int] = None
+    bonus_before:       Optional[Decimal] = None
+    bonus_after:        Optional[Decimal] = None
+
+
+class STPRevisionDecisionPayload(BaseModel):
+    """Director approves or rejects a pending STP revision request."""
+    decision: str = Field(..., description="Approved | Rejected")
+    decided_by: Optional[str] = None
+    note: Optional[str] = None
 
 
 class GateDecisionRequest(BaseModel):
@@ -691,7 +745,7 @@ class OpportunityResponse(BaseModel):
     planned_start_date: Optional[date] = None
     real_start_date: Optional[date] = None
     duration_months: Optional[Decimal] = None
-    budget_status: Optional[str] = None
+    validation_status: Optional[str] = None
     budget_year: Optional[Decimal] = None
     budget_confirmed_at: Optional[datetime] = None
     budget_confirmed_by: Optional[str] = None
@@ -773,6 +827,8 @@ class OpportunityResponse(BaseModel):
     reason_other: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+    # STP revision approval — non-null when a Director-approval request is pending
+    pending_stp_revision: Optional[dict] = None
     projects: List[ProjectResponse] = Field(default_factory=list)
     financial_lines: List[FinancialLineResponse] = Field(default_factory=list)
     budget_years: List[BudgetYearResponse] = Field(default_factory=list)

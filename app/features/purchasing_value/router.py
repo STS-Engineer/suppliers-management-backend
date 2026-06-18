@@ -107,6 +107,50 @@ async def update_opportunity(
         raise
 
 
+@router.post("/opportunities/{opportunity_id}/request-stp-revision", response_model=dict)
+async def request_stp_revision(
+    opportunity_id: int,
+    payload: schemas.STPRevisionRequestPayload,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Buyer submits proposed STP price/volume changes for Director approval (Phase 2/3)."""
+    try:
+        svc = PurchasingValueService(db)
+        await svc.request_stp_revision(opportunity_id, payload)
+        await db.commit()
+        fresh = await svc.get_opportunity(opportunity_id)
+        return {"status": "success", "data": opportunity_to_response(fresh)}
+    except AppException:
+        await db.rollback()
+        raise
+    except Exception:
+        await db.rollback()
+        raise
+
+
+@router.post("/opportunities/{opportunity_id}/decide-stp-revision", response_model=dict)
+async def decide_stp_revision(
+    opportunity_id: int,
+    payload: schemas.STPRevisionDecisionPayload,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Purchasing Director approves or rejects a pending STP revision request."""
+    try:
+        svc = PurchasingValueService(db)
+        await svc.decide_stp_revision(opportunity_id, payload)
+        await db.commit()
+        fresh = await svc.get_opportunity(opportunity_id)
+        return {"status": "success", "data": opportunity_to_response(fresh)}
+    except AppException:
+        await db.rollback()
+        raise
+    except Exception:
+        await db.rollback()
+        raise
+
+
 @router.post("/opportunities/{opportunity_id}/start-study", response_model=dict)
 async def start_study(
     opportunity_id: int,
