@@ -2203,6 +2203,14 @@ class Opportunity(GovernanceMixin, Base):
         back_populates="opportunity", cascade="all, delete-orphan", passive_deletes=True
     )
 
+    gate_approval_requests: Mapped[List["GateApprovalRequest"]] = relationship(
+        "GateApprovalRequest",
+        back_populates="opportunity",
+        cascade="all, delete-orphan",
+        order_by="GateApprovalRequest.requested_at.desc()",
+        lazy="selectin",
+    )
+
     def __repr__(self) -> str:
         return f"<Opportunity id={self.opportunity_id} name={self.opportunity_name!r}>"
 
@@ -2229,6 +2237,67 @@ class OpportunityPhaseSnapshot(GovernanceMixin, Base):
     opportunity_snapshot: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
 
     opportunity: Mapped["Opportunity"] = relationship(back_populates="phase_snapshots")
+
+
+class GateApprovalRequest(GovernanceMixin, Base):
+    """One per gate submission — groups all approver votes."""
+    __tablename__ = "gate_approval_request"
+
+    request_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    opportunity_id: Mapped[int] = mapped_column(
+        ForeignKey("opportunity.opportunity_id", ondelete="CASCADE"),
+        nullable=False, index=True
+    )
+    phase_from: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    requested_by: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    requested_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    status: Mapped[Optional[str]] = mapped_column(String(20), nullable=True, default="Pending")
+    # Pending | Completed | Expired
+    consensus_result: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    # Go | No Go | Review — set when all votes in
+    applied_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    opportunity_snapshot: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_by: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+
+    votes: Mapped[List["GateApprovalVote"]] = relationship(
+        "GateApprovalVote",
+        back_populates="request",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
+    opportunity: Mapped["Opportunity"] = relationship(
+        "Opportunity", back_populates="gate_approval_requests", lazy="selectin"
+    )
+
+
+class GateApprovalVote(GovernanceMixin, Base):
+    """One per approver per gate approval request."""
+    __tablename__ = "gate_approval_vote"
+
+    vote_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    request_id: Mapped[int] = mapped_column(
+        ForeignKey("gate_approval_request.request_id", ondelete="CASCADE"),
+        nullable=False, index=True
+    )
+    approver_email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    access_token: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, unique=True, index=True)
+    token_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    accessed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    is_plant_manager: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True, default=False)
+    decision: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    # Approved | Rejected | Needs Review
+    comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    project_manager_email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    decided_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    ip_address: Mapped[Optional[str]] = mapped_column(String(45), nullable=True)
+    created_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_by: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+
+    request: Mapped["GateApprovalRequest"] = relationship(
+        "GateApprovalRequest", back_populates="votes"
+    )
 
 
 class Project(GovernanceMixin, Base):

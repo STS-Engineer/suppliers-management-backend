@@ -9,6 +9,7 @@ from app.features.supplier_relations.router import router as supplier_relations_
 
 from app.features.purchasing_value.router import router as purchasing_value_router
 from app.features.evaluations.router import router as evaluations_router
+from app.features.gate_approval.router import router as gate_approval_router
 
 
 # Create API router
@@ -21,3 +22,4 @@ api_router.include_router(suppliers_router)
 api_router.include_router(supplier_relations_router)
 api_router.include_router(purchasing_value_router)
 api_router.include_router(evaluations_router)
+api_router.include_router(gate_approval_router)
