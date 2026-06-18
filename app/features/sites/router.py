@@ -53,6 +53,11 @@ async def list_site_panel(
     evaluation_end: date | None = Query(default=None),
     purchase_manager: str | None = Query(default=None),
     plant_manager: str | None = Query(default=None),
+    scope: str | None = Query(default=None),
+    family: str | None = Query(default=None),
+    sub_family: str | None = Query(default=None),
+    product_line: str | None = Query(default=None),
+    supplier_name: str | None = Query(default=None),
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
@@ -71,6 +76,11 @@ async def list_site_panel(
             evaluation_end=evaluation_end,
             purchase_manager=purchase_manager,
             plant_manager=plant_manager,
+            scope=scope,
+            family=family,
+            sub_family=sub_family,
+            product_line=product_line,
+            supplier_name=supplier_name,
         )
 
         return {

@@ -66,6 +66,11 @@ class SiteService:
         evaluation_end: Optional[date] = None,
         purchase_manager: Optional[str] = None,
         plant_manager: Optional[str] = None,
+        scope: Optional[str] = None,
+        family: Optional[str] = None,
+        sub_family: Optional[str] = None,
+        product_line: Optional[str] = None,
+        supplier_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         has_contact_relation = await self._has_contact_site_relation_table()
         loader_options = [
@@ -147,6 +152,20 @@ class SiteService:
                 if evaluation_end and (
                     not relation.last_evaluation_date
                     or relation.last_evaluation_date > evaluation_end
+                ):
+                    continue
+
+                if scope and not matches_text(relation.supplier_scope, scope):
+                    continue
+                if family and not matches_text(unit.family, family):
+                    continue
+                if sub_family and not matches_text(unit.sub_family, sub_family):
+                    continue
+                if product_line and not matches_text(unit.product_line, product_line):
+                    continue
+                if supplier_name and not (
+                    matches_text(group.nom, supplier_name)
+                    or matches_text(unit.supplier_code, supplier_name)
                 ):
                     continue
 
