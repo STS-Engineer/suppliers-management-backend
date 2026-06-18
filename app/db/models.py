@@ -2071,8 +2071,11 @@ class Opportunity(GovernanceMixin, Base):
     cash_impact: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2), nullable=True)
     validation_request_sent_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     validation_request_sent_by: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
-    # Budget & validation tracking
-    budget_status: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    # Derived workflow maturity / validation tracking. This is distinct from the
+    # manual per-fiscal-year budget decision stored on OpportunityBudgetYear.
+    validation_status: Mapped[Optional[str]] = mapped_column(
+        String(50), nullable=True
+    )
     budget_confirmed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     budget_confirmed_by: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
     val_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
@@ -2169,6 +2172,9 @@ class Opportunity(GovernanceMixin, Base):
     secondary_plants: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     # Excel Phase 0 C67 — "Conditions / Actions requested" at the committee gate
     gate_conditions: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # STP revision approval — JSONB stores a pending director-approval request while
+    # current values remain active.  Cleared on approve or reject.
+    pending_stp_revision: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
 
     plant: Mapped[Optional["AvocarbonSite"]] = relationship(
         back_populates="opportunities"
@@ -2384,7 +2390,7 @@ class OpportunityBudgetYear(GovernanceMixin, Base):
     project runs (see compute_budget_year_portions). `budget_status` is the per-year
     buyer decision (Empty | Opportunity | Budgeted) and is NEVER overwritten by the
     recompute; `suggested_status` is the phase-derived default. Source of truth for
-    the budgeting module; `Opportunity.budget_status` is a derived rollup.
+    the budgeting module; `Opportunity.validation_status` is a derived rollup.
     """
 
     __tablename__ = "opportunity_budget_year"
