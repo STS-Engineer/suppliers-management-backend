@@ -62,6 +62,7 @@ uploads/*
 .coverage
 htmlcov/
 .tox/
+tests/reports/
 
 # OS
 .DS_Store
@@ -72,3 +73,9 @@ Thumbs.db
 *.sublime-workspace
 
 cmd.md
+
+notes.txt
+
+tests/
+
+pytest.ini
