@@ -1,15 +1,15 @@
-fastapi 
-uvicorn 
-sqlalchemy 
-asyncpg 
-alembic 
-pydantic-settings
-python-jose[cryptography]
-passlib[bcrypt]
-python-multipart
-azure-storage-blob
-azure-core
-openpyxl
-reportlab
+fastapi==0.136.1
+uvicorn==0.47.0
+sqlalchemy==2.0.49
+asyncpg==0.31.0
+alembic==1.18.4
+pydantic-settings==2.14.1
+python-jose[cryptography]==3.5.0
+passlib[bcrypt]==1.7.4
+python-multipart==0.0.29
+azure-storage-blob==12.29.0
+azure-core==1.41.0
+openpyxl==3.1.5
+reportlab==4.5.1
 
 # azure-identity
