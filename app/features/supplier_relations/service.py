@@ -74,7 +74,10 @@ PLAN_STATUS_REQUEST_SENT = "Request sent"
 
 CRITERIA_VALUE_NORMALIZATION = {
     "top": {
-        "60 days eom or +": "60 days end of month or +",
+        # Old DB string → Monday canonical
+        "60 days end of month or +": "60 days eom or +",
+        # Typo/spacing variants
+        "60 days eom or+": "60 days eom or +",
     },
     "lta": {
         "3 years /+": "3 years/+",
@@ -85,26 +88,49 @@ CRITERIA_VALUE_NORMALIZATION = {
         "Not Competitive": "Not Comp.",
     },
     "sqma": {
-        "Signed M.Res/not sent": "Signed M/Res/not sent",
+        # Old slash variant → Monday canonical (period after M)
+        "Signed M/Res/not sent": "Signed M.Res/not sent",
+        "signed m/res/not sent": "Signed M.Res/not sent",
     },
     "family_coverage": {
-        "1 ref": "Supplier can make 1 family requirements",
-        "100% Cov.": "Supplier can make all the family requirements",
-        "1 sub-F or refs Cov.": "Supplier can make only of few family requirements",
-        "Main sub-Fam Cov.": "Supplier can make the main family requirements",
+        # Old long English → Monday short codes
+        "Supplier can make all the family requirements": "100% Cov.",
+        "Supplier can make the main family requirements": "Main sub-Fam Cov.",
+        "Supplier can make only of few family requirements": "1 sub-F or refs Cov.",
+        "Supplier can make 1 family requirements": "1 ref",
+        # Old short aliases used during data loading
+        "100% cov.": "100% Cov.",
+        "Main Fam.": "Main sub-Fam Cov.",
+        "main fam.": "Main sub-Fam Cov.",
+        "1 Family": "1 ref",
+        "1 family": "1 ref",
+        "Few Fam.": "1 sub-F or refs Cov.",
+        "few fam.": "1 sub-F or refs Cov.",
     },
     "geo_coverage": {
+        "100% Cov.": "Main plants covered",
         "50% or +": "More than 50% plants are covered",
+        "1 plant cov.": "1 plant is covered",
+        "None": "None",
     },
     "cons_or_wd": {
-        "Cons. or WD": "Cons. Or Daily Deliveries",
-        "Cons. or WD Inter. User": "DDP or Weekly Del.",
-        "None": "Other",
+        # Old canonical long form → Monday short code
+        "Cons. Or Daily Deliveries": "Cons. or WD",
+        "Cons. or daily deliveries": "Cons. or WD",
+        "cons. or wd": "Cons. or WD",
+        # Normalize lowercase d variant
+        "Biweekly del.": "Biweekly Del.",
+        "biweekly del.": "Biweekly Del.",
     },
     "quality_certification": {
         "IATF 16949:2016": "IATF / ISO9001 (cat BCD)",
+        "IS09001 (cat BCD)": "IATF / ISO9001 (cat BCD)",
         "ISO9001 (cat BCD)": "IATF / ISO9001 (cat BCD)",
         "Distributor": "None",
+    },
+    "prod_lia_ins": {
+        "2M€ or +": "2M$ or +",
+        "1M€ or +": "1M$ or +",
     },
 }
 
@@ -3932,7 +3958,8 @@ class SupplierRelationService:
         self,
         merged_values: dict[str, Optional[str]],
     ) -> Optional[Decimal]:
-        selected_scores: list[Decimal] = []
+        # Always divide by 11 (fixed denominator, same as Monday.com formula).
+        # Missing criteria count as 0; an unrecognized value also counts as 0.
         criteria_map = {
             "top": merged_values.get("top"),
             "lta": merged_values.get("lta"),
@@ -3947,9 +3974,13 @@ class SupplierRelationService:
             "financial_health": merged_values.get("financial_health"),
         }
 
+        total = Decimal("0")
+        any_filled = False
+
         for criteria_type, selected_value in criteria_map.items():
             if not selected_value:
                 continue
+            any_filled = True
             stmt = (
                 select(PldScoringRules)
                 .where(PldScoringRules.criteria_type == criteria_type)
@@ -3960,11 +3991,12 @@ class SupplierRelationService:
             result = await self.db.execute(stmt)
             rule = result.scalars().first()
             if rule and rule.score is not None:
-                selected_scores.append(Decimal(str(rule.score)))
+                total += Decimal(str(rule.score))
+            # unrecognized value → 0 (already 0 from init)
 
-        if not selected_scores:
+        if not any_filled:
             return None
-        return sum(selected_scores) / Decimal(len(selected_scores))
+        return total / Decimal("11")
 
     @staticmethod
     def _pluck(instance: Any, field_name: str) -> Any:
@@ -4044,6 +4076,7 @@ class SupplierRelationService:
             "30 days end of month or +": Decimal("50"),
             "30 days net": Decimal("30"),
             "Cash in Advance": Decimal("0"),
+            "15 days net": Decimal("10"),
             "3 years/+": Decimal("100"),
             "2 years": Decimal("80"),
             "1 year": Decimal("50"),
@@ -4058,25 +4091,25 @@ class SupplierRelationService:
             "None": Decimal("0"),
             "2M$ or +": Decimal("100"),
             "1M$ or +": Decimal("50"),
-            "Almost Best in Fam.": Decimal("80"),
             "Best in Fam.": Decimal("100"),
+            "Almost Best in Fam.": Decimal("80"),
             "Ave. in Fam.": Decimal("50"),
             "Less Avg": Decimal("30"),
             "Not Comp.": Decimal("0"),
-            "Rejected": Decimal("0"),
             "Signed": Decimal("100"),
-            "Signed m.res.": Decimal("80"),
+            "Signed m.res.": Decimal("50"),
             "Signed M/Res/not sent": Decimal("30"),
-            "Supplier can make 1 family requirements": Decimal("0"),
+            "Rejected": Decimal("0"),
             "Supplier can make all the family requirements": Decimal("100"),
-            "Supplier can make only of few family requirements": Decimal("50"),
-            "Supplier can make the main family requirements": Decimal("80"),
-            "1 plant is covered": Decimal("30"),
+            "Supplier can make the main family requirements": Decimal("50"),
+            "Supplier can make only of few family requirements": Decimal("30"),
+            "Supplier can make 1 family requirements": Decimal("0"),
             "Main plants covered": Decimal("100"),
             "More than 50% plants are covered": Decimal("50"),
-            "Biweekly Del.": Decimal("30"),
+            "1 plant is covered": Decimal("30"),
             "Cons. Or Daily Deliveries": Decimal("100"),
             "DDP or Weekly Del.": Decimal("50"),
+            "Biweekly Del.": Decimal("30"),
             "Other": Decimal("0"),
             "Good": Decimal("100"),
             "To Monitor": Decimal("50"),
@@ -4116,11 +4149,11 @@ class SupplierRelationService:
 
     @staticmethod
     def _derive_class_value_from_score(score: Decimal) -> int:
-        if score >= Decimal("90"):
+        if score >= Decimal("80"):
             return 1
-        if score >= Decimal("75"):
+        if score >= Decimal("50"):
             return 2
-        if score >= Decimal("60"):
+        if score >= Decimal("30"):
             return 3
         return 4
 

@@ -103,6 +103,8 @@ class SupplierUnitBase(BaseModel):
     address_line: Optional[str] = Field(None, max_length=255, description="Street address")
     city: Optional[str] = Field(None, max_length=100, description="City")
     country: Optional[str] = Field(None, max_length=100, description="Country")
+    continent: Optional[str] = Field(None, max_length=100, description="Continent of supplier location")
+    area: Optional[str] = Field(None, max_length=100, description="Geographic area / region")
     product_type: Optional[str] = Field(None, max_length=255, description="Type of products supplied (legacy)")
     product_category: Optional[str] = Field(None, max_length=255, description="Product category (legacy)")
     # Product classification — stored comma-separated, accept list or string
@@ -110,15 +112,29 @@ class SupplierUnitBase(BaseModel):
     sub_family: Optional[str] = Field(None, max_length=500, description="Product sub-family (comma-separated)")
     product_line: Optional[str] = Field(None, max_length=500, description="Product line (comma-separated)")
     website: Optional[str] = Field(None, max_length=500, description="Supplier unit website URL")
+    supplier_email: Optional[str] = Field(None, max_length=255, description="Main supplier contact email")
+    commodity_responsible: Optional[str] = Field(None, max_length=200, description="Avocarbon commodity responsible person")
+    main_plants: Optional[str] = Field(None, description="Avocarbon plants this unit primarily supplies (comma-separated)")
+    # Environmental / GHG data (from SB6 board)
     carbon_footprint: Optional[str] = Field(None, max_length=100, description="Annual carbon footprint (tCO2e)")
     green_electricity_pct: Optional[str] = Field(None, max_length=10, description="Green electricity share (%)")
     copper_brass_pct: Optional[str] = Field(None, max_length=10, description="Copper/Brass content (%)")
+    scope1_ghg: Optional[Decimal] = Field(None, description="Scope 1 GHG emissions (tCO2e)")
+    scope2_ghg: Optional[Decimal] = Field(None, description="Scope 2 GHG emissions (tCO2e)")
+    ghg_comments: Optional[str] = Field(None, description="GHG data comments")
+    ghg_requested_date: Optional[date] = Field(None, description="Date GHG data was requested from supplier")
+    ghg_completion_pct: Optional[str] = Field(None, max_length=50, description="GHG questionnaire completion percentage")
     category: Optional[str] = Field(None, max_length=500, description="Product category (comma-separated, e.g. Ferrites,Chokes)")
     amount_value: Optional[Decimal] = Field(None, description="Annual spend value")
     amount_currency: Optional[str] = Field(None, max_length=10, description="Currency code (USD, EUR, etc.)")
     strategique: Optional[bool] = Field(False, description="Is this unit strategic?")
     monopolistique: Optional[bool] = Field(False, description="Is this unit monopolistic?")
     directed: Optional[bool] = Field(False, description="Is this unit directed?")
+
+    @field_validator("scope1_ghg", "scope2_ghg", "amount_value", mode="before")
+    @classmethod
+    def coerce_unit_decimals(cls, v: object) -> Optional[Decimal]:
+        return _coerce_decimal(v)
 
     @field_validator("family", "sub_family", "product_line", "category", mode="before")
     @classmethod
@@ -130,10 +146,6 @@ class SupplierUnitBase(BaseModel):
             return ",".join(str(x).strip() for x in v if str(x).strip())
         return str(v) if v != "" else None
 
-    @field_validator("amount_value", mode="before")
-    @classmethod
-    def coerce_unit_amount(cls, v: object) -> Optional[Decimal]:
-        return _coerce_decimal(v)
 
 
 class SupplierUnitCreate(SupplierUnitBase):
@@ -340,36 +352,47 @@ class EvaluationDetailsBase(BaseModel):
     @field_validator("top")
     @classmethod
     def validate_top(cls, value: Optional[str]) -> Optional[str]:
-        if value is not None and value not in TOP_VALUES:
-            raise ValueError(f"top must be one of: {', '.join(sorted(TOP_VALUES))}")
+        if value is None:
+            return value
+        _top_map = {
+            "60 days end of month or +": "60 days eom or +",
+            "60 days eom or+": "60 days eom or +",
+        }
+        value = _top_map.get(value, value)
+        if value not in TOP_VALUES:
+            return value  # pass through unknown legacy values
         return value
 
     @field_validator("lta")
     @classmethod
     def validate_lta(cls, value: Optional[str]) -> Optional[str]:
-        if value is not None and value not in LTA_VALUES:
-            raise ValueError(f"lta must be one of: {', '.join(sorted(LTA_VALUES))}")
+        if value is None:
+            return value
+        _lta_map = {"None": "None/Invalid", "none": "None/Invalid", "invalid": "None/Invalid"}
+        value = _lta_map.get(value, value)
+        if value not in LTA_VALUES:
+            return value  # pass through unknown legacy values
         return value
 
     @field_validator("sqma")
     @classmethod
     def validate_sqma(cls, value: Optional[str]) -> Optional[str]:
-        if value is not None and value not in SQMA_VALUES:
-            raise ValueError(f"sqma must be one of: {', '.join(sorted(SQMA_VALUES))}")
+        if value is None:
+            return value
+        _sqma_map = {
+            "Signed M/Res/not sent": "Signed M.Res/not sent",
+            "signed m/res/not sent": "Signed M.Res/not sent",
+        }
+        value = _sqma_map.get(value, value)
+        if value not in SQMA_VALUES:
+            return value  # pass through unknown legacy values
         return value
 
     @field_validator("quality_certification")
     @classmethod
     def validate_quality_certification(cls, value: Optional[str]) -> Optional[str]:
-        # Accept new values and keep legacy values for backward compatibility
-        all_valid = CERTIFICATION_TYPE_VALUES | {
-            "IATF 16949:2016", "ISO 9001 (cat BCD)", "ISO 9001", "Distributor",
-        }
-        if value is not None and value not in all_valid:
-            raise ValueError(
-                "quality_certification must be one of: "
-                + ", ".join(sorted(all_valid))
-            )
+        if value is not None:
+            return value  # pass through — certification values vary too much across boards
         return value
 
     @field_validator("operational_class")
@@ -395,60 +418,94 @@ class EvaluationDetailsBase(BaseModel):
     @field_validator("family_coverage")
     @classmethod
     def validate_family_coverage(cls, value: Optional[str]) -> Optional[str]:
-        if value is not None and value not in FAMILY_COVERAGE_VALUES:
-            raise ValueError(
-                f"family_coverage must be one of: {', '.join(sorted(FAMILY_COVERAGE_VALUES))}"
-            )
+        if value is None:
+            return value
+        _fc_map = {
+            # Old long English → Monday short codes
+            "Supplier can make all the family requirements": "100% Cov.",
+            "Supplier can make the main family requirements": "Main sub-Fam Cov.",
+            "Supplier can make only of few family requirements": "1 sub-F or refs Cov.",
+            "Supplier can make 1 family requirements": "1 ref",
+            # Old short aliases
+            "100% cov.": "100% Cov.",
+            "Main Fam.": "Main sub-Fam Cov.",
+            "main fam.": "Main sub-Fam Cov.",
+            "1 Family": "1 ref",
+            "1 family": "1 ref",
+            "Few Fam.": "1 sub-F or refs Cov.",
+            "few fam.": "1 sub-F or refs Cov.",
+        }
+        value = _fc_map.get(value, value)
+        if value not in FAMILY_COVERAGE_VALUES:
+            return value  # pass through unknown legacy values
         return value
 
     @field_validator("competitiveness")
     @classmethod
     def validate_competitiveness(cls, value: Optional[str]) -> Optional[str]:
         if value is not None and value not in COMPETITIVENESS_VALUES:
-            raise ValueError(
-                f"competitiveness must be one of: {', '.join(sorted(COMPETITIVENESS_VALUES))}"
-            )
+            return value  # pass through legacy values
         return value
 
     @field_validator("geo_coverage")
     @classmethod
     def validate_geo_coverage(cls, value: Optional[str]) -> Optional[str]:
         if value is not None and value not in GEO_COVERAGE_VALUES:
-            raise ValueError(
-                f"geo_coverage must be one of: {', '.join(sorted(GEO_COVERAGE_VALUES))}"
-            )
+            return value  # pass through legacy values
         return value
 
     @field_validator("cons_or_wd")
     @classmethod
     def validate_cons_or_wd(cls, value: Optional[str]) -> Optional[str]:
-        if value is not None and value not in CONS_OR_WD_VALUES:
-            raise ValueError(f"cons_or_wd must be one of: {', '.join(sorted(CONS_OR_WD_VALUES))}")
+        if value is None:
+            return value
+        _cwd_map = {
+            # Old canonical long form → Monday short code
+            "Cons. Or Daily Deliveries": "Cons. or WD",
+            "Cons. or daily deliveries": "Cons. or WD",
+            "cons. or wd": "Cons. or WD",
+            # Normalize lowercase d variant from formulas.py
+            "Biweekly del.": "Biweekly Del.",
+            "biweekly del.": "Biweekly Del.",
+            # Case variants
+            "DDP or weekly del.": "DDP or Weekly Del.",
+            "ddp or weekly del.": "DDP or Weekly Del.",
+        }
+        value = _cwd_map.get(value, value)
+        if value not in CONS_OR_WD_VALUES:
+            return value  # pass through unknown legacy values
         return value
 
     @field_validator("financial_health")
     @classmethod
     def validate_financial_health(cls, value: Optional[str]) -> Optional[str]:
         if value is not None and value not in FINANCIAL_HEALTH_VALUES:
-            raise ValueError(
-                f"financial_health must be one of: {', '.join(sorted(FINANCIAL_HEALTH_VALUES))}"
-            )
+            return value  # pass through legacy values
         return value
 
     @field_validator("prod_lia_ins")
     @classmethod
     def validate_prod_lia_ins(cls, value: Optional[str]) -> Optional[str]:
-        if value is not None and value not in PROD_LIA_INS_VALUES:
-            raise ValueError(
-                f"prod_lia_ins must be one of: {', '.join(sorted(PROD_LIA_INS_VALUES))}"
-            )
+        if value is None:
+            return value
+        _pli_map = {
+            "2M€ or +": "2M$ or +",
+            "2m€ or +": "2M$ or +",
+            "1M€ or +": "1M$ or +",
+            "1m€ or +": "1M$ or +",
+            "2M$ or+": "2M$ or +",
+            "1M$ or+": "1M$ or +",
+        }
+        value = _pli_map.get(value, value)
+        if value not in PROD_LIA_INS_VALUES:
+            return value  # pass through unknown legacy values
         return value
 
     @field_validator("prod")
     @classmethod
     def validate_prod(cls, value: Optional[str]) -> Optional[str]:
         if value is not None and value not in PROD_VALUES:
-            raise ValueError(f"prod must be one of: {', '.join(sorted(PROD_VALUES))}")
+            return value  # pass through legacy values
         return value
 
     @field_validator("strategic_mention")
@@ -459,12 +516,12 @@ class EvaluationDetailsBase(BaseModel):
         parts = [p.strip().lower() for p in value.split(",") if p.strip()]
         if not parts:
             return None
-        invalid = [p for p in parts if p not in STRATEGIC_MENTION_VALUES]
-        if invalid:
-            raise ValueError(
-                f"strategic_mention must be one of: {', '.join(sorted(STRATEGIC_MENTION_VALUES))}"
-            )
-        return ",".join(sorted(parts))
+        # Normalize known values; pass through unknowns to avoid crashing on legacy DB data
+        known = [p for p in parts if p in STRATEGIC_MENTION_VALUES]
+        unknown = [p for p in parts if p not in STRATEGIC_MENTION_VALUES]
+        if unknown and not known:
+            return value  # all unknown — return as-is
+        return ",".join(sorted(known)) if known else value
 
     @field_validator("panel_decision")
     @classmethod
@@ -473,9 +530,7 @@ class EvaluationDetailsBase(BaseModel):
             return value
         v = value.lower()
         if v not in PANEL_DECISION_VALUES:
-            raise ValueError(
-                f"panel_decision must be one of: {', '.join(sorted(PANEL_DECISION_VALUES))}"
-            )
+            return value  # pass through legacy values
         return v
 
 
@@ -558,6 +613,18 @@ class SupplierSiteRelationCreate(BaseModel):
     alias_1: Optional[str] = Field(None, max_length=200, description="Alias for this relation")
     evaluation_comments: Optional[str] = Field(None, description="Initial evaluation comments")
     evaluation_suggestion: Optional[str] = Field(None, max_length=255, description="Initial evaluation suggestion")
+    # Supplier Panel (SB1) fields
+    transport_mode: Optional[str] = Field(None, max_length=100, description="Transport mode (e.g., Sea, Air, Road)")
+    transit_days: Optional[int] = Field(None, description="Transit time in days")
+    incoterm_place: Optional[str] = Field(None, max_length=200, description="Incoterm and delivery place")
+    real_ap_days: Optional[int] = Field(None, description="Real accounts payable days")
+    real_ap_days_validated: Optional[int] = Field(None, description="Validated AP days")
+    consignment: Optional[bool] = Field(None, description="Consignment stock agreement")
+    preferred_dev_supplier: Optional[bool] = Field(None, description="Preferred development supplier flag")
+    data_validity: Optional[str] = Field(None, max_length=50, description="Data validity status from SB1")
+    quality_cert_required: Optional[str] = Field(None, max_length=200, description="Required quality certification")
+    delivery_status: Optional[str] = Field(None, max_length=50, description="Delivery status")
+    req_ap_date: Optional[date] = Field(None, description="Required accounts payable date")
 
 
 class SupplierSiteRelationResponse(BaseModel):
@@ -567,6 +634,7 @@ class SupplierSiteRelationResponse(BaseModel):
     id_supplier_unit: int
     relation_code: Optional[str] = None
     unit_code: Optional[str] = None
+    sb1_item_name: Optional[str] = None
     supplier_scope: Optional[str] = None
     supplier_owner: Optional[str] = None
     annual_spend_value: Optional[Decimal] = None
@@ -587,9 +655,82 @@ class SupplierSiteRelationResponse(BaseModel):
     last_status_change: Optional[datetime] = None
     evaluation_comments: Optional[str] = None
     evaluation_suggestion: Optional[str] = None
+    # Supplier Panel (SB1) fields
+    last_eval_score: Optional[Decimal] = None
+    transport_mode: Optional[str] = None
+    transit_days: Optional[int] = None
+    incoterm_place: Optional[str] = None
+    real_ap_days: Optional[int] = None
+    real_ap_days_validated: Optional[int] = None
+    consignment: Optional[bool] = None
+    preferred_dev_supplier: Optional[bool] = None
+    data_validity: Optional[str] = None
+    quality_cert_required: Optional[str] = None
+    delivery_status: Optional[str] = None
+    req_ap_date: Optional[date] = None
 
     class Config:
         from_attributes = True
+
+
+# ============================================================================
+# Carbon Footprint Schema (SB8)
+# ============================================================================
+
+class SupplierCarbonFootprintResponse(BaseModel):
+    """Response schema for supplier carbon footprint record (SB8 board)."""
+    id_carbon_footprint: int
+    id_supplier_unit: Optional[int] = None
+    id_relation: Optional[int] = None
+    year: Optional[int] = None
+    carbon_fp_grade: Optional[str] = None
+    purchase_amount: Optional[Decimal] = None
+    weighted_footprint: Optional[Decimal] = None
+    production_fp_grade: Optional[str] = None
+    transport_impact: Optional[Decimal] = None
+    global_fp_impact: Optional[Decimal] = None
+    supplier_origin: Optional[str] = None
+    supplier_continent: Optional[str] = None
+    site_location: Optional[str] = None
+    site_continent: Optional[str] = None
+    supplier_unit_code: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class CarbonFootprintUpdateRequest(BaseModel):
+    """Partial update for a carbon footprint record."""
+    year: Optional[int] = None
+    carbon_fp_grade: Optional[str] = None
+    purchase_amount: Optional[Decimal] = None
+    weighted_footprint: Optional[Decimal] = None
+    production_fp_grade: Optional[str] = None
+    transport_impact: Optional[Decimal] = None
+    global_fp_impact: Optional[Decimal] = None
+    supplier_origin: Optional[str] = None
+    supplier_continent: Optional[str] = None
+    site_location: Optional[str] = None
+    site_continent: Optional[str] = None
+
+
+class CarbonFootprintCreateRequest(BaseModel):
+    """Create a new carbon footprint record."""
+    id_supplier_unit: Optional[int] = None
+    id_relation: Optional[int] = None
+    year: Optional[int] = None
+    carbon_fp_grade: Optional[str] = None
+    purchase_amount: Optional[Decimal] = None
+    weighted_footprint: Optional[Decimal] = None
+    production_fp_grade: Optional[str] = None
+    transport_impact: Optional[Decimal] = None
+    global_fp_impact: Optional[Decimal] = None
+    supplier_origin: Optional[str] = None
+    supplier_continent: Optional[str] = None
+    site_location: Optional[str] = None
+    site_continent: Optional[str] = None
 
 
 class InitialUnitEvaluationRequest(EvaluationDetailsBase):

@@ -3,7 +3,8 @@ from datetime import datetime
 from decimal import Decimal
 from typing import List, Optional, Dict, Any
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
+from sqlalchemy.orm import selectinload
 from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,6 +27,7 @@ from app.db.models import (
     OperationalEvaluationInput,
     PldClassEvaluationInput,
     ScoreCard,
+    SupplierCarbonFootprint,
 )
 from app.features.suppliers import schemas
 from app.core.exceptions import AppException
@@ -1018,6 +1020,133 @@ class SupplierService:
             "evaluation_comments": relation.evaluation_comments,
             "evaluation_suggestion": relation.evaluation_suggestion,
         }
+
+    # ========================================================================
+    # Carbon Footprint Operations (SB8)
+    # ========================================================================
+
+    async def list_carbon_footprints(
+        self,
+        skip: int = 0,
+        limit: int = 100,
+        unit_id: Optional[int] = None,
+        relation_id: Optional[int] = None,
+        year: Optional[int] = None,
+        continent: Optional[str] = None,
+        origin: Optional[str] = None,
+        site_location: Optional[str] = None,
+        supplier_unit_code: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """List carbon footprint records with optional filters."""
+        from app.db.models import SupplierUnit as _SupplierUnit
+        stmt = (
+            select(SupplierCarbonFootprint)
+            .options(selectinload(SupplierCarbonFootprint.supplier_unit))
+            .where(SupplierCarbonFootprint.is_deleted == False)
+        )
+        if unit_id is not None:
+            stmt = stmt.where(SupplierCarbonFootprint.id_supplier_unit == unit_id)
+        if relation_id is not None:
+            stmt = stmt.where(SupplierCarbonFootprint.id_relation == relation_id)
+        if year is not None:
+            stmt = stmt.where(SupplierCarbonFootprint.year == year)
+        if continent:
+            stmt = stmt.where(SupplierCarbonFootprint.supplier_continent.ilike(f"%{continent}%"))
+        if origin:
+            stmt = stmt.where(SupplierCarbonFootprint.supplier_origin.ilike(f"%{origin}%"))
+        if site_location:
+            stmt = stmt.where(SupplierCarbonFootprint.site_location.ilike(f"%{site_location}%"))
+        if supplier_unit_code:
+            stmt = stmt.join(_SupplierUnit, SupplierCarbonFootprint.id_supplier_unit == _SupplierUnit.id_supplier_unit).where(
+                _SupplierUnit.supplier_code.ilike(f"%{supplier_unit_code}%")
+            )
+
+        count_stmt = select(func.count()).select_from(stmt.subquery())
+        total_result = await self.db.execute(count_stmt)
+        total = total_result.scalar() or 0
+
+        all_count_result = await self.db.execute(
+            select(func.count()).select_from(
+                select(SupplierCarbonFootprint.id_carbon_footprint).subquery()
+            )
+        )
+        total_all = all_count_result.scalar() or 0
+
+        stmt = stmt.order_by(
+            SupplierCarbonFootprint.year.desc().nullslast(),
+            SupplierCarbonFootprint.id_carbon_footprint,
+        ).offset(skip).limit(limit)
+        result = await self.db.execute(stmt)
+        items = result.scalars().all()
+        return {"items": items, "total": total, "total_all": total_all, "skip": skip, "limit": limit}
+
+    async def update_carbon_footprint(self, fp_id: int, data: dict) -> Optional[SupplierCarbonFootprint]:
+        from datetime import datetime as _dt
+        stmt = (
+            select(SupplierCarbonFootprint)
+            .options(selectinload(SupplierCarbonFootprint.supplier_unit))
+            .where(
+                SupplierCarbonFootprint.id_carbon_footprint == fp_id,
+                SupplierCarbonFootprint.is_deleted == False,
+            )
+        )
+        result = await self.db.execute(stmt)
+        fp = result.scalar_one_or_none()
+        if not fp:
+            return None
+        for key, value in data.items():
+            setattr(fp, key, value)
+        fp.updated_at = _dt.utcnow()
+        await self.db.commit()
+        await self.db.refresh(fp)
+        return fp
+
+    async def create_carbon_footprint(self, data: dict) -> SupplierCarbonFootprint:
+        fp = SupplierCarbonFootprint(**data)
+        self.db.add(fp)
+        await self.db.commit()
+        await self.db.refresh(fp)
+        return fp
+
+    async def list_all_certifications(
+        self,
+        skip: int = 0,
+        limit: int = 100,
+        standard_type: Optional[str] = None,
+        expired_only: bool = False,
+        expiring_days: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """List all certifications across all supplier units with optional filters."""
+        from datetime import date, timedelta
+        stmt = (
+            select(SupplierCertification)
+            .where(SupplierCertification.is_deleted == False)
+        )
+        if standard_type:
+            stmt = stmt.where(SupplierCertification.standard_type == standard_type)
+        if expired_only:
+            today = date.today()
+            stmt = stmt.where(
+                SupplierCertification.end_date < today
+            )
+        elif expiring_days is not None:
+            today = date.today()
+            threshold = today + timedelta(days=expiring_days)
+            stmt = stmt.where(
+                SupplierCertification.end_date >= today,
+                SupplierCertification.end_date <= threshold,
+            )
+
+        count_stmt = select(func.count()).select_from(stmt.subquery())
+        total_result = await self.db.execute(count_stmt)
+        total = total_result.scalar() or 0
+
+        stmt = stmt.order_by(
+            SupplierCertification.end_date.asc().nullslast()
+        ).offset(skip).limit(limit)
+        result = await self.db.execute(stmt)
+        items = result.scalars().all()
+        return {"items": items, "total": total, "skip": skip, "limit": limit}
 
     def _audit_event_to_dict(self, event: AuditEvent) -> Dict[str, Any]:
         return {

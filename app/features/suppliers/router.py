@@ -969,6 +969,151 @@ async def list_certifications_for_unit(
 
 
 # ============================================================================
+# Carbon Footprint Endpoints (SB8)
+# ============================================================================
+
+
+@router.get("/carbon-footprints", response_model=dict)
+async def list_carbon_footprints(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=2000),
+    unit_id: Optional[int] = Query(None, description="Filter by supplier unit ID"),
+    relation_id: Optional[int] = Query(None, description="Filter by relation ID"),
+    year: Optional[int] = Query(None, description="Filter by year"),
+    continent: Optional[str] = Query(None, description="Filter by supplier continent"),
+    origin: Optional[str] = Query(None, description="Filter by supplier origin country"),
+    site_location: Optional[str] = Query(None, description="Filter by site location"),
+    supplier_unit_code: Optional[str] = Query(None, description="Filter by supplier unit code (SAP)"),
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """List carbon footprint records (SB8) with optional filters."""
+    try:
+        service = SupplierService(db)
+        result = await service.list_carbon_footprints(
+            skip=skip,
+            limit=limit,
+            unit_id=unit_id,
+            relation_id=relation_id,
+            year=year,
+            continent=continent,
+            origin=origin,
+            site_location=site_location,
+            supplier_unit_code=supplier_unit_code,
+        )
+        return {
+            "status": "success",
+            "data": {
+                "items": [
+                    {
+                        **schemas.SupplierCarbonFootprintResponse.model_validate(fp).model_dump(),
+                        "supplier_unit_code": fp.supplier_unit.supplier_code if fp.supplier_unit else None,
+                    }
+                    for fp in result["items"]
+                ],
+                "total": result["total"],
+                "total_all": result["total_all"],
+                "skip": result["skip"],
+                "limit": result["limit"],
+            },
+            "message": f"Found {result['total']} carbon footprint records ({result['total_all']} total in DB)",
+        }
+    except Exception:
+        raise
+
+
+@router.patch("/carbon-footprints/{fp_id}", response_model=dict)
+async def update_carbon_footprint(
+    fp_id: int,
+    body: schemas.CarbonFootprintUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Update specific fields of a carbon footprint record."""
+    try:
+        service = SupplierService(db)
+        fp = await service.update_carbon_footprint(fp_id, body.model_dump(exclude_none=True))
+        if not fp:
+            raise AppException(status_code=404, detail="Carbon footprint record not found")
+        return {
+            "status": "success",
+            "data": {
+                **schemas.SupplierCarbonFootprintResponse.model_validate(fp).model_dump(),
+                "supplier_unit_code": fp.supplier_unit.supplier_code if fp.supplier_unit else None,
+            },
+            "message": "Carbon footprint record updated",
+        }
+    except AppException:
+        raise
+    except Exception:
+        raise
+
+
+@router.post("/carbon-footprints", response_model=dict, status_code=201)
+async def create_carbon_footprint(
+    body: schemas.CarbonFootprintCreateRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Create a new carbon footprint record."""
+    try:
+        service = SupplierService(db)
+        fp = await service.create_carbon_footprint(body.model_dump(exclude_none=True))
+        return {
+            "status": "success",
+            "data": {
+                **schemas.SupplierCarbonFootprintResponse.model_validate(fp).model_dump(),
+                "supplier_unit_code": None,
+            },
+            "message": "Carbon footprint record created",
+        }
+    except Exception:
+        raise
+
+
+# ============================================================================
+# Certifications Tracking Endpoints
+# ============================================================================
+
+
+@router.get("/certifications", response_model=dict)
+async def list_all_certifications(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
+    standard_type: Optional[str] = Query(None, description="Filter by standard type (quality, environmental, safety, energy, other)"),
+    expired_only: bool = Query(False, description="Return only expired certifications"),
+    expiring_days: Optional[int] = Query(None, ge=1, le=365, description="Return certs expiring within N days"),
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """List all certifications across all supplier units for centralized tracking."""
+    try:
+        service = SupplierService(db)
+        result = await service.list_all_certifications(
+            skip=skip,
+            limit=limit,
+            standard_type=standard_type,
+            expired_only=expired_only,
+            expiring_days=expiring_days,
+        )
+        return {
+            "status": "success",
+            "data": {
+                "items": [
+                    schemas.SupplierCertificationResponse.model_validate(cert)
+                    for cert in result["items"]
+                ],
+                "total": result["total"],
+                "skip": result["skip"],
+                "limit": result["limit"],
+            },
+            "message": f"Found {result['total']} certification records",
+        }
+    except Exception:
+        raise
+
+
+# ============================================================================
 # Legacy/Backward Compatible Endpoints
 # ============================================================================
 

@@ -6,10 +6,11 @@ from typing import Any, Dict
 
 
 TOP_OPTIONS = [
+    {"value": "15 days net", "label": "15 days net"},
     {"value": "30 days net", "label": "30 days net"},
     {"value": "30 days end of month or +", "label": "30 days end of month or +"},
     {"value": "60 days net", "label": "60 days net"},
-    {"value": "60 days end of month or +", "label": "60 days end of month or +"},
+    {"value": "60 days eom or +", "label": "60 days eom or +"},
     {"value": "Cash in Advance", "label": "Cash in Advance"},
 ]
 
@@ -24,26 +25,15 @@ SQMA_OPTIONS = [
     {"value": "Rejected", "label": "Rejected"},
     {"value": "Signed", "label": "Signed"},
     {"value": "Signed m.res.", "label": "Signed m.res."},
-    {"value": "Signed M/Res/not sent", "label": "Signed M/Res/not sent"},
+    {"value": "Signed M.Res/not sent", "label": "Signed M.Res/not sent"},
 ]
 
 FAMILY_COVERAGE_OPTIONS = [
-    {
-        "value": "Supplier can make 1 family requirements",
-        "label": "Supplier can make 1 family requirements",
-    },
-    {
-        "value": "Supplier can make all the family requirements",
-        "label": "Supplier can make all the family requirements",
-    },
-    {
-        "value": "Supplier can make only of few family requirements",
-        "label": "Supplier can make only of few family requirements",
-    },
-    {
-        "value": "Supplier can make the main family requirements",
-        "label": "Supplier can make the main family requirements",
-    },
+    {"value": "100% Cov.", "label": "100% Cov."},
+    {"value": "Main sub-Fam Cov.", "label": "Main sub-Fam Cov."},
+    {"value": "1 sub-F or refs Cov.", "label": "1 sub-F or refs Cov."},
+    {"value": "1 ref", "label": "1 ref"},
+    {"value": "None", "label": "None"},
 ]
 
 COMPETITIVENESS_OPTIONS = [
@@ -65,10 +55,10 @@ GEO_COVERAGE_OPTIONS = [
 ]
 
 CONS_OR_WD_OPTIONS = [
+    {"value": "Cons. or WD", "label": "Cons. or WD"},
+    {"value": "Cons. or WD Inter. User", "label": "Cons. or WD Inter. User"},
     {"value": "Biweekly Del.", "label": "Biweekly Del."},
-    {"value": "Cons. Or Daily Deliveries", "label": "Cons. Or Daily Deliveries"},
     {"value": "DDP or Weekly Del.", "label": "DDP or Weekly Del."},
-    {"value": "Other", "label": "Other"},
 ]
 
 FINANCIAL_HEALTH_OPTIONS = [

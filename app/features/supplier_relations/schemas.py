@@ -81,6 +81,10 @@ class SupplierDevelopmentPlanBase(BaseModel):
     file_notes: Optional[str] = None
     supplier_comments: Optional[str] = None
     internal_comments: Optional[str] = None
+    # Development Plans (SB22) fields
+    decision: Optional[str] = Field(None, max_length=255, description="Final decision on development plan")
+    commodity: Optional[str] = Field(None, max_length=200, description="Commodity linked to development plan")
+    plant: Optional[str] = Field(None, max_length=100, description="Avocarbon plant linked to development plan")
 
 
 class SupplierDevelopmentPlanCreateRequest(SupplierDevelopmentPlanBase):
