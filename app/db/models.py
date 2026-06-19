@@ -2401,6 +2401,14 @@ class FinancialLine(GovernanceMixin, Base):
     recovery_history: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     recovery_updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     recovery_updated_by: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    recovery_baseline_gap: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(18, 2), nullable=True
+    )
+    recovery_baseline_set_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, nullable=True
+    )
+    # H2 — cooldown: tracks when the last "missing actuals" delay-alert email was sent
+    delay_alert_last_sent_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
     opportunity: Mapped["Opportunity"] = relationship(back_populates="financial_lines")
     project: Mapped[Optional["Project"]] = relationship(

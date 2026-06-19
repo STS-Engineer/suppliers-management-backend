@@ -3,9 +3,9 @@
 from calendar import monthrange
 from datetime import date, datetime, timedelta
 from decimal import Decimal
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 # ---------------------------------------------------------------------------
@@ -442,6 +442,13 @@ class OpportunityCreateRequest(BaseModel):
         None, description="Deprecated compatibility field; ignored by the backend."
     )
 
+    @field_validator("opportunity_type")
+    @classmethod
+    def validate_opportunity_type(cls, v: str) -> str:
+        if v not in OPPORTUNITY_TYPES:
+            raise ValueError(f"opportunity_type must be one of {OPPORTUNITY_TYPES}")
+        return v
+
 
 class OpportunityUpdateRequest(BaseModel):
     """Full Phase-0 editable payload — all fields optional."""
@@ -708,10 +715,12 @@ class EscalateRequest(BaseModel):
 
 
 class RecoveryUpdateRequest(BaseModel):
-    recovery_status: str = Field(..., description="Planned | In Progress | Done")
+    recovery_status: Literal["Planned", "In Progress", "Done"] = Field(
+        ..., description="Planned | In Progress | Done"
+    )
     recovery_note: Optional[str] = None
     recovery_target_date: Optional[date] = None
-    recovery_amount: Optional[float] = None
+    recovery_amount: Optional[float] = Field(None, ge=0)
     updated_by: Optional[str] = None
 
 
@@ -761,6 +770,8 @@ class FinancialLineResponse(BaseModel):
     recovery_amount: Optional[Decimal] = None
     recovery_history: Optional[str] = None
     recovery_updated_at: Optional[datetime] = None
+    recovery_baseline_gap: Optional[Decimal] = None
+    recovery_baseline_set_at: Optional[datetime] = None
     monthly_financials: List[MonthlyFinancialResponse] = Field(default_factory=list)
 
     class Config:

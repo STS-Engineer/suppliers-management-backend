@@ -725,12 +725,21 @@ async def get_recovery_plans(
         opp = line.opportunity
         plant = line.plant
 
-        # Progress: how much has been recovered since recovery plan was set
-        # Use cumulated_real_saving vs expected_annual_saving as proxy
+        # Progress: use the gap snapshot captured when the recovery cycle started.
         cum_actual = _n(line.cumulated_real_saving)
         expected = _n(line.expected_annual_saving)
         recovery_amount = _n(line.recovery_amount) if line.recovery_amount else None
         delta_ytd = _n(line.delta_vs_expected_ytd)
+        baseline_gap = _n(line.recovery_baseline_gap) if line.recovery_baseline_gap else None
+        effective_baseline_gap = baseline_gap if baseline_gap is not None else (
+            max(-delta_ytd, 0.0) if recovery_amount is not None else None
+        )
+        remaining_gap = max(-delta_ytd, 0.0)
+        recovered_amount = (
+            max(effective_baseline_gap - remaining_gap, 0.0)
+            if effective_baseline_gap is not None
+            else None
+        )
 
         # Overdue: has a target date that is in the past and status != Done
         is_overdue = (
@@ -771,11 +780,17 @@ async def get_recovery_plans(
                 "recovery_updated_at": str(line.recovery_updated_at)
                 if line.recovery_updated_at
                 else None,
+                "recovery_baseline_gap": effective_baseline_gap,
+                "recovery_baseline_set_at": str(line.recovery_baseline_set_at)
+                if line.recovery_baseline_set_at
+                else None,
                 # Computed
                 "is_overdue": is_overdue,
                 "days_to_target": days_to_target,
-                "progress_pct": round((cum_actual / recovery_amount) * 100, 1)
-                if recovery_amount and recovery_amount > 0
+                "progress_pct": round(
+                    min((recovered_amount / effective_baseline_gap) * 100, 100.0), 1
+                )
+                if effective_baseline_gap and effective_baseline_gap > 0
                 else None,
                 "is_escalated": line.is_escalated,
             }

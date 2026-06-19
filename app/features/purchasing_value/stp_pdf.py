@@ -395,10 +395,10 @@ def generate_stp_pdf(opp, phase: int = 0) -> bytes:
     story.append(saving_tbl)
     story.append(sp(0.2))
 
-    # Estimated saving by calendar year (start-date prorated)
+    # Estimated saving by budget year (01 Dec -> 30 Nov, start-date prorated)
     by_year = opp.saving_by_year or {}
     if by_year:
-        year_rows = [[_cell("Year", bold=True), _cell("Est. Saving", bold=True)]]
+        year_rows = [[_cell("Budget Year", bold=True), _cell("Est. Saving", bold=True)]]
         for yr in sorted(by_year.keys()):
             year_rows.append([_cell(str(yr)), _cell(_fmt(by_year[yr], prefix="€"))])
         year_tbl = Table(year_rows, colWidths=[W * 0.45, W * 0.55])

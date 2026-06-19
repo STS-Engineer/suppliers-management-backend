@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import calendar
 import logging
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from decimal import Decimal
 from math import ceil
 from typing import Optional, List
@@ -151,18 +151,6 @@ class PurchasingValueService:
     async def create_opportunity(
         self, payload: OpportunityCreateRequest
     ) -> Opportunity:
-        if payload.opportunity_type not in [
-            "Negotiation",
-            "Sourcing",
-            "Technical Productivity",
-            "Cash",
-        ]:
-            raise AppException(
-                422,
-                "Invalid type. Must be one of: Negotiation, Sourcing, Technical Productivity, Cash",
-                "INVALID_TYPE",
-            )
-
         # Every opportunity must be tied to a plant — it is budgeted, supplier-evaluated
         # and KPI-rolled-up per plant. Required for all types (server-side too, so the
         # API isn't an open path to unallocatable opportunities).
@@ -432,13 +420,17 @@ class PurchasingValueService:
         stp_fin = compute_stp_financials(opp)
         # D4 — guard: price_after > price_before inverts the saving to a cost increase.
         # Reject early so corrupted data never reaches the DB.
-        _year_n_raw = (stp_fin.get("saving_per_year") or [None])[0]
-        if _year_n_raw is not None and float(_year_n_raw) < 0:
+        _neg_years = [
+            (f"N+{i}" if i > 0 else "N", float(v))
+            for i, v in enumerate(stp_fin.get("saving_per_year") or [])
+            if v is not None and float(v) < 0
+        ]
+        if _neg_years:
+            detail = ", ".join(f"Year {lbl}: {amt:,.0f} €" for lbl, amt in _neg_years)
             raise AppException(
                 422,
-                f"Year-N saving is negative ({float(_year_n_raw):,.0f} €) — "
-                "price_after exceeds price_before for at least one STP component. "
-                "Please review the prices before saving.",
+                f"STP saving is negative for: {detail}. "
+                "Proposed price exceeds current price — please review before saving.",
                 "STP_NEGATIVE_SAVING",
             )
         if stp_fin["period_saving"] is not None:
@@ -769,8 +761,12 @@ class PurchasingValueService:
                     project.updated_at = now
                     project.updated_by = payload.decided_by
 
-        # Phase change shifts the suggested per-year status (e.g. → "Budgeted" at Phase 3)
-        await self._sync_budget_years(opp)
+        # Phase change shifts the suggested per-year status (e.g. → "Budgeted" at Phase 3).
+        # No Go is excluded: the reset loop above already zeroed and unlocked all budget rows;
+        # calling _sync_budget_years would overwrite "Empty" back to "Opportunity" because
+        # status_locked_at was just cleared.
+        if payload.decision != "No Go":
+            await self._sync_budget_years(opp)
 
         _snap = OpportunityPhaseSnapshot(
             opportunity_id=opp.opportunity_id,
@@ -781,8 +777,6 @@ class PurchasingValueService:
             decided_at=now,
             gate_comments=payload.comments,
             opportunity_snapshot=self._build_opportunity_snapshot(opp),
-            created_at=now,
-            created_by=payload.decided_by,
         )
         self.db.add(_snap)
 
@@ -1182,6 +1176,84 @@ class PurchasingValueService:
     ) -> FinancialLine:
         line = await self.get_financial_line(line_id)
         now = datetime.utcnow()
+        today = now.date()
+        new_cycle = line.recovery_status in (None, "Done") and payload.recovery_status in (
+            "Planned",
+            "In Progress",
+        )
+
+        # --- Baseline gap from real monthly data, not the stale denormalized delta ---
+        # Sum expected vs actual for all past months from savings start, so the
+        # baseline is consistent even if _recalculate_ytd hasn't run yet.
+        savings_start = line.real_start_date or line.planned_start_date
+        if savings_start:
+            past_rows = [
+                m for m in (line.monthly_financials or [])
+                if m.period_month is not None
+                and m.period_month >= savings_start.replace(day=1)
+                and m.period_month < today.replace(day=1)
+            ]
+            sum_expected = sum(float(m.expected_saving or 0) for m in past_rows)
+            sum_actual = sum(float(m.actual_saving or 0) for m in past_rows)
+            computed_gap = Decimal(str(round(max(0.0, sum_expected - sum_actual), 2)))
+        else:
+            computed_gap = Decimal("0")
+
+        # --- Validation 1 : date cible ---
+        # A target date in the past has no operational meaning — the plan is already
+        # overdue before it starts, so it would immediately appear as a false alert.
+        if payload.recovery_target_date is not None and payload.recovery_status != "Done":
+            if payload.recovery_target_date < today:
+                raise AppException(
+                    422,
+                    f"La date cible ({payload.recovery_target_date}) est dans le passé. "
+                    "Choisissez une date future pour le plan de recovery.",
+                    "RECOVERY_TARGET_IN_PAST",
+                )
+            # Target must not go beyond the opportunity's own savings horizon.
+            opp_result = await self.db.execute(
+                select(Opportunity).where(Opportunity.opportunity_id == line.opportunity_id)
+            )
+            opp = opp_result.scalar_one_or_none()
+            if opp and opp.planned_start_date and opp.duration_months:
+                opp_end = add_months(opp.planned_start_date, int(opp.duration_months))
+                if payload.recovery_target_date > opp_end:
+                    raise AppException(
+                        422,
+                        f"La date cible ({payload.recovery_target_date}) dépasse "
+                        f"la fin prévue de l'opportunité ({opp_end}). "
+                        "Ajustez la durée de l'opportunité ou choisissez une date antérieure.",
+                        "RECOVERY_TARGET_AFTER_OPP_END",
+                    )
+
+        # --- Validation 2 : montant vs gap réel ---
+        # Catching "recovery_amount = 10 € for a 500 000 € gap" at the gate.
+        # Rules applied only on active plans (not Done) when an amount is explicitly sent.
+        if (
+            payload.recovery_status in ("Planned", "In Progress")
+            and "recovery_amount" in payload.model_fields_set
+            and payload.recovery_amount is not None
+        ):
+            amount = float(payload.recovery_amount)
+            if amount <= 0:
+                raise AppException(
+                    422,
+                    "Le montant du plan de recovery doit être supérieur à 0 € "
+                    "pour un plan Planned ou In Progress.",
+                    "RECOVERY_AMOUNT_ZERO",
+                )
+            gap_float = float(computed_gap)
+            # Threshold: amount must cover at least 1 % of a significant gap (> 1 000 €).
+            # Below that ratio the plan is cosmetic and misleads the tracking dashboard.
+            if gap_float > 1000.0 and amount < gap_float * 0.01:
+                raise AppException(
+                    422,
+                    f"Le montant de recovery ({amount:,.0f} €) représente moins de 1 % "
+                    f"du gap réel ({gap_float:,.0f} €). "
+                    "Merci de saisir un montant crédible — au moins "
+                    f"{gap_float * 0.01:,.0f} €.",
+                    "RECOVERY_AMOUNT_TOO_LOW",
+                )
 
         # Snapshot previous state into history before overwriting
         if line.recovery_status:
@@ -1201,11 +1273,20 @@ class PurchasingValueService:
             line.recovery_history = (existing + "\n" + entry).strip()
 
         line.recovery_status = payload.recovery_status
-        line.recovery_note = payload.recovery_note
-        if payload.recovery_target_date is not None:
+        if new_cycle:
+            # Use the real-data baseline, not the stale denormalized delta
+            line.recovery_baseline_gap = computed_gap
+            line.recovery_baseline_set_at = now
+        if "recovery_note" in payload.model_fields_set:
+            line.recovery_note = payload.recovery_note
+        if "recovery_target_date" in payload.model_fields_set:
             line.recovery_target_date = payload.recovery_target_date
-        if payload.recovery_amount is not None:
-            line.recovery_amount = Decimal(str(payload.recovery_amount))
+        if "recovery_amount" in payload.model_fields_set:
+            line.recovery_amount = (
+                Decimal(str(payload.recovery_amount))
+                if payload.recovery_amount is not None
+                else None
+            )
         line.recovery_updated_at = now
         line.recovery_updated_by = payload.updated_by
         line.updated_at = now
@@ -1245,8 +1326,15 @@ class PurchasingValueService:
         updated_by: Optional[str],
     ) -> None:
         """Alert purchasing owner if a past month (after savings start date) has no actual.
-        Olivier: months before planned_start_date are expected to be 0 — no alert for those."""
+        Olivier: months before planned_start_date are expected to be 0 — no alert for those.
+        H2 cooldown: at most one alert per 7 days per financial line to avoid inbox spam."""
         if line.status != "Active":
+            return
+        # Cooldown — don't re-alert within 7 days of the last sent alert
+        if (
+            line.delay_alert_last_sent_at is not None
+            and datetime.utcnow() - line.delay_alert_last_sent_at < timedelta(days=7)
+        ):
             return
         today = date.today()
         # Only alert for months from savings start onwards (not before)
@@ -1280,6 +1368,7 @@ class PurchasingValueService:
                 recipients=recipients,
                 body_html=_build_delay_alert_email(opp, line, months_missing),
             )
+            line.delay_alert_last_sent_at = datetime.utcnow()
         except Exception as exc:
             logger.warning("Delay-alert email failed for line %s: %s", line.financial_line_id, exc)
 
@@ -1596,6 +1685,7 @@ class PurchasingValueService:
                         OpportunityBudgetYear.is_deleted.is_(False),
                     )
                     .options(selectinload(OpportunityBudgetYear.opportunity))
+                    .with_for_update()
                 )
             )
             .scalars()
@@ -1607,6 +1697,9 @@ class PurchasingValueService:
         for r in rows:
             opp = r.opportunity
             if opp is None or opp.is_deleted:
+                continue
+            # H4 — never lock budget on cancelled or closed opportunities
+            if opp.status == "Cancelled" or opp.phase_status == "Closed":
                 continue
             new_status = by_opp.get(opp.opportunity_id)
             if new_status is None:
@@ -1981,12 +2074,17 @@ class PurchasingValueService:
             setattr(proxy, field, Decimal(str(value)) if isinstance(value, (int, float)) else value)
 
         preview_fin = compute_stp_financials(proxy)
-        preview_year_n = preview_fin.get("saving_per_year", [None])[0]
-        if preview_year_n is not None and float(preview_year_n) < 0:
+        _neg_preview = [
+            (f"N+{i}" if i > 0 else "N", float(v))
+            for i, v in enumerate(preview_fin.get("saving_per_year") or [])
+            if v is not None and float(v) < 0
+        ]
+        if _neg_preview:
+            detail = ", ".join(f"Year {lbl}: {amt:,.0f} €" for lbl, amt in _neg_preview)
             raise AppException(
                 422,
-                f"The proposed values produce a negative Year-N saving ({float(preview_year_n):,.0f} €) — "
-                "proposed_price exceeds current_price. Please review before submitting.",
+                f"The proposed values produce negative savings for: {detail}. "
+                "Proposed price exceeds current price — please review before submitting.",
                 "STP_NEGATIVE_SAVING",
             )
 
@@ -2127,11 +2225,22 @@ class PurchasingValueService:
         note: Optional[str],
         revised_by: Optional[str],
     ) -> FinancialLine:
-        """Phase 1 or Phase 3 — revise expected_annual_saving, rebuild monthly profile, keep budget_value."""
+        """Revise expected_annual_saving on an active financial line, rebuild the monthly profile, keep budget_value."""
         line = await self.get_financial_line(line_id)
         if line.status != "Active":
             raise AppException(
                 422, "Can only revise an active financial line.", "LINE_NOT_ACTIVE"
+            )
+        # M5 — guard: Closed opportunities are immutable even if the line is technically still Active
+        opp_result = await self.db.execute(
+            select(Opportunity).where(Opportunity.opportunity_id == line.opportunity_id)
+        )
+        opp = opp_result.scalar_one_or_none()
+        if opp and opp.phase_status == "Closed":
+            raise AppException(
+                422,
+                "Cannot revise the baseline of a Closed opportunity.",
+                "OPPORTUNITY_CLOSED",
             )
 
         old_saving = line.expected_annual_saving or Decimal("0")
@@ -2156,10 +2265,7 @@ class PurchasingValueService:
         # Year-N / N+1 / N+2 / N+3 escalation intact after a revision, instead of
         # collapsing it to a flat annual/12 profile that under-states later years.
         # For flat types (Negotiation / Cash) the existing flat behaviour is preserved.
-        opp_result = await self.db.execute(
-            select(Opportunity).where(Opportunity.opportunity_id == line.opportunity_id)
-        )
-        opp = opp_result.scalar_one_or_none()
+        # opp already loaded above for the Closed guard — no second query needed.
         is_stp = self._is_period(opp) if opp else False
         stp_windows = self._stp_year_windows(opp) if is_stp else None
         await self._rebuild_monthly_profile(
@@ -2563,6 +2669,7 @@ def _build_stp_revision_request_email(opp: Opportunity, payload, preview: dict) 
 
 def _build_stp_revision_decision_email(opp: Opportunity, payload, pending: dict) -> str:
     color = "#16a34a" if payload.decision == "Approved" else "#dc2626"
+    subtitle_color = "#d1fae5" if payload.decision == "Approved" else "#fee2e2"
     icon  = "✅" if payload.decision == "Approved" else "❌"
     preview = pending.get("computed_preview", {})
     def _fmt(v): return f"€{v:,.0f}" if v is not None else "N/A"
@@ -2570,7 +2677,7 @@ def _build_stp_revision_decision_email(opp: Opportunity, payload, pending: dict)
     <html><body style="font-family:Arial,sans-serif;color:#111827;max-width:640px;margin:0 auto">
       <div style="background:{color};padding:20px 24px;border-radius:8px 8px 0 0">
         <h2 style="color:#fff;margin:0;font-size:18px">{icon} STP Revision {payload.decision}</h2>
-        <p style="color:#d1fae5 if payload.decision == 'Approved' else #fee2e2;margin:4px 0 0;font-size:13px">{opp.opportunity_name}</p>
+        <p style="color:{subtitle_color};margin:4px 0 0;font-size:13px">{opp.opportunity_name}</p>
       </div>
       <div style="padding:24px;border:1px solid #e5e7eb;border-top:none;border-radius:0 0 8px 8px">
         <p>Your STP revision request for <strong>{opp.opportunity_name}</strong> has been <strong>{payload.decision}</strong>.</p>

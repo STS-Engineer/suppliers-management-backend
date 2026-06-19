@@ -11,7 +11,7 @@ Key formulas (per Olivier GRIMAUD transcript 2026-06-03):
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 from sqlalchemy import select
@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.db.models import FinancialLine, Opportunity, Project
+from app.features.purchasing_value.schemas import budget_year_bounds, budget_year_for_date
 
 
 def _n(v) -> float:
@@ -38,9 +39,21 @@ class PurchasingKpiService:
         self.db = db
 
     async def compute_all(self, year: Optional[int] = None) -> dict:
-        current_year = year or datetime.utcnow().year
         today = date.today()
+        active_budget_year = budget_year_for_date(today)
+        current_year = year or active_budget_year
+        budget_start, budget_end_exclusive = budget_year_bounds(current_year)
+        budget_end_inclusive = budget_end_exclusive - timedelta(days=1)
+        if current_year < active_budget_year:
+            ytd_cutoff = budget_end_inclusive
+        elif current_year == active_budget_year:
+            ytd_cutoff = min(today, budget_end_inclusive)
+        else:
+            ytd_cutoff = today
         current_month_start = today.replace(day=1)
+
+        def _in_budget_year(period: date) -> bool:
+            return budget_start <= period < budget_end_exclusive
 
         # ── Load data ────────────────────────────────────────────────────
         lines_result = await self.db.execute(
@@ -178,7 +191,9 @@ class PurchasingKpiService:
                 )
                 for line in active_lines
                 for r in line.monthly_financials
-                if r.forecast_eoy_saving is not None and r.period_month
+                if r.forecast_eoy_saving is not None
+                and r.period_month
+                and _in_budget_year(r.period_month)
             ],
             key=lambda x: x[0],
             reverse=True,
@@ -226,9 +241,9 @@ class PurchasingKpiService:
                 for r in line.monthly_financials:
                     if not r.period_month:
                         continue
-                    if r.period_month.year != current_year:
+                    if not _in_budget_year(r.period_month):
                         continue
-                    if r.period_month > today:
+                    if r.period_month > ytd_cutoff:
                         continue
                     # Only count months from savings start date
                     if savings_start and r.period_month < savings_start.replace(day=1):
@@ -310,6 +325,8 @@ class PurchasingKpiService:
             savings_start = line.real_start_date or line.planned_start_date
             for row in line.monthly_financials:
                 if not row.period_month:
+                    continue
+                if not _in_budget_year(row.period_month):
                     continue
                 # Skip months before savings start (expected = 0 per Olivier)
                 if savings_start and row.period_month < savings_start.replace(day=1):
@@ -531,8 +548,8 @@ class PurchasingKpiService:
             for ln in cash_lines
             for r in ln.monthly_financials
             if r.period_month
-            and r.period_month.year == current_year
-            and r.period_month <= today
+            and _in_budget_year(r.period_month)
+            and r.period_month <= ytd_cutoff
             and (
                 (ln.real_start_date or ln.planned_start_date) is None
                 or r.period_month >= (ln.real_start_date or ln.planned_start_date).replace(day=1)
