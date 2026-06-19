@@ -11,6 +11,7 @@ Key formulas (per Olivier GRIMAUD transcript 2026-06-03):
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Optional
 
@@ -34,14 +35,27 @@ def _pct(num: float, denom: float) -> Optional[float]:
     return round((num / denom) * 100, 1)
 
 
+@dataclass
+class KpiFilters:
+    """Multi-dimensional filter for the KPI dashboard.
+
+    All lists default to empty = "no filter" (= include everything).
+    """
+    year: Optional[int] = None
+    plant_ids: list[int] = field(default_factory=list)
+    categories: list[str] = field(default_factory=list)
+    buyer_emails: list[str] = field(default_factory=list)
+
+
 class PurchasingKpiService:
     def __init__(self, db: AsyncSession) -> None:
         self.db = db
 
-    async def compute_all(self, year: Optional[int] = None) -> dict:
+    async def compute_all(self, filters: Optional[KpiFilters] = None) -> dict:
         today = date.today()
         active_budget_year = budget_year_for_date(today)
-        current_year = year or active_budget_year
+        _f = filters or KpiFilters()
+        current_year = _f.year or active_budget_year
         budget_start, budget_end_exclusive = budget_year_bounds(current_year)
         budget_end_inclusive = budget_end_exclusive - timedelta(days=1)
         if current_year < active_budget_year:
@@ -55,6 +69,25 @@ class PurchasingKpiService:
         def _in_budget_year(period: date) -> bool:
             return budget_start <= period < budget_end_exclusive
 
+        def _add_months(d: date, months: int) -> date:
+            """Add months to a date without external deps."""
+            m = d.month - 1 + months
+            return d.replace(year=d.year + m // 12, month=m % 12 + 1, day=1)
+
+        def _line_overlaps_fy(line) -> bool:
+            """True if the financial line's active period overlaps the selected fiscal year."""
+            start = line.real_start_date or line.planned_start_date
+            if start is None:
+                return True  # no date info → always include
+            line_start = start.replace(day=1)
+            if line_start >= budget_end_exclusive:
+                return False  # line starts after this FY ends
+            if line.duration_months:
+                line_end = _add_months(line_start, int(line.duration_months))
+                if line_end <= budget_start:
+                    return False  # line ended before this FY started
+            return True
+
         # ── Load data ────────────────────────────────────────────────────
         lines_result = await self.db.execute(
             select(FinancialLine)
@@ -66,7 +99,11 @@ class PurchasingKpiService:
             )
         )
         all_lines: list[FinancialLine] = list(lines_result.scalars().all())
-        active_lines = [line for line in all_lines if line.status == "Active"]
+        # Only lines whose active period overlaps the selected fiscal year
+        active_lines = [
+            line for line in all_lines
+            if line.status == "Active" and _line_overlaps_fy(line)
+        ]
 
         opps_result = await self.db.execute(
             select(Opportunity)
@@ -139,13 +176,50 @@ class PurchasingKpiService:
             return r if r > 0 else 1.0
 
         committed_budget_by_opp: dict[int, float] = {}
+        # Full budget status per opp for the current FY (used in EOY-by-status breakdown)
+        budget_status_by_opp: dict[int, str] = {}
         for o in all_opps:
             for by in (o.budget_years or []):
-                if by.fiscal_year == current_year and by.budget_status == "Budgeted":
-                    committed_budget_by_opp[o.opportunity_id] = (
-                        _n(by.applicable_amount) * _opp_rate(o)
-                    )
+                if by.fiscal_year == current_year:
+                    status = by.budget_status or "Empty"
+                    budget_status_by_opp[o.opportunity_id] = status
+                    if status == "Budgeted":
+                        committed_budget_by_opp[o.opportunity_id] = (
+                            _n(by.applicable_amount) * _opp_rate(o)
+                        )
         committed_opp_ids = set(committed_budget_by_opp)
+
+        # ── Available filter options (full dataset, before any filter) ────
+        _plants_seen: dict[int, str] = {}
+        for ln in active_lines:
+            if ln.plant_id and ln.plant:
+                _plants_seen[ln.plant_id] = ln.plant.site_name
+        _available_filters = {
+            "plants": [
+                {"id": k, "name": v}
+                for k, v in sorted(_plants_seen.items(), key=lambda x: x[1])
+            ],
+            "categories": sorted({o.opportunity_type for o in all_opps if o.opportunity_type}),
+            "buyers": sorted({o.idea_owner for o in all_opps if o.idea_owner}),
+        }
+
+        # ── Apply multi-dimensional filters (reassign working sets) ───────
+        _plant_set = set(_f.plant_ids)
+        _cat_set   = set(_f.categories)
+        _buyer_set = set(_f.buyer_emails)
+
+        if _plant_set or _cat_set or _buyer_set:
+            active_lines = [
+                ln for ln in active_lines
+                if (not _plant_set or ln.plant_id in _plant_set)
+                and (not _cat_set   or (ln.opportunity and ln.opportunity.opportunity_type in _cat_set))
+                and (not _buyer_set or (ln.opportunity and ln.opportunity.idea_owner in _buyer_set))
+            ]
+            all_opps = [
+                o for o in all_opps
+                if (not _cat_set   or (o.opportunity_type or "") in _cat_set)
+                and (not _buyer_set or (o.idea_owner or "") in _buyer_set)
+            ]
 
         # ── FORECAST KPIs ─────────────────────────────────────────────────
 
@@ -163,22 +237,26 @@ class PurchasingKpiService:
 
         budgeted_eoy_forecast = sum(_eoy(line) * _rate(line) for line in budgeted_lines)
 
-        # Over budget: a committed line whose EOY forecast (EUR) exceeds the committed
-        # per-year budget for its opportunity (over-delivery — favorable). One line per
-        # opportunity, so the line maps directly to its committed amount.
+        # Forecast Outperformance: a committed line whose EOY forecast (EUR) exceeds its
+        # expected annual saving. Both figures are full-year annuals → comparable units.
+        # (applicable_amount is FY pro-rata and must NOT be the comparator here.)
         over_budget_lines = [
             line
             for line in budgeted_lines
-            if committed_budget_by_opp.get(line.opportunity_id, 0) > 0
-            and _eoy(line) * _rate(line) > committed_budget_by_opp[line.opportunity_id]
+            if _n(line.expected_annual_saving) * _rate(line) > 0
+            and _eoy(line) * _rate(line) > _n(line.expected_annual_saving) * _rate(line)
         ]
         over_budget_count = len(over_budget_lines)
         over_budget_amount = sum(
-            _eoy(line) * _rate(line) - committed_budget_by_opp[line.opportunity_id]
+            _eoy(line) * _rate(line) - _n(line.expected_annual_saving) * _rate(line)
             for line in over_budget_lines
         )
 
-        eoy_vs_budget_pct = _pct(budgeted_eoy_forecast, total_budget)
+        # EOY vs Budget: budgeted EOY forecast vs budgeted expected annual saving.
+        # Both are full-year annual figures → ratio is meaningful (e.g. 95% = slight shortfall).
+        # total_budget (applicable_amount) is intentionally NOT used here: it is FY pro-rata
+        # and dividing an annual figure by a partial-year amount produces nonsense (e.g. 600%).
+        eoy_vs_budget_pct = _pct(budgeted_eoy_forecast, budgeted_expected_annual)
         eoy_vs_expected_pct = _pct(total_eoy_forecast, total_expected)
 
         # Forecast drift: latest forecast_eoy_saving vs previous month's
@@ -412,18 +490,31 @@ class PurchasingKpiService:
                     "expected_annual": 0.0,
                     "budget_value": 0.0,
                     "actual_ytd": 0.0,
-                    "expected_ytd": 0.0,  # ← both needed for correct %
+                    "expected_ytd": 0.0,
                     "eoy_forecast": 0.0,
+                    "budgeted_eoy": 0.0,
+                    "budgeted_expected_annual": 0.0,
+                    # EOY breakdown by budget status for the bar chart
+                    "eoy_by_status": {"Budgeted": 0.0, "Opportunity": 0.0, "Empty": 0.0},
                     "opp_count": set(),
                     "type_breakdown": {},
                 }
             plant_map[pid]["expected_annual"] += _n(line.expected_annual_saving) * _rate(line)
-            # "budget_value" here = the committed per-year budget (consistent with the
-            # headline total_budget), not the line baseline. 0 if not committed.
+            # "budget_value" = committed FY pro-rata (for informational display only,
+            # NOT used as the denominator for eoy_vs_budget_pct — see comment below).
             plant_map[pid]["budget_value"] += committed_budget_by_opp.get(
                 line.opportunity_id, 0.0
             )
             plant_map[pid]["eoy_forecast"] += _eoy(line) * _rate(line)
+            if line.opportunity_id in committed_opp_ids:
+                plant_map[pid]["budgeted_eoy"] += _eoy(line) * _rate(line)
+                plant_map[pid]["budgeted_expected_annual"] += _n(line.expected_annual_saving) * _rate(line)
+            # EOY split by budget status (Budgeted / Opportunity / Empty)
+            opp_status = budget_status_by_opp.get(line.opportunity_id, "Empty")
+            plant_map[pid]["eoy_by_status"][opp_status] = (
+                plant_map[pid]["eoy_by_status"].get(opp_status, 0.0)
+                + _eoy(line) * _rate(line)
+            )
             plant_map[pid]["opp_count"].add(line.opportunity_id)
 
             # FIX: use ytd_rows_for to properly filter by year AND <= today
@@ -463,9 +554,13 @@ class PurchasingKpiService:
                     "eoy_forecast": round(d["eoy_forecast"], 2),
                     "opp_count": len(d["opp_count"]),
                     "type_breakdown": d["type_breakdown"],
-                    "ytd_rate_pct": ytd_rate,  # actual YTD / expected YTD
-                    "eoy_vs_budget_pct": _pct(d["eoy_forecast"], d["budget_value"])
-                    if d["budget_value"]
+                    "ytd_rate_pct": ytd_rate,
+                    "eoy_by_status": {
+                        k: round(v, 2) for k, v in d["eoy_by_status"].items()
+                    },
+                    # EOY vs Budget: budgeted EOY / budgeted expected annual (both annual → comparable)
+                    "eoy_vs_budget_pct": _pct(d["budgeted_eoy"], d["budgeted_expected_annual"])
+                    if d["budgeted_expected_annual"]
                     else None,
                     "eoy_vs_expected_pct": _pct(d["eoy_forecast"], d["expected_annual"])
                     if d["expected_annual"]
@@ -718,10 +813,89 @@ class PurchasingKpiService:
                         fx = 1.0
                 program_value_lifetime += float(o.period_saving) * fx
 
+        # ── BY BUYER (P4 — Team & Governance) ────────────────────────────
+        buyer_map: dict[str, dict] = {}
+        for line in active_lines:
+            opp = line.opportunity
+            buyer_email = (opp.idea_owner if opp else None) or "Unknown"
+            if buyer_email not in buyer_map:
+                buyer_map[buyer_email] = {
+                    "buyer_email": buyer_email,
+                    "buyer_name": (
+                        buyer_email.split("@")[0].replace(".", " ").title()
+                        if "@" in buyer_email else buyer_email
+                    ),
+                    "opp_ids": set(),
+                    "plant_ids": set(),
+                    "categories": set(),
+                    "expected_annual": 0.0,
+                    "actual_ytd": 0.0,
+                    "expected_ytd": 0.0,
+                    "eoy_forecast": 0.0,
+                    "budget_value": 0.0,
+                    "budgeted_eoy": 0.0,
+                    "budgeted_expected_annual": 0.0,
+                    "escalated_count": 0,
+                }
+            bm = buyer_map[buyer_email]
+            bm["opp_ids"].add(line.opportunity_id)
+            if line.plant_id:
+                bm["plant_ids"].add(line.plant_id)
+            if opp and opp.opportunity_type:
+                bm["categories"].add(opp.opportunity_type)
+            bm["expected_annual"] += _n(line.expected_annual_saving) * _rate(line)
+            bm["eoy_forecast"]    += _eoy(line) * _rate(line)
+            bm["budget_value"]    += committed_budget_by_opp.get(line.opportunity_id, 0.0)
+            if line.opportunity_id in committed_opp_ids:
+                bm["budgeted_eoy"]              += _eoy(line) * _rate(line)
+                bm["budgeted_expected_annual"]  += _n(line.expected_annual_saving) * _rate(line)
+            if line.is_escalated:
+                bm["escalated_count"] += 1
+            for row in ytd_rows_for([line]):
+                fx = _rate(line)
+                bm["expected_ytd"] += _n(row.expected_saving) * fx
+                if row.actual_saving is not None:
+                    bm["actual_ytd"] += _n(row.actual_saving) * fx
+
+        by_buyer = sorted(
+            [
+                {
+                    "buyer_email": bm["buyer_email"],
+                    "buyer_name": bm["buyer_name"],
+                    "opp_count": len(bm["opp_ids"]),
+                    "plant_count": len(bm["plant_ids"]),
+                    "categories": sorted(bm["categories"]),
+                    "expected_annual": round(bm["expected_annual"], 2),
+                    "actual_ytd": round(bm["actual_ytd"], 2),
+                    "expected_ytd": round(bm["expected_ytd"], 2),
+                    "delta_ytd": round(bm["actual_ytd"] - bm["expected_ytd"], 2),
+                    "eoy_forecast": round(bm["eoy_forecast"], 2),
+                    "budget_value": round(bm["budget_value"], 2),
+                    "ytd_rate_pct": _pct(bm["actual_ytd"], bm["expected_ytd"]),
+                    "eoy_vs_budget_pct": _pct(bm["budgeted_eoy"], bm["budgeted_expected_annual"])
+                    if bm["budgeted_expected_annual"] else None,
+                    "escalated_count": bm["escalated_count"],
+                }
+                for bm in buyer_map.values()
+            ],
+            key=lambda x: x["expected_annual"],
+            reverse=True,
+        )
+
+        # Active filter summary to echo back to the client
+        _active_filters = {
+            "year": current_year,
+            "plant_ids": list(_plant_set),
+            "categories": list(_cat_set),
+            "buyer_emails": list(_buyer_set),
+        }
+
         return {
             "year": current_year,
             "computed_at": datetime.utcnow().isoformat(),
             "reporting_currency": "EUR",
+            "active_filters": _active_filters,
+            "available_filters": _available_filters,
             "kpis": {
                 # Forecast
                 "eoy_forecast_total": round(total_eoy_forecast, 2),
@@ -768,6 +942,7 @@ class PurchasingKpiService:
             "cash_kpis": cash_kpis,
             "by_plant": by_plant,
             "by_type": by_type,
+            "by_buyer": by_buyer,
             "late_projects": late_projects,
             "missing_updates": missing_updates[:10],
             "escalated": escalated,

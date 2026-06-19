@@ -14,7 +14,7 @@ from app.core.exceptions import AppException
 from app.features.purchasing_value import schemas
 from app.features.purchasing_value.schemas import opportunity_to_response
 from app.features.purchasing_value.service import PurchasingValueService
-from app.features.purchasing_value.kpi_service import PurchasingKpiService
+from app.features.purchasing_value.kpi_service import KpiFilters, PurchasingKpiService
 from app.features.purchasing_value.stp_pdf import generate_stp_pdf
 from app.shared.dependencies.auth import get_current_user
 from app.shared.dependencies.db import get_db
@@ -25,11 +25,20 @@ router = APIRouter(prefix="/purchasing-value", tags=["purchasing-value"])
 @router.get("/kpis", response_model=dict)
 async def get_kpis(
     year: Optional[int] = None,
+    plant_ids: Optional[str] = None,   # comma-separated plant IDs: "1,2,3"
+    categories: Optional[str] = None,  # comma-separated: "Sourcing,Negotiation"
+    buyers: Optional[str] = None,      # comma-separated emails
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
+    filters = KpiFilters(
+        year=year,
+        plant_ids=[int(p) for p in plant_ids.split(",") if p.strip()] if plant_ids else [],
+        categories=[c.strip() for c in categories.split(",") if c.strip()] if categories else [],
+        buyer_emails=[b.strip() for b in buyers.split(",") if b.strip()] if buyers else [],
+    )
     svc = PurchasingKpiService(db)
-    return {"status": "success", "data": await svc.compute_all(year)}
+    return {"status": "success", "data": await svc.compute_all(filters)}
 
 
 # ---------------------------------------------------------------------------
