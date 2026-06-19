@@ -846,6 +846,7 @@ async def list_budget_years(
     total = sum(eur(i) for i in items)
     budgeted = sum(eur(i) for i in items if i["budget_status"] == "Budgeted")
     opportunity = sum(eur(i) for i in items if i["budget_status"] == "Opportunity")
+    empty = sum(eur(i) for i in items if i["budget_status"] == "Empty")
     validated = sum(eur(i) for i in items if i["suggested_status"] == "Validate")
     return {
         "status": "success",
@@ -858,6 +859,7 @@ async def list_budget_years(
                 "total_applicable": round(total, 2),
                 "total_budgeted": round(budgeted, 2),
                 "total_opportunity": round(opportunity, 2),
+                "total_empty": round(empty, 2),
                 "total_validated": round(validated, 2),
             },
         },

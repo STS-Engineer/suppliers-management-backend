@@ -1,5 +1,6 @@
 """Purchasing value management schemas."""
 
+from calendar import monthrange
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Dict, Optional, List
@@ -255,6 +256,34 @@ def add_months(d: date, months: int) -> date:
     return date(year, month, 1)
 
 
+def add_months_preserve_day(d: date, months: int) -> date:
+    """Add N calendar months while preserving the day when possible.
+
+    If the target month has fewer days (e.g. 31st -> February), clamp to the
+    last valid day of that month. This is used by the budgeting split because
+    the budget window is now prorated by actual days, not whole months only.
+    """
+    total = d.month - 1 + months
+    year = d.year + total // 12
+    month = total % 12 + 1
+    day = min(d.day, monthrange(year, month)[1])
+    return date(year, month, day)
+
+
+def budget_year_for_date(d: date) -> int:
+    """Budget year label for a date.
+
+    Business rule: Budget year N runs from 1 December N-1 to 30 November N.
+    Therefore December 2026 belongs to budget year 2027.
+    """
+    return d.year + 1 if d.month == 12 else d.year
+
+
+def budget_year_bounds(fiscal_year: int) -> tuple[date, date]:
+    """Return [start, end_exclusive) of a budget year."""
+    return date(fiscal_year - 1, 12, 1), date(fiscal_year, 12, 1)
+
+
 def recommend_savings_start_date(opp):
     """Suggested savings-start date = study/planned anchor + planned phase 1–3 weeks
     (study + feasibility + deployment, i.e. when deployment completes). Phase 4
@@ -292,16 +321,19 @@ def compute_savings_start_date(opp):
 
 
 def compute_budget_year_portions(per_year_savings, savings_start, duration_months=None) -> list:
-    """Split per-year savings across the calendar (fiscal) years they fall in.
+    """Split savings across budget years using day-level prorata.
 
     `per_year_savings` is a list of annual gross savings — the STP per-year windows
     [year N, N+1, N+2, N+3] (escalating with the negotiated prices), or a single
-    repeated annual figure when no STP prices exist. Each window runs at gross/12 per
-    month for 12 consecutive months from `savings_start`; the whole stream is capped
-    at `duration_months` (and at the number of windows available). Each month credits
-    its calendar year.
+    repeated annual figure when no STP prices exist. Each annual window runs for
+    12 calendar months from `savings_start`; the whole stream is capped at
+    `duration_months` (and at the number of windows available).
 
-    portion_kind per calendar year: "Total" if it receives a full 12 months,
+    Budget year rule: year N = 01 Dec N-1 -> 30 Nov N. Allocation is done by
+    overlap in actual days, not by whole months. This means a start on 15 June
+    allocates only the exact days from 15 June to 30 November into that budget year.
+
+    portion_kind per budget year: "Total" if it receives a full budget year,
     "Applicable" for the partial first year, "Residual" for the partial tail.
 
     Returns [{"fiscal_year": int, "amount": float, "kind": str}], sorted by year.
@@ -324,18 +356,39 @@ def compute_budget_year_portions(per_year_savings, savings_start, duration_month
     TWELVE = Decimal("12")
     TWO_DP = Decimal("0.01")
 
-    amount: dict = {}
-    mcount: dict = {}
-    for t in range(months):
-        monthly = windows[t // 12] / TWELVE
-        yr = add_months(savings_start, t).year
-        amount[yr] = amount.get(yr, Decimal("0")) + monthly
-        mcount[yr] = mcount.get(yr, 0) + 1
+    overall_end = add_months_preserve_day(savings_start, months)
+    amount: dict[int, Decimal] = {}
+    dcount: dict[int, int] = {}
+
+    for idx, annual in enumerate(windows):
+        window_start = add_months_preserve_day(savings_start, idx * 12)
+        window_end = add_months_preserve_day(savings_start, (idx + 1) * 12)
+        if window_start >= overall_end:
+            break
+
+        effective_end = min(window_end, overall_end)
+        window_days = (window_end - window_start).days
+        if window_days <= 0 or effective_end <= window_start:
+            continue
+
+        cursor = window_start
+        while cursor < effective_end:
+            fy = budget_year_for_date(cursor)
+            _, fy_end = budget_year_bounds(fy)
+            slice_end = min(effective_end, fy_end)
+            days = (slice_end - cursor).days
+            if days > 0:
+                prorated = annual * Decimal(days) / Decimal(window_days)
+                amount[fy] = amount.get(fy, Decimal("0")) + prorated
+                dcount[fy] = dcount.get(fy, 0) + days
+            cursor = slice_end
 
     years = sorted(amount.keys())
     out = []
     for idx, yr in enumerate(years):
-        if mcount[yr] >= 12:
+        fy_start, fy_end = budget_year_bounds(yr)
+        fy_days = (fy_end - fy_start).days
+        if dcount[yr] >= fy_days:
             kind = "Total"
         elif idx == 0:
             kind = "Applicable"
@@ -360,9 +413,11 @@ def compute_budget_year_portions(per_year_savings, savings_start, duration_month
 
 
 def compute_saving_by_calendar_year(opp) -> dict:
-    """Estimated STP saving allocated to each calendar year — the {year: amount}
-    view of compute_budget_year_portions using the STP per-year windows, anchored on
-    the savings start (compute_savings_start_date) and capped at duration_months."""
+    """Estimated STP saving allocated to each budget year.
+
+    Compatibility note: the field name remains `saving_by_year`, but the split now
+    follows the budget year (01 Dec -> 30 Nov) with day-level prorata so it matches
+    the Budgeting module."""
     per_year = compute_stp_financials(opp)["saving_per_year"]
     duration = getattr(opp, "duration_months", None)
     rows = compute_budget_year_portions(

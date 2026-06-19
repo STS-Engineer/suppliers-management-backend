@@ -1045,25 +1045,25 @@ class PurchasingValueService:
                 "MONTHLY_ROWS_LOCKED_BEFORE_EXECUTION",
             )
 
+        old_actual = row.actual_saving  # capture before overwrite for cumulated estimate
         _set_if(row, "actual_saving", payload.actual_saving)
         _set_if(row, "cash_actual", payload.cash_actual)
 
-        # EOY Forecast validation: must be ≥ cumulated actual
+        # EOY Forecast validation: must be ≥ new cumulated actual
         # Olivier (04/06/2026): "si tu as mis Actual 200, elle peut pas avoir une end of
         # qui soit moins de 200 puisqu'elle a déjà 200"
         if payload.forecast_eoy_saving is not None:
-            # Get current cumulated actual (after setting new actual above)
-            cum_actual = (
-                float(row.cumulated_actual)
-                if row.cumulated_actual
-                else float(row.actual_saving or 0)
-            )
+            # Approximate new cumulated by adjusting old cumulated by the change in this month's actual
+            old_cum = float(row.cumulated_actual or 0)
+            old_act_val = float(old_actual or 0)
+            new_act_val = float(row.actual_saving or 0)
+            approx_new_cum = old_cum - old_act_val + new_act_val
             new_forecast = float(payload.forecast_eoy_saving)
-            if new_forecast < cum_actual:
+            if new_forecast < approx_new_cum:
                 raise AppException(
                     422,
-                    f"EOY Forecast ({new_forecast:.0f}€) cannot be less than cumulated actual ({cum_actual:.0f}€). "
-                    f"You have already realized {cum_actual:.0f}€ — the full-year projection must be at least that amount.",
+                    f"EOY Forecast ({new_forecast:.0f}€) cannot be less than cumulated actual ({approx_new_cum:.0f}€). "
+                    f"You have already realized {approx_new_cum:.0f}€ — the full-year projection must be at least that amount.",
                     "EOY_FORECAST_BELOW_ACTUAL",
                 )
             _set_if(row, "forecast_eoy_saving", payload.forecast_eoy_saving)
@@ -1302,7 +1302,13 @@ class PurchasingValueService:
         the STP calendar-year estimate (escalating windows), anchored on the savings
         start and capped at duration_months. When no STP prices exist, fall back to
         the flat expected_annual_saving repeated across the duration. Status is fully
-        derived from validation (_validation_status) — no manual override."""
+        derived from validation (_validation_status) — no manual override.
+
+        IMPORTANT: do not rely on `opp.budget_years` being preloaded. In async
+        SQLAlchemy, touching an unloaded relationship here can trigger an implicit
+        lazy-load outside the greenlet context (`MissingGreenlet`). Query the rows
+        explicitly instead so the recompute path is safe in API, tests and batch
+        flows alike."""
         duration = int(opp.duration_months or 0)
         anchor = compute_savings_start_date(opp)
         per_year = compute_stp_financials(opp)["saving_per_year"]
@@ -1315,7 +1321,19 @@ class PurchasingValueService:
             windows = []
         portions = compute_budget_year_portions(windows, anchor, duration or None)
         status = self._validation_status(opp)
-        existing = {by.fiscal_year: by for by in opp.budget_years}
+        existing_rows = (
+            (
+                await self.db.execute(
+                    select(OpportunityBudgetYear).where(
+                        OpportunityBudgetYear.opportunity_id == opp.opportunity_id,
+                        OpportunityBudgetYear.is_deleted.is_(False),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        existing = {by.fiscal_year: by for by in existing_rows}
         seen = set()
 
         for p in portions:
@@ -1354,16 +1372,30 @@ class PurchasingValueService:
                     await self.db.delete(row)
 
         await self.db.flush()
-        await self.db.refresh(opp, ["budget_years"])
+
+        final_rows = (
+            (
+                await self.db.execute(
+                    select(OpportunityBudgetYear).where(
+                        OpportunityBudgetYear.opportunity_id == opp.opportunity_id,
+                        OpportunityBudgetYear.is_deleted.is_(False),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
 
         # Opportunity-level validation status is DERIVED from the same validation
         # state — no manual toggle. "Validate" → Budgeted (KPIs/baseline-lock);
         # else Empty.
         opp.validation_status = "Budgeted" if status == "Validate" else "Empty"
-        if opp.budget_years:
+        if final_rows:
             opp.budget_year = Decimal(
-                str(min(by.fiscal_year for by in opp.budget_years))
+                str(min(by.fiscal_year for by in final_rows))
             )
+        else:
+            opp.budget_year = None
 
         # Propagate the derived validation status onto the opportunity's financial lines.
         # line.budget_status is a denormalized copy set once at creation; without this
@@ -2256,9 +2288,9 @@ class PurchasingValueService:
     async def _recalculate_ytd(self, financial_line_id: int) -> None:
         """Recalculate monthly cumulated fields AND push totals back to FinancialLine.
 
-        delta_vs_expected_ytd = sum(actual or 0) - sum(expected)
-                                for all months from project start up to today.
-        Missing actuals (null) count as 0 so gaps are never hidden.
+        delta_vs_expected_ytd = sum(actual) - sum(expected) for past months where
+        actual_saving IS NOT NULL. Months with no data entered are excluded so that
+        "not yet entered" is not silently treated as zero savings.
         cumulated_real_saving = total actuals entered (all time).
         """
         result = await self.db.execute(
@@ -2279,17 +2311,16 @@ class PurchasingValueService:
             row.cumulated_expected = cum_exp
             if row.actual_saving is not None:
                 cum_act += row.actual_saving
-                row.cumulated_actual = cum_act
-                row.delta_vs_expected = row.actual_saving - (
-                    row.expected_saving or Decimal("0")
-                )
+                row.delta_vs_expected = row.actual_saving - (row.expected_saving or Decimal("0"))
+            else:
+                row.delta_vs_expected = None
+            # Always write cumulated_actual so gap rows don't show stale values
+            row.cumulated_actual = cum_act if cum_act else None
 
-            # YTD delta: all past months, null actual counts as 0 (gap stays visible)
-            if row.period_month and row.period_month <= today_first:
+            # YTD delta: only count months where actual data was entered
+            if row.period_month and row.period_month <= today_first and row.actual_saving is not None:
                 ytd_exp += row.expected_saving or Decimal("0")
-                ytd_act += (
-                    row.actual_saving if row.actual_saving is not None else Decimal("0")
-                )
+                ytd_act += row.actual_saving
 
         # Also accumulate cash actuals (Gap 3)
         cum_cash = Decimal("0")
