@@ -86,6 +86,17 @@ class SupplierGroupBase(BaseModel):
 class SupplierGroupCreate(SupplierGroupBase):
     """Schema for creating a new supplier group."""
     nom: str = Field(..., max_length=200, description="Supplier group name (required)")
+    supplier_scope: str = Field(..., max_length=20, description="Scope of supplier: local, regional, or global (required)")
+    supplier_type: str | List[str] = Field(..., description="Supplier category or categories (required)")
+
+    @field_validator("supplier_type")
+    @classmethod
+    def validate_supplier_type_nonempty(cls, value: str | List[str]) -> str | List[str]:
+        if isinstance(value, list) and len(value) == 0:
+            raise ValueError("At least one supplier type must be selected")
+        if isinstance(value, str) and not value.strip():
+            raise ValueError("At least one supplier type must be selected")
+        return value
 
 
 class SupplierGroupUpdate(SupplierGroupBase):
