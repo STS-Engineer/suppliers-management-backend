@@ -2,6 +2,7 @@
 from typing import Dict, List, Optional
 from datetime import date, datetime
 from decimal import Decimal
+import re
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.features.suppliers.options import (
@@ -21,6 +22,20 @@ from app.features.suppliers.options import (
 
 def _allowed_values(options):
     return {option["value"] for option in options}
+
+
+EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _normalize_optional_email(value: Optional[str], field_name: str) -> Optional[str]:
+    if value is None:
+        return None
+    trimmed = value.strip()
+    if trimmed == "":
+        return None
+    if not EMAIL_PATTERN.match(trimmed):
+        raise ValueError(f"{field_name} must be a valid email address")
+    return trimmed
 
 
 TOP_VALUES = _allowed_values(TOP_OPTIONS)
@@ -61,6 +76,11 @@ class SupplierGroupBase(BaseModel):
     exit_supplier: Optional[bool] = Field(False, description="Is this supplier in exit status?")
     strategic_reason: Optional[str] = Field(None, description="Reason for strategic classification")
     supplier_type: Optional[str | List[str]] = Field(None, description="Supplier category or categories")
+
+    @field_validator("supplier_owner")
+    @classmethod
+    def validate_supplier_owner_email(cls, value: Optional[str]) -> Optional[str]:
+        return _normalize_optional_email(value, "supplier_owner")
 
 
 class SupplierGroupCreate(SupplierGroupBase):
@@ -144,6 +164,10 @@ class SupplierUnitBase(BaseModel):
             return ",".join(str(x).strip() for x in v if str(x).strip())
         return str(v) if v != "" else None
 
+    @field_validator("supplier_email")
+    @classmethod
+    def validate_supplier_email(cls, value: Optional[str]) -> Optional[str]:
+        return _normalize_optional_email(value, "supplier_email")
 
 
 class SupplierUnitCreate(SupplierUnitBase):
@@ -230,6 +254,11 @@ class ContactBase(BaseModel):
     phone: Optional[str] = Field(None, max_length=50, description="Phone number")
     email: Optional[str] = Field(None, max_length=200, description="Email address")
     is_primary_contact: Optional[bool] = Field(False, description="Is this the primary contact?")
+
+    @field_validator("email")
+    @classmethod
+    def validate_contact_email(cls, value: Optional[str]) -> Optional[str]:
+        return _normalize_optional_email(value, "email")
 
 
 class ContactCreate(ContactBase):

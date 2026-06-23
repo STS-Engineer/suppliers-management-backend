@@ -235,6 +235,9 @@ class SupplierOnboardingWorkflow:
                 "message": f"Supplier {group.nom} created successfully and prequalification initiated",
             }
 
+        except AppException:
+            await self.db.rollback()
+            raise
         except Exception as e:
             await self.db.rollback()
             raise AppException(
@@ -249,6 +252,34 @@ class SupplierOnboardingWorkflow:
         certifications: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
         """Create supplier group, unit, contacts, and certifications."""
+        group_name = str(group_data.get("nom") or "").strip()
+        if group_name:
+            existing_group_stmt = select(SupplierGroup).where(
+                SupplierGroup.nom == group_name
+            )
+            existing_group = (
+                await self.db.execute(existing_group_stmt)
+            ).scalar_one_or_none()
+            if existing_group:
+                raise AppException(
+                    f"Supplier group with name '{group_name}' already exists",
+                    status_code=409,
+                )
+
+        supplier_code = str(unit_data.get("supplier_code") or "").strip()
+        if supplier_code:
+            existing_unit_stmt = select(SupplierUnit).where(
+                SupplierUnit.supplier_code == supplier_code
+            )
+            existing_unit = (
+                await self.db.execute(existing_unit_stmt)
+            ).scalar_one_or_none()
+            if existing_unit:
+                raise AppException(
+                    f"Supplier unit with code '{supplier_code}' already exists",
+                    status_code=409,
+                )
+
         prepared_group_data = self._prepare_group_payload(group_data)
         prepared_unit_data = self._prepare_unit_payload(unit_data, group_data)
         categories = self._extract_categories(group_data.get("supplier_type"))

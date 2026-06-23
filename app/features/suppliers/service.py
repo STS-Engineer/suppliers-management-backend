@@ -3,7 +3,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import List, Optional, Dict, Any
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.orm import selectinload
 from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -355,8 +355,27 @@ class SupplierService:
             contacts = contacts or []
             certifications = certifications or []
 
+            group_name = str((group_data or {}).get("nom") or "").strip()
+            if group_name:
+                existing_group = await self.repo.find_group_by_name(group_name)
+                if existing_group:
+                    raise AppException(
+                        f"Supplier group with name '{group_name}' already exists",
+                        status_code=409,
+                    )
+
+            supplier_code = str((unit_data or {}).get("supplier_code") or "").strip()
+            if supplier_code:
+                existing_unit = await self.repo.find_unit_by_code(supplier_code)
+                if existing_unit:
+                    raise AppException(
+                        f"Supplier unit with code '{supplier_code}' already exists",
+                        status_code=409,
+                    )
+
             group_data = self._prepare_group_payload(group_data or {})
             unit_data = self._prepare_unit_payload(unit_data or {}, group_data)
+            unit_data = await self._apply_legacy_unit_schema_compatibility(unit_data)
             categories = self._extract_categories(group_data.pop("supplier_type", None))
             
             # Create supplier group
@@ -390,6 +409,9 @@ class SupplierService:
                 "contacts": created_contacts,
                 "certifications": created_certifications
             }
+        except AppException:
+            await self.db.rollback()
+            raise
         except Exception as e:
             await self.db.rollback()
             raise AppException(f"Failed to create supplier: {str(e)}", status_code=400)
@@ -885,6 +907,39 @@ class SupplierService:
         for field_name in ("strategique", "monopolistique", "directed"):
             if prepared.get(field_name) is None and group_data.get(field_name) is not None:
                 prepared[field_name] = bool(group_data.get(field_name))
+        return prepared
+
+    async def _get_column_max_length(
+        self, table_name: str, column_name: str
+    ) -> Optional[int]:
+        result = await self.db.execute(
+            text(
+                """
+                SELECT character_maximum_length
+                FROM information_schema.columns
+                WHERE table_name = :table_name
+                  AND column_name = :column_name
+                """
+            ),
+            {"table_name": table_name, "column_name": column_name},
+        )
+        value = result.scalar_one_or_none()
+        return int(value) if value is not None else None
+
+    async def _apply_legacy_unit_schema_compatibility(self, unit_data: dict) -> dict:
+        prepared = dict(unit_data)
+        category = prepared.get("category")
+        if not category:
+            return prepared
+
+        max_length = await self._get_column_max_length("supplier_unit", "category")
+        if max_length is not None and len(str(category)) > max_length:
+            # Some local databases still expose the legacy short category column.
+            # Preserve the submitted value in the older product_category field and
+            # omit category so supplier creation can still succeed.
+            prepared.setdefault("product_category", str(category)[:255])
+            prepared.pop("category", None)
+
         return prepared
 
     @staticmethod
