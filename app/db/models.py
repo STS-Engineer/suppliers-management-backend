@@ -28,7 +28,7 @@ from sqlalchemy import (
     inspect,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID, ARRAY
 from app.db.session import Base
 
 # ---------------------------------------------------------------------------
@@ -291,7 +291,7 @@ class SupplierGroupCategory(GovernanceMixin, Base):
 class SupplierUnit(TimestampMixin, GovernanceMixin, Base):
     __tablename__ = "supplier_unit"
     __table_args__ = (
-        UniqueConstraint("supplier_code", name="uq_supplier_unit_code"),
+        UniqueConstraint("id_group", "supplier_code", name="uq_supplier_unit_group_code"),
     )
 
     id_supplier_unit: Mapped[int] = mapped_column(
@@ -339,6 +339,10 @@ class SupplierUnit(TimestampMixin, GovernanceMixin, Base):
     directed: Mapped[bool] = mapped_column(
         Boolean, server_default="false", nullable=False
     )
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, server_default="true", nullable=False
+    )
+    inactivated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
     group: Mapped[Optional["SupplierGroup"]] = relationship(back_populates="units")
     site_relations: Mapped[List["SupplierSiteRelation"]] = relationship(
@@ -440,6 +444,9 @@ class SupplierSiteRelation(GovernanceMixin, Base):
     inactivated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     last_status_change: Mapped[Optional[datetime]] = mapped_column(
         DateTime, nullable=True
+    )
+    evaluation_draft: Mapped[Optional[dict]] = mapped_column(
+        JSONB, nullable=True
     )
 
     site: Mapped["AvocarbonSite"] = relationship(back_populates="supplier_relations")
@@ -2211,6 +2218,14 @@ class Opportunity(GovernanceMixin, Base):
         lazy="selectin",
     )
 
+    action_plans: Mapped[List["OpportunityActionPlan"]] = relationship(
+        "OpportunityActionPlan",
+        back_populates="opportunity",
+        cascade="all, delete-orphan",
+        order_by="OpportunityActionPlan.created_at.desc()",
+        lazy="selectin",
+    )
+
     def __repr__(self) -> str:
         return f"<Opportunity id={self.opportunity_id} name={self.opportunity_name!r}>"
 
@@ -2297,6 +2312,35 @@ class GateApprovalVote(GovernanceMixin, Base):
 
     request: Mapped["GateApprovalRequest"] = relationship(
         "GateApprovalRequest", back_populates="votes"
+    )
+
+
+class OpportunityActionPlan(Base):
+    """Action plan linked to an opportunity phase, mirrored to the enterprise action plan service."""
+
+    __tablename__ = "opportunity_action_plan"
+
+    action_plan_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    opportunity_id: Mapped[int] = mapped_column(
+        ForeignKey("opportunity.opportunity_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    phase_status: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    plan_title: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    plan_code: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, index=True)
+    # Full PlanV2 payload stored locally so reads don't require a call to the external API
+    plan_data: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    external_push_status: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    # "ok" | "failed" | "pending"
+    external_push_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_by: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    updated_by: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+
+    opportunity: Mapped["Opportunity"] = relationship(
+        "Opportunity", back_populates="action_plans"
     )
 
 
@@ -2521,6 +2565,9 @@ class OpportunityBudgetYear(GovernanceMixin, Base):
     budget_status: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     status_locked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     status_locked_by: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    # Explanation of delta between EOY forecast and budget baseline for KPI chart
+    # Allowed values: see DELTA_REASON_VALUES in schemas.py; multi-valued (TEXT[])
+    delta_reason: Mapped[Optional[list]] = mapped_column(ARRAY(Text), nullable=True)
 
     opportunity: Mapped["Opportunity"] = relationship(back_populates="budget_years")
 
@@ -2626,3 +2673,4 @@ __all__ = [
     "FinancialLine",
     "MonthlyFinancial",
 ]
+

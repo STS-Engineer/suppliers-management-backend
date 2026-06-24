@@ -197,9 +197,13 @@ class SupplierRepository:
         result = await self.db.execute(stmt)
         return result.scalar_one_or_none()
     
-    async def find_unit_by_code(self, code: str) -> Optional[SupplierUnit]:
-        """Find supplier unit by supplier code."""
+    async def find_unit_by_code(self, code: str, group_id: Optional[int] = None) -> Optional[SupplierUnit]:
+        """Find supplier unit by supplier code, optionally scoped to one group."""
         stmt = select(SupplierUnit).where(SupplierUnit.supplier_code == code)
+        if group_id is None:
+            stmt = stmt.where(SupplierUnit.id_group.is_(None))
+        else:
+            stmt = stmt.where(SupplierUnit.id_group == group_id)
         result = await self.db.execute(stmt)
         return result.scalar_one_or_none()
     
@@ -322,3 +326,5 @@ class SupplierRepository:
             await self.db.flush()
             return True
         return False
+
+

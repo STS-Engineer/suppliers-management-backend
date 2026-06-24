@@ -288,6 +288,19 @@ async def upload_development_plan_document(
     )
 
 
+async def upload_certification_document(
+    file: UploadFile,
+    unit_id: int,
+    cert_id: int,
+) -> dict:
+    """Upload a document for a supplier unit certification."""
+    return await _upload_file(
+        file=file,
+        folder="certifications",
+        prefix=f"cert_{unit_id}_{cert_id}",
+    )
+
+
 async def upload_opportunity_document(
     file: UploadFile,
     opportunity_id: int,

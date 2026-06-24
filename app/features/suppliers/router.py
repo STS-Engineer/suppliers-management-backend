@@ -1,8 +1,9 @@
 """Suppliers router."""
 
 from typing import Optional
-from fastapi import APIRouter, Depends, status, Query
+from fastapi import APIRouter, Depends, File, Form, UploadFile, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import DBAPIError
 
 from app.shared.dependencies.db import get_db
 from app.shared.dependencies.auth import get_current_user
@@ -14,6 +15,22 @@ from app.core.exceptions import AppException
 from sqlalchemy.orm import Session
 
 router = APIRouter(prefix="/suppliers", tags=["suppliers"])
+
+
+def _raise_clearer_unit_persistence_error(exc: Exception) -> None:
+    if not isinstance(exc, DBAPIError):
+        return
+
+    message = str(exc.orig or exc).lower()
+    if "character varying" not in message:
+        return
+
+    if "too long" in message or "trop longue" in message or "righttruncation" in message:
+        raise AppException(
+            "One of the supplier unit fields is longer than the database allows. Please shorten values like country, unit name, category, or percentage fields and try again.",
+            status_code=400,
+        ) from exc
+
 
 
 def _resolve_actor(current_user: dict | None) -> Optional[str]:
@@ -366,15 +383,16 @@ async def create_unit_complete(
     if not group:
         raise AppException(f"Supplier group {group_id} not found", status_code=404)
 
-    # Enforce unique supplier_code
+    # Enforce unique supplier_code within the same supplier group
     existing_unit_stmt = select(SupplierUnit).where(
-        SupplierUnit.supplier_code == data.unit.supplier_code
+        SupplierUnit.id_group == group_id,
+        SupplierUnit.supplier_code == data.unit.supplier_code,
     )
     existing_unit = (await db.execute(existing_unit_stmt)).scalar_one_or_none()
     if existing_unit:
         raise AppException(
-            f"A supplier unit with name '{data.unit.supplier_code}' already exists. "
-            "Each unit must have a unique name.",
+            f"A supplier unit with name '{data.unit.supplier_code}' already exists in this supplier group. "
+            "Each unit name must be unique within the same group.",
             status_code=409,
         )
 
@@ -414,8 +432,9 @@ async def create_unit_complete(
             },
             "message": f"Unit '{unit.supplier_code}' created with {len(created_contacts)} contact(s) and {len(created_certs)} certification(s)",
         }
-    except Exception:
+    except Exception as exc:
         await db.rollback()
+        _raise_clearer_unit_persistence_error(exc)
         raise
 
 
@@ -941,6 +960,80 @@ async def add_certification_to_unit(
         raise
 
 
+@router.patch("/units/{unit_id}/certifications/{cert_id}", response_model=dict)
+async def patch_certification(
+    unit_id: int,
+    cert_id: int,
+    data: schemas.SupplierCertificationUpdate,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Update a certification's dates, type, or document. Quality certs cascade to evaluations."""
+    try:
+        service = SupplierService(db)
+        cert = await service.patch_certification(unit_id, cert_id, data)
+        affected = []
+        if cert.standard_type and cert.standard_type.lower() == "quality":
+            from app.features.supplier_relations.service import SupplierRelationService
+            rel_service = SupplierRelationService(db)
+            affected = await rel_service.sync_quality_certification_for_unit(unit_id)
+        return {
+            "status": "success",
+            "data": schemas.SupplierCertificationResponse.model_validate(cert),
+            "affected_evaluations": affected,
+            "message": f"Certification updated.{f' {len(affected)} evaluation(s) recomputed.' if affected else ''}",
+        }
+    except AppException:
+        raise
+    except Exception:
+        raise
+
+
+@router.post("/units/{unit_id}/certifications/{cert_id}/file", response_model=dict)
+async def upload_certification_file(
+    unit_id: int,
+    cert_id: int,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Upload or replace the document file for a certification."""
+    from app.shared.utils.blob_storage import upload_certification_document, _extract_blob_name, delete_blob
+    try:
+        service = SupplierService(db)
+        cert = await service.repo.find_certification_by_id(cert_id)
+        if not cert or cert.id_supplier_unit != unit_id:
+            from app.core.exceptions import AppException
+            raise AppException(f"Certification {cert_id} not found for unit {unit_id}", status_code=404)
+
+        # Delete old blob if present
+        if cert.file_url:
+            old_blob = _extract_blob_name(cert.file_url)
+            if old_blob:
+                try:
+                    await delete_blob(old_blob)
+                except Exception:
+                    pass
+
+        result = await upload_certification_document(file, unit_id, cert_id)
+        await service.repo.update_certification(cert_id, {
+            "file_name": result["filename"],
+            "file_url":  result["file_url"],
+            "file_size": result["size"],
+        })
+        await db.commit()
+        updated = await service.repo.find_certification_by_id(cert_id)
+        return {
+            "status": "success",
+            "data": schemas.SupplierCertificationResponse.model_validate(updated),
+            "message": f"File '{result['filename']}' uploaded successfully.",
+        }
+    except AppException:
+        raise
+    except Exception:
+        raise
+
+
 @router.get("/units/{unit_id}/certifications", response_model=dict)
 async def list_certifications_for_unit(
     unit_id: int,
@@ -1080,9 +1173,10 @@ async def create_carbon_footprint(
 async def list_all_certifications(
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=500),
-    standard_type: Optional[str] = Query(None, description="Filter by standard type (quality, environmental, safety, energy, other)"),
-    expired_only: bool = Query(False, description="Return only expired certifications"),
-    expiring_days: Optional[int] = Query(None, ge=1, le=365, description="Return certs expiring within N days"),
+    standard_type: Optional[str] = Query(None),
+    expired_only: bool = Query(False),
+    expiring_days: Optional[int] = Query(None, ge=1, le=365),
+    q: Optional[str] = Query(None, description="Search by cert type, name, supplier code or group name"),
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
@@ -1095,14 +1189,12 @@ async def list_all_certifications(
             standard_type=standard_type,
             expired_only=expired_only,
             expiring_days=expiring_days,
+            q=q,
         )
         return {
             "status": "success",
             "data": {
-                "items": [
-                    schemas.SupplierCertificationResponse.model_validate(cert)
-                    for cert in result["items"]
-                ],
+                "items": result["items"],
                 "total": result["total"],
                 "skip": result["skip"],
                 "limit": result["limit"],
@@ -1166,6 +1258,9 @@ async def delete_supplier(
     return await delete_supplier_group(
         group_id=supplier_id, db=db, current_user=current_user
     )
+
+
+
 
 
 

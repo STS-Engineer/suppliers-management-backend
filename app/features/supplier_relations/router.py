@@ -122,6 +122,21 @@ async def add_contact_to_relation(
     }
 
 
+@router.get("/criteria-validity", response_model=dict)
+async def get_criteria_validity_bulk(
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Bulk endpoint: returns criteria values + validity details for every relation
+    in 4 DB queries. Used by the Criteria Validity Tracker page."""
+    try:
+        service = SupplierRelationService(db)
+        items = await service.get_criteria_validity_bulk()
+        return {"status": "success", "data": {"items": items, "total": len(items)}}
+    except AppException as exc:
+        return exc.to_response()
+
+
 @router.get("/{relation_id}", response_model=dict)
 async def get_relation(
     relation_id: int,
@@ -139,6 +154,37 @@ async def get_relation(
         raise
     except Exception:
         raise
+
+
+class RelationAdminPatch(BaseModel):
+    """Partial update for admin-level relation fields."""
+    panel_decision: Optional[str] = None
+
+
+@router.patch("/{relation_id}", response_model=dict)
+async def patch_relation(
+    relation_id: int,
+    data: RelationAdminPatch,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Update admin-level fields on a supplier relation (panel_decision)."""
+    from sqlalchemy import select
+    from app.db.models import SupplierSiteRelation
+    result = await db.execute(
+        select(SupplierSiteRelation).where(SupplierSiteRelation.id_relation == relation_id)
+    )
+    relation = result.scalar_one_or_none()
+    if not relation:
+        from app.core.exceptions import AppException
+        raise AppException(f"Relation {relation_id} not found", status_code=404)
+    if data.panel_decision is not None:
+        relation.panel_decision = data.panel_decision
+    await db.commit()
+    return {
+        "status": "success",
+        "data": {"id_relation": relation_id, "panel_decision": relation.panel_decision},
+    }
 
 
 @router.get("/{relation_id}/evaluation-workspace", response_model=dict)
@@ -691,6 +737,57 @@ async def update_operational_evaluation(
             },
             "message": "Operational evaluation updated successfully.",
         }
+    except AppException:
+        raise
+    except Exception:
+        raise
+
+
+@router.put("/{relation_id}/evaluation-draft", response_model=dict)
+async def save_evaluation_draft(
+    relation_id: int,
+    payload: dict,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Persist raw evaluation form data as a draft — no business logic, no grade/status changes."""
+    try:
+        service = SupplierRelationService(db)
+        await service.save_evaluation_draft(relation_id, payload)
+        return {"status": "success", "message": "Draft saved."}
+    except AppException:
+        raise
+    except Exception:
+        raise
+
+
+@router.delete("/{relation_id}/evaluation-draft", response_model=dict)
+async def clear_evaluation_draft(
+    relation_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Clear the evaluation draft after a successful submit."""
+    try:
+        service = SupplierRelationService(db)
+        await service.save_evaluation_draft(relation_id, None)
+        return {"status": "success", "message": "Draft cleared."}
+    except AppException:
+        raise
+    except Exception:
+        raise
+
+
+@router.get("/{relation_id}/evaluation-cycle-history")
+async def get_evaluation_cycle_history(
+    relation_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Full IATF audit timeline — all cycles with snapshots and diffs."""
+    try:
+        service = SupplierRelationService(db)
+        return await service.get_evaluation_cycle_history(relation_id)
     except AppException:
         raise
     except Exception:

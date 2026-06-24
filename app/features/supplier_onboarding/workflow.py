@@ -267,16 +267,18 @@ class SupplierOnboardingWorkflow:
                 )
 
         supplier_code = str(unit_data.get("supplier_code") or "").strip()
-        if supplier_code:
+        unit_group_id = unit_data.get("id_group")
+        if supplier_code and unit_group_id is not None:
             existing_unit_stmt = select(SupplierUnit).where(
-                SupplierUnit.supplier_code == supplier_code
+                SupplierUnit.id_group == unit_group_id,
+                SupplierUnit.supplier_code == supplier_code,
             )
             existing_unit = (
                 await self.db.execute(existing_unit_stmt)
             ).scalar_one_or_none()
             if existing_unit:
                 raise AppException(
-                    f"Supplier unit with code '{supplier_code}' already exists",
+                    f"Supplier unit with code '{supplier_code}' already exists in this group",
                     status_code=409,
                 )
 
@@ -837,3 +839,4 @@ class SupplierOnboardingWorkflow:
             seen.add(category_key)
             categories.append((category_key, item))
         return categories
+

@@ -3,7 +3,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import List, Optional, Dict, Any
 
-from sqlalchemy import func, select, text, update
+from sqlalchemy import func, or_, select, text, update
 from sqlalchemy.orm import selectinload
 from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -31,6 +31,7 @@ from app.db.models import (
 )
 from app.features.suppliers import schemas
 from app.core.exceptions import AppException
+from app.shared.utils.blob_storage import get_fresh_doc_url
 
 
 class SupplierService:
@@ -244,10 +245,10 @@ class SupplierService:
         changed_by: Optional[str] = None,
     ) -> SupplierUnit:
         """Create a new supplier unit."""
-        # Check if supplier code already exists
-        existing = await self.repo.find_unit_by_code(data.supplier_code)
+        # Check if supplier code already exists in the same group
+        existing = await self.repo.find_unit_by_code(data.supplier_code, data.id_group)
         if existing:
-            raise AppException(f"Supplier unit with code '{data.supplier_code}' already exists", status_code=409)
+            raise AppException(f"Supplier unit with code '{data.supplier_code}' already exists in this group", status_code=409)
         
         # Check if group exists (if provided)
         if data.id_group:
@@ -283,11 +284,11 @@ class SupplierService:
         if not update_data:
             return unit
         
-        # Check if new code conflicts with another unit
+        # Check if new code conflicts with another unit in the same group
         if "supplier_code" in update_data and update_data["supplier_code"] != unit.supplier_code:
-            existing = await self.repo.find_unit_by_code(update_data["supplier_code"])
+            existing = await self.repo.find_unit_by_code(update_data["supplier_code"], unit.id_group)
             if existing:
-                raise AppException(f"Supplier unit with code '{update_data['supplier_code']}' already exists", status_code=409)
+                raise AppException(f"Supplier unit with code '{update_data['supplier_code']}' already exists in this group", status_code=409)
         
         previous_snapshot = self._unit_audit_snapshot(unit)
         updated_unit = await self.repo.update_unit(
@@ -365,11 +366,12 @@ class SupplierService:
                     )
 
             supplier_code = str((unit_data or {}).get("supplier_code") or "").strip()
-            if supplier_code:
-                existing_unit = await self.repo.find_unit_by_code(supplier_code)
+            unit_group_id = (unit_data or {}).get("id_group")
+            if supplier_code and unit_group_id is not None:
+                existing_unit = await self.repo.find_unit_by_code(supplier_code, unit_group_id)
                 if existing_unit:
                     raise AppException(
-                        f"Supplier unit with code '{supplier_code}' already exists",
+                        f"Supplier unit with code '{supplier_code}' already exists in this group",
                         status_code=409,
                     )
 
@@ -471,6 +473,19 @@ class SupplierService:
         cert_data = data.model_dump(exclude_unset=True)
         cert_data["id_supplier_unit"] = unit_id
         cert = await self.repo.create_certification(cert_data)
+        await self.db.commit()
+        return cert
+
+    async def patch_certification(
+        self, unit_id: int, cert_id: int, data: schemas.SupplierCertificationUpdate
+    ) -> SupplierCertification:
+        cert = await self.repo.find_certification_by_id(cert_id)
+        if not cert or cert.id_supplier_unit != unit_id:
+            raise AppException(f"Certification {cert_id} not found for unit {unit_id}", status_code=404)
+        update_data = {k: v for k, v in data.model_dump(exclude_unset=True).items() if v is not None}
+        if not update_data:
+            return cert
+        cert = await self.repo.update_certification(cert_id, update_data)
         await self.db.commit()
         return cert
 
@@ -1170,37 +1185,72 @@ class SupplierService:
         standard_type: Optional[str] = None,
         expired_only: bool = False,
         expiring_days: Optional[int] = None,
+        q: Optional[str] = None,
     ) -> Dict[str, Any]:
         """List all certifications across all supplier units with optional filters."""
         from datetime import date, timedelta
-        stmt = (
-            select(SupplierCertification)
+        from app.db.models import SupplierUnit as SupplierUnitModel, SupplierGroup as SupplierGroupModel
+        base = (
+            select(SupplierCertification, SupplierUnitModel.supplier_code, SupplierGroupModel.nom)
+            .join(
+                SupplierUnitModel,
+                SupplierCertification.id_supplier_unit == SupplierUnitModel.id_supplier_unit,
+                isouter=True,
+            )
+            .join(
+                SupplierGroupModel,
+                SupplierUnitModel.id_group == SupplierGroupModel.id_group,
+                isouter=True,
+            )
             .where(SupplierCertification.is_deleted.is_(False))
         )
         if standard_type:
-            stmt = stmt.where(SupplierCertification.standard_type == standard_type)
+            base = base.where(SupplierCertification.standard_type == standard_type)
         if expired_only:
             today = date.today()
-            stmt = stmt.where(
-                SupplierCertification.end_date < today
-            )
+            base = base.where(SupplierCertification.end_date < today)
         elif expiring_days is not None:
             today = date.today()
             threshold = today + timedelta(days=expiring_days)
-            stmt = stmt.where(
+            base = base.where(
                 SupplierCertification.end_date >= today,
                 SupplierCertification.end_date <= threshold,
             )
+        if q:
+            pattern = f"%{q}%"
+            base = base.where(
+                or_(
+                    SupplierCertification.certification_type.ilike(pattern),
+                    SupplierCertification.certificate_name.ilike(pattern),
+                    SupplierUnitModel.supplier_code.ilike(pattern),
+                    SupplierGroupModel.nom.ilike(pattern),
+                )
+            )
 
-        count_stmt = select(func.count()).select_from(stmt.subquery())
-        total_result = await self.db.execute(count_stmt)
-        total = total_result.scalar() or 0
+        count_stmt = select(func.count()).select_from(base.subquery())
+        total = (await self.db.execute(count_stmt)).scalar() or 0
 
-        stmt = stmt.order_by(
-            SupplierCertification.end_date.asc().nullslast()
-        ).offset(skip).limit(limit)
-        result = await self.db.execute(stmt)
-        items = result.scalars().all()
+        rows = (
+            await self.db.execute(
+                base.order_by(
+                    SupplierGroupModel.nom.asc().nullslast(),
+                    SupplierUnitModel.supplier_code.asc().nullslast(),
+                    SupplierCertification.end_date.asc().nullslast(),
+                ).offset(skip).limit(limit)
+            )
+        ).all()
+
+        items = []
+        for cert, supplier_code, group_nom in rows:
+            d = schemas.SupplierCertificationResponse.model_validate(cert).model_dump()
+            d["file_url"] = (
+                get_fresh_doc_url(cert.file_url)
+                if cert.file_url
+                else None
+            )
+            d["supplier_code"] = supplier_code
+            d["group_nom"] = group_nom
+            items.append(d)
         return {"items": items, "total": total, "skip": skip, "limit": limit}
 
     def _audit_event_to_dict(self, event: AuditEvent) -> Dict[str, Any]:
@@ -1257,3 +1307,6 @@ class SupplierService:
         self.db.add(event)
         await self.db.flush()
         return event
+
+
+

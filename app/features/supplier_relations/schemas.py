@@ -300,8 +300,12 @@ class RelationEvaluationWorkspaceResponse(EvaluationDetailsBase):
     development_plans: list[SupplierDevelopmentPlanResponse] = Field(default_factory=list)
     # Extended workspace fields
     unit_supplier_code: Optional[str] = None
+    unit_is_active: bool = True
+    unit_inactivated_at: Optional[str] = None
+    reevaluation_type: Optional[str] = None  # "initial" | "preliminary" | None
     baseline_locked: bool = False
     baseline_data: Optional[dict] = None
     unit_certifications: list[dict] = Field(default_factory=list)
     evaluation_documents: list[dict] = Field(default_factory=list)
     criteria_scores: dict = Field(default_factory=dict)
+    evaluation_draft: Optional[dict] = None

@@ -7,7 +7,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Optional
 
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -155,6 +155,114 @@ class SupplierRelationService:
             )
         return relation
 
+    async def get_criteria_validity_bulk(self) -> list[dict[str, Any]]:
+        """
+        Returns criteria values + validity details for all relations in 4 DB queries.
+        Powers the Criteria Validity Tracker page (replaces N individual workspace calls).
+        """
+        has_doc_col = await self._criteria_detail_has_document_column()
+
+        # Q1 — latest PldClassEvaluationInput per relation
+        latest_input_subq = (
+            select(func.max(PldClassEvaluationInput.id_pld_input))
+            .group_by(PldClassEvaluationInput.id_relation)
+            .scalar_subquery()
+        )
+        inputs_result = await self.db.execute(
+            select(PldClassEvaluationInput).where(
+                PldClassEvaluationInput.id_pld_input.in_(latest_input_subq)
+            )
+        )
+        inputs_by_rel: dict[int, PldClassEvaluationInput] = {
+            inp.id_relation: inp for inp in inputs_result.scalars().all()
+        }
+
+        # Q2 — latest pld_class_criteria_detail per (id_relation, criteria_type)
+        base_cols = [
+            "id_detail", "id_relation", "criteria_type",
+            "evidence_file_name", "validity_start_date", "validity_end_date", "signature_date",
+        ]
+        if has_doc_col:
+            base_cols.append("id_document")
+        details_stmt = text(
+            f"""
+            SELECT {", ".join(base_cols)}
+            FROM pld_class_criteria_detail
+            WHERE id_detail IN (
+                SELECT MAX(id_detail)
+                FROM pld_class_criteria_detail
+                GROUP BY id_relation, criteria_type
+            )
+            """
+        )
+        details_rows = (await self.db.execute(details_stmt)).mappings().all()
+
+        # Q3 — batch-load documents for all detail rows that reference one
+        doc_ids = [
+            row["id_document"]
+            for row in details_rows
+            if has_doc_col and row.get("id_document")
+        ]
+        docs_by_id: dict[int, Document] = {}
+        if doc_ids:
+            docs_result = await self.db.execute(
+                select(Document).where(Document.id_document.in_(doc_ids))
+            )
+            docs_by_id = {d.id_document: d for d in docs_result.scalars().all()}
+
+        # Group criteria details by relation
+        details_by_rel: dict[int, dict[str, dict[str, Any]]] = {}
+        for row in details_rows:
+            rel_id   = row["id_relation"]
+            ctype    = row["criteria_type"]
+            doc_id   = row.get("id_document") if has_doc_col else None
+            doc      = docs_by_id.get(doc_id) if doc_id else None
+            if not doc:
+                doc = await self._find_criteria_document_fallback(
+                    relation_id=rel_id,
+                    criteria_type=ctype,
+                    evidence_file_name=row.get("evidence_file_name"),
+                )
+                if doc:
+                    doc_id = doc.id_document
+
+            vsd = row["validity_start_date"]
+            ved = row["validity_end_date"]
+            sd  = row["signature_date"]
+
+            details_by_rel.setdefault(rel_id, {})[ctype] = {
+                "validity_start_date": vsd.isoformat() if vsd else None,
+                "validity_end_date":   ved.isoformat() if ved else None,
+                "signature_date":      sd.isoformat()  if sd  else None,
+                "evidence_file_name":  row["evidence_file_name"],
+                "document_url":  get_fresh_doc_url(doc.file_url) if doc and doc.file_url else None,
+                "document_name": doc.document_name if doc else None,
+            }
+
+        # Build response — one item per relation that has any data
+        all_rel_ids = sorted(set(inputs_by_rel.keys()) | set(details_by_rel.keys()))
+        result: list[dict[str, Any]] = []
+        for rel_id in all_rel_ids:
+            inp = inputs_by_rel.get(rel_id)
+            result.append({
+                "rel_id": rel_id,
+                "criteria_values": {
+                    "top":                   self._pluck(inp, "top"),
+                    "lta":                   self._pluck(inp, "lta"),
+                    "productivity":          self._pluck(inp, "productivity"),
+                    "quality_certification": self._normalize_criteria_value("quality_certification", self._pluck(inp, "quality_certification")),
+                    "prod_lia_ins":          self._normalize_criteria_value("prod_lia_ins",          self._pluck(inp, "prod_lia_ins")),
+                    "competitiveness":       self._normalize_criteria_value("competitiveness",       self._pluck(inp, "competitiveness")),
+                    "sqma":                  self._normalize_criteria_value("sqma",                  self._pluck(inp, "sqma")),
+                    "family_coverage":       self._normalize_criteria_value("family_coverage",       self._pluck(inp, "family_coverage")),
+                    "geo_coverage":          self._normalize_criteria_value("geo_coverage",          self._pluck(inp, "geo_coverage")),
+                    "cons_or_wd":            self._normalize_criteria_value("cons_or_wd",            self._pluck(inp, "cons_or_wd")),
+                    "financial_health":      self._pluck(inp, "financial_health"),
+                },
+                "class_criteria_details": details_by_rel.get(rel_id, {}),
+            })
+        return result
+
     async def get_relation_evaluation_workspace(
         self,
         relation_id: int,
@@ -182,33 +290,49 @@ class SupplierRelationService:
         )
         unit_certifications = list((await self.db.execute(unit_certs_stmt)).scalars().all())
 
-        # Documents attached to this relation (eval reference + LTA)
+        # Documents attached to this relation (eval reference + LTA + criterion evidence)
         eval_docs = await self.list_relation_documents_by_type(
-            relation_id, ["evaluation_reference", "lta_agreement"]
+            relation_id, ["evaluation_reference", "lta_agreement", "evaluation_criterion_evidence"]
         )
 
         # Per-criterion scores for live display
         class_values_for_scores = {
-            "top": self._pluck(class_input, "top"),
-            "lta": self._pluck(class_input, "lta"),
-            "productivity": self._pluck(class_input, "productivity"),
+            "top": self._pluck(class_input, "top") or self._pluck(relation, "top"),
+            "lta": self._pluck(class_input, "lta") or self._pluck(relation, "lta"),
+            "productivity": self._pluck(class_input, "productivity") or self._pluck(relation, "productivity"),
             "quality_certification": quality_certification,
-            "prod_lia_ins": self._pluck(class_input, "prod_lia_ins"),
-            "competitiveness": self._pluck(class_input, "competitiveness"),
-            "sqma": self._pluck(class_input, "sqma"),
-            "family_coverage": self._pluck(class_input, "family_coverage"),
-            "geo_coverage": self._pluck(class_input, "geo_coverage"),
-            "cons_or_wd": self._pluck(class_input, "cons_or_wd"),
-            "financial_health": self._pluck(class_input, "financial_health"),
+            "prod_lia_ins": self._pluck(class_input, "prod_lia_ins") or self._normalize_criteria_value("prod_lia_ins", self._pluck(relation, "prod_lia_ins")),
+            "competitiveness": self._normalize_criteria_value("competitiveness", self._pluck(class_input, "competitiveness") or self._pluck(relation, "competitiveness")),
+            "sqma": self._pluck(class_input, "sqma") or self._normalize_criteria_value("sqma", self._pluck(relation, "sqma")),
+            "family_coverage": self._pluck(class_input, "family_coverage") or self._normalize_criteria_value("family_coverage", self._pluck(relation, "family_coverage")),
+            "geo_coverage": self._normalize_criteria_value("geo_coverage", self._pluck(class_input, "geo_coverage") or self._pluck(relation, "geo_coverage")),
+            "cons_or_wd": self._pluck(class_input, "cons_or_wd") or self._normalize_criteria_value("cons_or_wd", self._pluck(relation, "cons_or_wd")),
+            "financial_health": self._pluck(class_input, "financial_health") or self._pluck(relation, "financial_health"),
         }
         criteria_scores = await self.get_criteria_scores_breakdown(class_values_for_scores)
 
         # Load the unit to get its supplier_code (readable name)
         unit = await self.db.get(SupplierUnit, relation.id_supplier_unit)
 
+        # Determine if inactivity requires an initial or preliminary re-evaluation
+        reevaluation_type: str | None = None
+        if unit and not unit.is_active and unit.inactivated_at:
+            inactivity_days = (datetime.utcnow() - unit.inactivated_at).days
+            if inactivity_days >= 3 * 365:
+                reevaluation_type = "initial"      # 3+ years → full initial re-eval
+            elif inactivity_days >= 365:
+                reevaluation_type = "preliminary"  # 1–3 years → preliminary re-eval
+
+        # When re-evaluation is required the baseline is considered unlocked so the
+        # operator can submit a fresh initial/preliminary self-assessment.
+        effective_baseline_locked = (baseline_input is not None) and (reevaluation_type is None)
+
         return {
             "relation": relation,
             "unit_supplier_code": unit.supplier_code if unit else None,
+            "unit_is_active": unit.is_active if unit else True,
+            "unit_inactivated_at": unit.inactivated_at.isoformat() if unit and unit.inactivated_at else None,
+            "reevaluation_type": reevaluation_type,
             "evaluation_date": relation.last_evaluation_date,
             "status_history": status_history,
             "computed_supplier_status": self._derive_supplier_status(
@@ -223,8 +347,8 @@ class SupplierRelationService:
             "development_plans": development_plans,
             "class_criteria_details": criteria_details,
             "comments": relation.evaluation_comments,
-            # Baseline lock — True once the initial self-assessment has been submitted
-            "baseline_locked": baseline_input is not None,
+            # Baseline lock — False when reevaluation is needed regardless of prior history
+            "baseline_locked": effective_baseline_locked,
             "baseline_data": {
                 "management_system": float(baseline_input.management_system) if baseline_input and baseline_input.management_system is not None else None,
                 "customer_communication": float(baseline_input.customer_communication) if baseline_input and baseline_input.customer_communication is not None else None,
@@ -244,6 +368,7 @@ class SupplierRelationService:
                     "standard_type": c.standard_type,
                     "certification_type": c.certification_type,
                     "certificate_name": c.certificate_name,
+                    "start_date": c.start_date.isoformat() if c.start_date else None,
                     "end_date": c.end_date.isoformat() if c.end_date else None,
                 }
                 for c in unit_certifications
@@ -269,23 +394,23 @@ class SupplierRelationService:
             "operational_score": self._pluck(classification, "operational_score"),
             "strategic_mention": relation.strategic_mention,
             "panel_decision": relation.panel_decision,
-            "top": self._pluck(class_input, "top"),
-            "lta": self._pluck(class_input, "lta"),
-            "sqma": self._pluck(class_input, "sqma"),
+            "top": self._pluck(class_input, "top") or self._pluck(relation, "top"),
+            "lta": self._pluck(class_input, "lta") or self._pluck(relation, "lta"),
+            "sqma": self._pluck(class_input, "sqma") or self._normalize_criteria_value("sqma", self._pluck(relation, "sqma")),
             "quality_certification": quality_certification,
-            "family_coverage": self._pluck(class_input, "family_coverage"),
+            "family_coverage": self._pluck(class_input, "family_coverage") or self._normalize_criteria_value("family_coverage", self._pluck(relation, "family_coverage")),
             "competitiveness": self._normalize_criteria_value(
                 "competitiveness",
-                self._pluck(class_input, "competitiveness"),
+                self._pluck(class_input, "competitiveness") or self._pluck(relation, "competitiveness"),
             ),
             "geo_coverage": self._normalize_criteria_value(
                 "geo_coverage",
-                self._pluck(class_input, "geo_coverage"),
+                self._pluck(class_input, "geo_coverage") or self._pluck(relation, "geo_coverage"),
             ),
-            "cons_or_wd": self._pluck(class_input, "cons_or_wd"),
-            "financial_health": self._pluck(class_input, "financial_health"),
-            "prod_lia_ins": self._pluck(class_input, "prod_lia_ins"),
-            "prod": self._pluck(class_input, "productivity"),
+            "cons_or_wd": self._pluck(class_input, "cons_or_wd") or self._normalize_criteria_value("cons_or_wd", self._pluck(relation, "cons_or_wd")),
+            "financial_health": self._pluck(class_input, "financial_health") or self._pluck(relation, "financial_health"),
+            "prod_lia_ins": self._pluck(class_input, "prod_lia_ins") or self._normalize_criteria_value("prod_lia_ins", self._pluck(relation, "prod_lia_ins")),
+            "prod": self._pluck(class_input, "productivity") or self._pluck(relation, "productivity"),
             "management_system": self._pluck(operational_input, "management_system"),
             "customer_communication": self._pluck(
                 operational_input, "customer_communication"
@@ -308,7 +433,137 @@ class SupplierRelationService:
             "impact_question_4": self._pluck(impact_input, "question_4"),
             "impact_question_5": self._pluck(impact_input, "question_5"),
             "impact_question_6": self._pluck(impact_input, "question_6"),
+            "evaluation_draft": relation.evaluation_draft,
         }
+
+    async def save_evaluation_draft(
+        self,
+        relation_id: int,
+        payload: dict | None,
+    ) -> None:
+        """Store raw evaluation form data as a draft — no business logic runs."""
+        relation = await self.get_relation(relation_id)
+        relation.evaluation_draft = payload
+        await self.db.commit()
+
+    async def get_evaluation_cycle_history(self, relation_id: int) -> list[dict]:
+        """Full audit trail: all cycles with snapshots and field diffs."""
+        cycles = list((await self.db.execute(
+            select(EvaluationCycle)
+            .where(EvaluationCycle.id_relation == relation_id)
+            .where(EvaluationCycle.is_deleted.is_(False))
+            .order_by(EvaluationCycle.launched_at.desc().nullslast(), EvaluationCycle.created_at.desc().nullslast())
+        )).scalars().all())
+        if not cycles:
+            return []
+
+        cycle_ids = [c.id_cycle for c in cycles]
+
+        all_cls = list((await self.db.execute(
+            select(Classification)
+            .where(Classification.id_cycle.in_(cycle_ids))
+            .where(Classification.is_deleted.is_(False))
+            .order_by(Classification.entered_at.desc())
+        )).scalars().all())
+        cls_by_cycle: dict = {}
+        for c in all_cls:
+            if c.id_cycle and c.id_cycle not in cls_by_cycle:
+                cls_by_cycle[c.id_cycle] = c
+
+        all_pld = list((await self.db.execute(
+            select(PldClassEvaluationInput)
+            .where(PldClassEvaluationInput.id_cycle.in_(cycle_ids))
+            .where(PldClassEvaluationInput.is_deleted.is_(False))
+            .order_by(PldClassEvaluationInput.entered_at.desc())
+        )).scalars().all())
+        pld_by_cycle: dict = {}
+        for p in all_pld:
+            if p.id_cycle and p.id_cycle not in pld_by_cycle:
+                pld_by_cycle[p.id_cycle] = p
+
+        all_op = list((await self.db.execute(
+            select(OperationalEvaluationInput)
+            .where(OperationalEvaluationInput.id_cycle.in_(cycle_ids))
+            .where(OperationalEvaluationInput.is_deleted.is_(False))
+            .order_by(OperationalEvaluationInput.entered_at.desc())
+        )).scalars().all())
+        op_by_cycle: dict = {}
+        for o in all_op:
+            if o.id_cycle and o.id_cycle not in op_by_cycle:
+                op_by_cycle[o.id_cycle] = o
+
+        CLASS_KEYS = ["top","lta","productivity","quality_certification","prod_lia_ins",
+                      "competitiveness","sqma","family_coverage","geo_coverage","cons_or_wd","financial_health"]
+
+        entries = []
+        for cycle in cycles:
+            cls = cls_by_cycle.get(cycle.id_cycle)
+            pld = pld_by_cycle.get(cycle.id_cycle)
+            op = op_by_cycle.get(cycle.id_cycle)
+
+            class_criteria = {
+                "top": pld.top, "lta": pld.lta, "productivity": pld.productivity,
+                "quality_certification": pld.quality_certification, "prod_lia_ins": pld.prod_lia_ins,
+                "competitiveness": pld.competitiveness, "sqma": pld.sqma,
+                "family_coverage": pld.family_coverage, "geo_coverage": pld.geo_coverage,
+                "cons_or_wd": pld.cons_or_wd, "financial_health": pld.financial_health,
+                "class_score": float(pld.class_score) if pld.class_score is not None else None,
+                "class_value": pld.class_value,
+            } if pld else None
+
+            op_scores = {
+                "management_system": float(op.management_system) if op.management_system is not None else None,
+                "customer_communication": float(op.customer_communication) if op.customer_communication is not None else None,
+                "development_design": float(op.development_design) if op.development_design is not None else None,
+                "production_manufacturing": float(op.production_manufacturing) if op.production_manufacturing is not None else None,
+                "quality_audits": float(op.quality_audits) if op.quality_audits is not None else None,
+                "suppliers_subcontractors": float(op.suppliers_subcontractors) if op.suppliers_subcontractors is not None else None,
+                "deliveries": float(op.deliveries) if op.deliveries is not None else None,
+                "environment_ethic_rules": float(op.environment_ethic_rules) if op.environment_ethic_rules is not None else None,
+                "average_score": float(op.average_score) if op.average_score is not None else None,
+                "operational_grade": op.operational_grade,
+                "source_type": op.source_type,
+            } if op else None
+
+            cycle_date = (cycle.launched_at.isoformat() if cycle.launched_at
+                          else cycle.created_at.isoformat() if cycle.created_at else None)
+            submitted_by = (cycle.launched_by or (pld.entered_by if pld else None)
+                            or (op.entered_by if op else None))
+
+            entries.append({
+                "cycle_id": cycle.id_cycle,
+                "cycle_type": cycle.cycle_type,
+                "cycle_date": cycle_date,
+                "submitted_by": submitted_by,
+                "class_value": cls.class_value if cls else (pld.class_value if pld else None),
+                "operational_grade": cls.operational_grade if cls else (op.operational_grade if op else None),
+                "final_grade": cls.final_grade if cls else None,
+                "impact_score": cls.impact_score if cls else None,
+                "panel_decision": cls.panel_decision if cls else None,
+                "strategic_mention": cls.strategic_mention if cls else None,
+                "class_criteria": class_criteria,
+                "operational_scores": op_scores,
+            })
+
+        for i, entry in enumerate(entries):
+            diffs: dict = {}
+            curr_c = entry.get("class_criteria")
+            previous_comparable = None
+            if curr_c:
+                for older_entry in entries[i + 1:]:
+                    older_criteria = older_entry.get("class_criteria")
+                    if older_criteria:
+                        previous_comparable = older_criteria
+                        break
+
+            if curr_c and previous_comparable:
+                for field in CLASS_KEYS:
+                    cv, pv = curr_c.get(field), previous_comparable.get(field)
+                    if cv != pv and (cv or pv):
+                        diffs[field] = {"from": pv, "to": cv}
+            entry["class_criteria_diffs"] = diffs
+
+        return entries
 
     async def list_development_plans(
         self,
@@ -2536,6 +2791,69 @@ class SupplierRelationService:
         )
         self.db.add(document)
         await self.db.flush()
+        latest_class_input = await self._get_latest_class_input(relation_id)
+        latest_details = await self._get_latest_criteria_details(relation_id)
+        existing_detail = latest_details.get(normalized_criteria_type) or {}
+        selected_value = self._pluck(latest_class_input, normalized_criteria_type)
+        detail_payload = {
+            **existing_detail,
+            "document_id": document.id_document,
+            "document_name": document.document_name,
+            "evidence_file_name": upload["filename"],
+            "comments": existing_detail.get("comments") or comments,
+        }
+        detail = self._normalize_detail_payload(
+            criteria_type=normalized_criteria_type,
+            selected_value=selected_value,
+            payload=detail_payload,
+        )
+        has_document_column = await self._criteria_detail_has_document_column()
+        insert_columns = [
+            "id_relation",
+            "id_cycle",
+            "criteria_type",
+            "selected_value",
+            "score",
+            "evidence_file_name",
+            "validity_start_date",
+            "validity_end_date",
+            "signature_date",
+            "last_update_date",
+            "amount_value",
+            "amount_currency",
+            "auto_validity_end_date",
+            "entered_by",
+            "comments",
+        ]
+        insert_values = {
+            "id_relation": relation_id,
+            "id_cycle": self._resolve_existing_cycle_id(latest_class_input),
+            "criteria_type": normalized_criteria_type,
+            "selected_value": selected_value,
+            "score": detail.get("score"),
+            "evidence_file_name": upload["filename"],
+            "validity_start_date": detail.get("validity_start_date"),
+            "validity_end_date": detail.get("validity_end_date"),
+            "signature_date": detail.get("signature_date"),
+            "last_update_date": detail.get("last_update_date"),
+            "amount_value": detail.get("amount_value"),
+            "amount_currency": detail.get("amount_currency"),
+            "auto_validity_end_date": detail.get("auto_validity_end_date", False),
+            "entered_by": uploaded_by or "SYSTEM",
+            "comments": detail.get("comments"),
+        }
+        if has_document_column:
+            insert_columns.insert(2, "id_document")
+            insert_values["id_document"] = document.id_document
+
+        stmt = text(
+            f"""
+            INSERT INTO pld_class_criteria_detail ({", ".join(insert_columns)})
+            VALUES ({", ".join(f":{column}" for column in insert_columns)})
+            """
+        )
+        await self.db.execute(stmt, insert_values)
+        await self.db.commit()
         return document
 
     async def delete_criteria_document(
@@ -2628,70 +2946,30 @@ class SupplierRelationService:
             relation=relation,
             selected_value=data.quality_certification,
             previous_input=previous_input,
+            explicitly_sent="quality_certification" in data.model_fields_set,
         )
 
+        # model_fields_set contains every field explicitly provided in the request body,
+        # including those explicitly set to null.  Omitted fields are NOT in the set.
+        # This lets us distinguish "caller wants to clear this field" (null in payload)
+        # from "caller didn't touch this field" (field absent from payload).
+        sent = data.model_fields_set
+
+        def _pick(field: str, data_val: Any) -> Any:
+            return data_val if field in sent else self._pluck(previous_input, field)
+
         merged_values = {
-            "top": self._normalize_criteria_value(
-                "top",
-                data.top
-                if data.top is not None
-                else self._pluck(previous_input, "top"),
-            ),
-            "lta": self._normalize_criteria_value(
-                "lta",
-                data.lta
-                if data.lta is not None
-                else self._pluck(previous_input, "lta"),
-            ),
-            "productivity": self._normalize_criteria_value(
-                "productivity",
-                data.productivity
-                if data.productivity is not None
-                else self._pluck(previous_input, "productivity"),
-            ),
+            "top":                   self._normalize_criteria_value("top",                   _pick("top",                   data.top)),
+            "lta":                   self._normalize_criteria_value("lta",                   _pick("lta",                   data.lta)),
+            "productivity":          self._normalize_criteria_value("productivity",          _pick("productivity",          data.productivity)),
             "quality_certification": quality_certification,
-            "prod_lia_ins": self._normalize_criteria_value(
-                "prod_lia_ins",
-                data.prod_lia_ins
-                if data.prod_lia_ins is not None
-                else self._pluck(previous_input, "prod_lia_ins"),
-            ),
-            "competitiveness": self._normalize_criteria_value(
-                "competitiveness",
-                data.competitiveness
-                if data.competitiveness is not None
-                else self._pluck(previous_input, "competitiveness"),
-            ),
-            "sqma": self._normalize_criteria_value(
-                "sqma",
-                data.sqma
-                if data.sqma is not None
-                else self._pluck(previous_input, "sqma"),
-            ),
-            "family_coverage": self._normalize_criteria_value(
-                "family_coverage",
-                data.family_coverage
-                if data.family_coverage is not None
-                else self._pluck(previous_input, "family_coverage"),
-            ),
-            "geo_coverage": self._normalize_criteria_value(
-                "geo_coverage",
-                data.geo_coverage
-                if data.geo_coverage is not None
-                else self._pluck(previous_input, "geo_coverage"),
-            ),
-            "cons_or_wd": self._normalize_criteria_value(
-                "cons_or_wd",
-                data.cons_or_wd
-                if data.cons_or_wd is not None
-                else self._pluck(previous_input, "cons_or_wd"),
-            ),
-            "financial_health": self._normalize_criteria_value(
-                "financial_health",
-                data.financial_health
-                if data.financial_health is not None
-                else self._pluck(previous_input, "financial_health"),
-            ),
+            "prod_lia_ins":          self._normalize_criteria_value("prod_lia_ins",          _pick("prod_lia_ins",          data.prod_lia_ins)),
+            "competitiveness":       self._normalize_criteria_value("competitiveness",       _pick("competitiveness",       data.competitiveness)),
+            "sqma":                  self._normalize_criteria_value("sqma",                  _pick("sqma",                  data.sqma)),
+            "family_coverage":       self._normalize_criteria_value("family_coverage",       _pick("family_coverage",       data.family_coverage)),
+            "geo_coverage":          self._normalize_criteria_value("geo_coverage",          _pick("geo_coverage",          data.geo_coverage)),
+            "cons_or_wd":            self._normalize_criteria_value("cons_or_wd",            _pick("cons_or_wd",            data.cons_or_wd)),
+            "financial_health":      self._normalize_criteria_value("financial_health",      _pick("financial_health",      data.financial_health)),
         }
         strategic_mention = (
             data.strategic_mention
@@ -3481,6 +3759,26 @@ class SupplierRelationService:
         result = await self.db.execute(stmt)
         return result.scalars().first()
 
+    async def _find_criteria_document_fallback(
+        self,
+        relation_id: int,
+        criteria_type: str,
+        evidence_file_name: Optional[str],
+    ) -> Optional[Document]:
+        if not evidence_file_name:
+            return None
+
+        expected_name = f"{criteria_type.replace('_', ' ').title()} Evidence"
+        stmt = (
+            select(Document)
+            .where(Document.id_relation == relation_id)
+            .where(Document.document_type == "evaluation_criterion_evidence")
+            .where(Document.original_file_name == evidence_file_name)
+            .where(Document.document_name == expected_name)
+            .order_by(Document.id_document.desc())
+        )
+        result = await self.db.execute(stmt)
+        return result.scalars().first()
     async def _get_latest_criteria_details(
         self,
         relation_id: int,
@@ -3535,6 +3833,14 @@ class SupplierRelationService:
                 continue
             document_id = entry.get("id_document") if has_document_column else None
             document = documents_by_id.get(document_id) if document_id else None
+            if not document:
+                document = await self._find_criteria_document_fallback(
+                    relation_id=relation_id,
+                    criteria_type=criteria_type,
+                    evidence_file_name=entry.get("evidence_file_name"),
+                )
+                if document:
+                    document_id = document.id_document
             latest_by_criteria[criteria_type] = {
                 "document_id": document_id,
                 "document_name": document.document_name if document else None,
@@ -3563,11 +3869,31 @@ class SupplierRelationService:
         stmt = (
             select(SupplierCertification)
             .where(SupplierCertification.id_supplier_unit == relation.id_supplier_unit)
-            .order_by(SupplierCertification.id_certification.asc())
+            .where(SupplierCertification.is_deleted.is_(False))
+            .where(func.lower(SupplierCertification.standard_type) == "quality")
         )
         result = await self.db.execute(stmt)
-        certification = result.scalars().first()
-        return certification.certification_type if certification else None
+        certifications = result.scalars().all()
+        if not certifications:
+            return None
+
+        # Score order: IATF > ISO9001 > None.
+        # Prefer non-expired certs; if all expired, fall back to best expired
+        # so the evaluator can see which cert was there and act on it.
+        SCORE_ORDER = ["IATF / ISO9001 (cat BCD)", "ISO9001", "None"]
+        today = date.today()
+        valid_certs = [c for c in certifications if not c.end_date or c.end_date >= today]
+        candidates = valid_certs if valid_certs else list(certifications)
+
+        best: Optional[str] = None
+        best_rank = len(SCORE_ORDER)
+        for cert in candidates:
+            normalized = self._normalize_criteria_value("quality_certification", cert.certification_type)
+            rank = SCORE_ORDER.index(normalized) if normalized in SCORE_ORDER else best_rank
+            if rank < best_rank:
+                best_rank = rank
+                best = normalized
+        return best
 
     async def _get_latest_classification(
         self,
@@ -3670,20 +3996,104 @@ class SupplierRelationService:
         relation: SupplierSiteRelation,
         selected_value: Optional[str],
         previous_input: Optional[PldClassEvaluationInput],
+        explicitly_sent: bool = False,
     ) -> Optional[str]:
+        # If the field was explicitly provided in the request (even as null), respect it.
+        if explicitly_sent:
+            return self._normalize_criteria_value("quality_certification", selected_value)
         if selected_value is not None:
-            return self._normalize_criteria_value(
-                "quality_certification", selected_value
-            )
+            return self._normalize_criteria_value("quality_certification", selected_value)
         previous_value = self._pluck(previous_input, "quality_certification")
         if previous_value:
-            return self._normalize_criteria_value(
-                "quality_certification", previous_value
-            )
+            return self._normalize_criteria_value("quality_certification", previous_value)
         return self._normalize_criteria_value(
             "quality_certification",
             await self._get_relation_quality_certification(relation),
         )
+
+    async def sync_quality_certification_for_unit(self, unit_id: int) -> list[dict]:
+        """Re-derive quality_certification on all active relations for a unit.
+
+        Called automatically after a SupplierCertification record is updated.
+        Only creates a new PldClassEvaluationInput when the derived value actually changes.
+        """
+        stmt = (
+            select(SupplierSiteRelation)
+            .where(SupplierSiteRelation.id_supplier_unit == unit_id)
+            .where(SupplierSiteRelation.is_deleted.is_(False))
+        )
+        relations = (await self.db.execute(stmt)).scalars().all()
+
+        affected: list[dict] = []
+        for relation in relations:
+            previous_input = await self._get_latest_class_input(relation.id_relation)
+            if not previous_input:
+                continue
+
+            new_cert_value = await self._get_relation_quality_certification(relation)
+            current_value = self._normalize_criteria_value(
+                "quality_certification", self._pluck(previous_input, "quality_certification")
+            )
+            if new_cert_value == current_value:
+                continue
+
+            merged = {
+                "top":                   self._pluck(previous_input, "top"),
+                "lta":                   self._pluck(previous_input, "lta"),
+                "productivity":          self._pluck(previous_input, "productivity"),
+                "quality_certification": new_cert_value,
+                "prod_lia_ins":          self._pluck(previous_input, "prod_lia_ins"),
+                "competitiveness":       self._pluck(previous_input, "competitiveness"),
+                "sqma":                  self._pluck(previous_input, "sqma"),
+                "family_coverage":       self._pluck(previous_input, "family_coverage"),
+                "geo_coverage":          self._pluck(previous_input, "geo_coverage"),
+                "cons_or_wd":            self._pluck(previous_input, "cons_or_wd"),
+                "financial_health":      self._pluck(previous_input, "financial_health"),
+            }
+            class_score = await self._try_calculate_class_score(merged)
+            class_value = (
+                self._derive_class_value_from_score(class_score)
+                if class_score is not None
+                else self._pluck(previous_input, "class_value")
+            )
+
+            new_input = PldClassEvaluationInput(
+                id_relation=relation.id_relation,
+                id_cycle=self._pluck(previous_input, "id_cycle"),
+                evaluation_date=date.today(),
+                top=merged["top"],
+                lta=merged["lta"],
+                productivity=merged["productivity"],
+                quality_certification=merged["quality_certification"],
+                prod_lia_ins=merged["prod_lia_ins"],
+                competitiveness=merged["competitiveness"],
+                sqma=merged["sqma"],
+                family_coverage=merged["family_coverage"],
+                geo_coverage=merged["geo_coverage"],
+                cons_or_wd=merged["cons_or_wd"],
+                financial_health=merged["financial_health"],
+                class_score=class_score,
+                class_value=class_value,
+                impact_score=self._pluck(previous_input, "impact_score"),
+                strategic_mention=self._pluck(previous_input, "strategic_mention"),
+                panel_decision=self._pluck(previous_input, "panel_decision"),
+                comments="Auto-updated: quality certification record changed.",
+                entered_by="SYSTEM",
+            )
+            self.db.add(new_input)
+            relation.class_value = class_value
+
+            affected.append({
+                "relation_id": relation.id_relation,
+                "previous_quality_cert": current_value,
+                "new_quality_cert": new_cert_value,
+                "new_class_score": float(class_score) if class_score is not None else None,
+                "new_class_value": class_value,
+            })
+
+        if affected:
+            await self.db.commit()
+        return affected
 
     async def _store_criteria_details(
         self,
@@ -4410,3 +4820,8 @@ class SupplierRelationService:
         ):
             return True
         return False
+
+
+
+
+

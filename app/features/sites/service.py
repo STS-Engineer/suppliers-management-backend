@@ -71,6 +71,7 @@ class SiteService:
         sub_family: Optional[str] = None,
         product_line: Optional[str] = None,
         supplier_name: Optional[str] = None,
+        include_inactive: bool = False,
     ) -> Dict[str, Any]:
         has_contact_relation = await self._has_contact_site_relation_table()
         loader_options = [
@@ -129,6 +130,8 @@ class SiteService:
                 unit = relation.supplier_unit
                 group = unit.group if unit else None
                 if not unit or not group:
+                    continue
+                if not include_inactive and not unit.is_active:
                     continue
 
                 if supplier_owner and not (

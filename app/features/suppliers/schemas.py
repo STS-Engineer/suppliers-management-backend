@@ -38,6 +38,13 @@ def _normalize_optional_email(value: Optional[str], field_name: str) -> Optional
     return trimmed
 
 
+def _normalize_optional_string(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    trimmed = value.strip()
+    return trimmed or None
+
+
 TOP_VALUES = _allowed_values(TOP_OPTIONS)
 LTA_VALUES = _allowed_values(LTA_OPTIONS)
 SQMA_VALUES = _allowed_values(SQMA_OPTIONS)
@@ -175,6 +182,30 @@ class SupplierUnitBase(BaseModel):
             return ",".join(str(x).strip() for x in v if str(x).strip())
         return str(v) if v != "" else None
 
+    @field_validator(
+        "supplier_code",
+        "address_line",
+        "city",
+        "country",
+        "continent",
+        "area",
+        "product_type",
+        "product_category",
+        "website",
+        "commodity_responsible",
+        "main_plants",
+        "carbon_footprint",
+        "green_electricity_pct",
+        "copper_brass_pct",
+        "ghg_comments",
+        "ghg_completion_pct",
+        "amount_currency",
+        mode="before",
+    )
+    @classmethod
+    def normalize_unit_strings(cls, value: Optional[str]) -> Optional[str]:
+        return _normalize_optional_string(value)
+
     @field_validator("supplier_email")
     @classmethod
     def validate_supplier_email(cls, value: Optional[str]) -> Optional[str]:
@@ -190,6 +221,7 @@ class SupplierUnitCreate(SupplierUnitBase):
 class SupplierUnitUpdate(SupplierUnitBase):
     """Schema for updating a supplier unit."""
     supplier_code: Optional[str] = Field(None, max_length=50)
+    is_active: Optional[bool] = Field(None, description="Active status of the unit")
 
 
 class SupplierUnitResponse(SupplierUnitBase):
@@ -197,9 +229,10 @@ class SupplierUnitResponse(SupplierUnitBase):
     id_supplier_unit: int
     id_group: Optional[int]
     unit_code: Optional[str] = None
+    is_active: bool = True
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
-    
+
     class Config:
         from_attributes = True
 
@@ -242,6 +275,23 @@ class SupplierCertificationBase(BaseModel):
 class SupplierCertificationCreate(SupplierCertificationBase):
     """Schema for creating a supplier certification."""
     standard_type: str = Field(..., max_length=50, description="Standard category (required): quality, environmental, safety, energy, other")
+
+
+class SupplierCertificationUpdate(BaseModel):
+    """Partial update for a supplier certification — only provided fields are changed."""
+    certification_type: Optional[str] = Field(None, max_length=100)
+    certificate_name: Optional[str] = Field(None, max_length=150)
+    start_date: Optional[date] = Field(None)
+    end_date: Optional[date] = Field(None)
+    comments: Optional[str] = Field(None)
+    file_name: Optional[str] = Field(None, max_length=255)
+    file_url: Optional[str] = Field(None)
+
+    @model_validator(mode="after")
+    def validate_dates(self):
+        if self.start_date and self.end_date and self.end_date < self.start_date:
+            raise ValueError("end_date must be on or after start_date")
+        return self
 
 
 class SupplierCertificationResponse(SupplierCertificationBase):
@@ -878,3 +928,4 @@ class OnboardingSelectionOptionsResponse(BaseModel):
     cert_types_by_standard: dict
     prod_lia_ins: List[dict[str, str]]
     prod: List[dict[str, str]]
+
