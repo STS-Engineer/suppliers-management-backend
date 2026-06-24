@@ -118,6 +118,42 @@ def get_blob_url(blob_name: str) -> str:
     return get_blob_sas_url(blob_name, expiry_days=3650)  # 10 years for stored URLs
 
 
+def find_blob_name_by_prefix(
+    prefix: str,
+    original_file_name: Optional[str] = None,
+) -> Optional[str]:
+    """Find the newest blob matching a known prefix and optional original filename."""
+    safe_name = _safe_filename(original_file_name) if original_file_name else None
+    try:
+        container = _get_container_client()
+        matches: list[str] = []
+        for blob in container.list_blobs(name_starts_with=prefix):
+            blob_name = blob.name
+            if safe_name and not blob_name.endswith(safe_name):
+                continue
+            matches.append(blob_name)
+        return max(matches) if matches else None
+    except Exception as exc:
+        logger.warning("Blob lookup failed for prefix %s: %s", prefix, exc)
+        return None
+
+
+def get_recovered_blob_url(
+    prefix: str,
+    original_file_name: Optional[str] = None,
+    expiry_days: int = 7,
+) -> Optional[str]:
+    """Recover a readable blob URL when DB metadata is incomplete."""
+    blob_name = find_blob_name_by_prefix(prefix, original_file_name)
+    if not blob_name:
+        return None
+    try:
+        return get_blob_sas_url(blob_name, expiry_days=expiry_days)
+    except Exception as exc:
+        logger.warning("Blob URL recovery failed for %s: %s", blob_name, exc)
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Client factory  (lazy singleton)
 # ---------------------------------------------------------------------------
