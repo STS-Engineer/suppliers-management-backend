@@ -33,6 +33,7 @@ from app.db.models import (
 from app.features.supplier_relations import schemas
 from app.shared.utils.blob_storage import (
     get_fresh_doc_url,
+    get_recovered_blob_url,
     upload_development_plan_document,
     upload_evaluation_document,
 )
@@ -230,13 +231,21 @@ class SupplierRelationService:
             ved = row["validity_end_date"]
             sd  = row["signature_date"]
 
+            recovered_url = None
+            if not doc or not doc.file_url:
+                recovered_url = self._recover_criteria_blob_url(
+                    relation_id=rel_id,
+                    criteria_type=ctype,
+                    evidence_file_name=row.get("evidence_file_name"),
+                )
+
             details_by_rel.setdefault(rel_id, {})[ctype] = {
                 "validity_start_date": vsd.isoformat() if vsd else None,
                 "validity_end_date":   ved.isoformat() if ved else None,
                 "signature_date":      sd.isoformat()  if sd  else None,
                 "evidence_file_name":  row["evidence_file_name"],
-                "document_url":  get_fresh_doc_url(doc.file_url) if doc and doc.file_url else None,
-                "document_name": doc.document_name if doc else None,
+                "document_url":  get_fresh_doc_url(doc.file_url) if doc and doc.file_url else recovered_url,
+                "document_name": doc.document_name if doc else row["evidence_file_name"],
             }
 
         # Build response — one item per relation that has any data
@@ -3779,6 +3788,20 @@ class SupplierRelationService:
         )
         result = await self.db.execute(stmt)
         return result.scalars().first()
+
+    def _recover_criteria_blob_url(
+        self,
+        relation_id: int,
+        criteria_type: str,
+        evidence_file_name: Optional[str],
+    ) -> Optional[str]:
+        if not evidence_file_name:
+            return None
+        return get_recovered_blob_url(
+            prefix=f"evaluation/evaluation_{relation_id}_{criteria_type}_",
+            original_file_name=evidence_file_name,
+        )
+
     async def _get_latest_criteria_details(
         self,
         relation_id: int,
@@ -3841,12 +3864,19 @@ class SupplierRelationService:
                 )
                 if document:
                     document_id = document.id_document
+            recovered_url = None
+            if not document or not document.file_url:
+                recovered_url = self._recover_criteria_blob_url(
+                    relation_id=relation_id,
+                    criteria_type=criteria_type,
+                    evidence_file_name=entry.get("evidence_file_name"),
+                )
             latest_by_criteria[criteria_type] = {
                 "document_id": document_id,
-                "document_name": document.document_name if document else None,
+                "document_name": document.document_name if document else entry["evidence_file_name"],
                 "document_url": get_fresh_doc_url(document.file_url)
                 if document and document.file_url
-                else None,
+                else recovered_url,
                 "document_mime_type": document.mime_type if document else None,
                 "document_size": document.file_size if document else None,
                 "evidence_file_name": entry["evidence_file_name"],

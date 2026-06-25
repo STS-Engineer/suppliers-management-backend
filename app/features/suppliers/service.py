@@ -31,7 +31,7 @@ from app.db.models import (
 )
 from app.features.suppliers import schemas
 from app.core.exceptions import AppException
-from app.shared.utils.blob_storage import get_fresh_doc_url
+from app.shared.utils.blob_storage import get_fresh_doc_url, get_recovered_blob_url
 
 
 class SupplierService:
@@ -489,12 +489,25 @@ class SupplierService:
         await self.db.commit()
         return cert
 
+    def _resolve_certification_file_url(self, cert: SupplierCertification) -> Optional[str]:
+        if cert.file_url:
+            return get_fresh_doc_url(cert.file_url)
+        if cert.id_supplier_unit and cert.id_certification and cert.file_name:
+            return get_recovered_blob_url(
+                prefix=f"certifications/cert_{cert.id_supplier_unit}_{cert.id_certification}_",
+                original_file_name=cert.file_name,
+            )
+        return None
+
     async def list_certifications_for_unit(self, unit_id: int) -> List[SupplierCertification]:
         """List certifications for a supplier unit."""
         unit = await self.repo.find_unit_by_id(unit_id)
         if not unit:
             raise AppException(f"Supplier unit with ID {unit_id} not found", status_code=404)
-        return await self.repo.find_certifications_by_unit(unit_id)
+        certifications = await self.repo.find_certifications_by_unit(unit_id)
+        for cert in certifications:
+            cert.file_url = self._resolve_certification_file_url(cert)
+        return certifications
     
     # ========================================================================
     # Supplier-Site Relation Operations
@@ -1243,11 +1256,7 @@ class SupplierService:
         items = []
         for cert, supplier_code, group_nom in rows:
             d = schemas.SupplierCertificationResponse.model_validate(cert).model_dump()
-            d["file_url"] = (
-                get_fresh_doc_url(cert.file_url)
-                if cert.file_url
-                else None
-            )
+            d["file_url"] = self._resolve_certification_file_url(cert)
             d["supplier_code"] = supplier_code
             d["group_nom"] = group_nom
             items.append(d)
