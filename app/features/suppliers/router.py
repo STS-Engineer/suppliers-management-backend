@@ -948,10 +948,20 @@ async def add_certification_to_unit(
     try:
         service = SupplierService(db)
         cert = await service.create_certification_for_unit(unit_id, data)
+        from app.features.supplier_relations.service import SupplierRelationService
+        rel_service = SupplierRelationService(db)
+        affected = await rel_service.sync_quality_certification_for_unit(
+            unit_id,
+            triggered_by=_resolve_actor(current_user),
+            source_cert_id=cert.id_certification,
+            change="create",
+        )
         return {
             "status": "success",
             "data": schemas.SupplierCertificationResponse.model_validate(cert),
-            "message": f"Certification added to unit {unit_id}",
+            "affected_evaluations": affected,
+            "message": f"Certification added to unit {unit_id}."
+                       f"{f' {len(affected)} evaluation(s) recomputed.' if affected else ''}",
             "id": cert.id_certification,
         }
     except AppException:
@@ -971,17 +981,57 @@ async def patch_certification(
     """Update a certification's dates, type, or document. Quality certs cascade to evaluations."""
     try:
         service = SupplierService(db)
+        # Capture the cert's standard_type BEFORE the patch: if it was "quality" and is
+        # being moved to another standard, we must still re-sync so the relation stops
+        # referencing it as a quality cert.
         cert = await service.patch_certification(unit_id, cert_id, data)
-        affected = []
-        if cert.standard_type and cert.standard_type.lower() == "quality":
-            from app.features.supplier_relations.service import SupplierRelationService
-            rel_service = SupplierRelationService(db)
-            affected = await rel_service.sync_quality_certification_for_unit(unit_id)
+        from app.features.supplier_relations.service import SupplierRelationService
+        rel_service = SupplierRelationService(db)
+        affected = await rel_service.sync_quality_certification_for_unit(
+            unit_id,
+            triggered_by=_resolve_actor(current_user),
+            source_cert_id=cert.id_certification,
+            change="update",
+        )
         return {
             "status": "success",
             "data": schemas.SupplierCertificationResponse.model_validate(cert),
             "affected_evaluations": affected,
             "message": f"Certification updated.{f' {len(affected)} evaluation(s) recomputed.' if affected else ''}",
+        }
+    except AppException:
+        raise
+    except Exception:
+        raise
+
+
+@router.delete("/units/{unit_id}/certifications/{cert_id}", response_model=dict)
+async def delete_certification(
+    unit_id: int,
+    cert_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Soft-delete a certification. If it was a quality cert, re-derive the
+    quality_certification criterion on all affected relations."""
+    try:
+        service = SupplierService(db)
+        cert = await service.soft_delete_certification(
+            unit_id, cert_id, deleted_by=_resolve_actor(current_user)
+        )
+        from app.features.supplier_relations.service import SupplierRelationService
+        rel_service = SupplierRelationService(db)
+        affected = await rel_service.sync_quality_certification_for_unit(
+            unit_id,
+            triggered_by=_resolve_actor(current_user),
+            source_cert_id=cert_id,
+            change="delete",
+        )
+        return {
+            "status": "success",
+            "data": schemas.SupplierCertificationResponse.model_validate(cert),
+            "affected_evaluations": affected,
+            "message": f"Certification removed.{f' {len(affected)} evaluation(s) recomputed.' if affected else ''}",
         }
     except AppException:
         raise
@@ -1169,6 +1219,64 @@ async def create_carbon_footprint(
 # ============================================================================
 
 
+@router.post("/certifications/sync-quality", response_model=dict)
+async def sync_quality_certifications(
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Retroactively sync quality_certification criteria on all relations from their
+    unit's certifications. Use this once to backfill relations created before the
+    auto-sync was in place."""
+    try:
+        from sqlalchemy import select as sa_select
+        from app.db.models import SupplierCertification, SupplierSiteRelation
+        from app.features.supplier_relations.service import SupplierRelationService
+
+        # Find all distinct unit IDs that have at least one certification
+        stmt = sa_select(SupplierCertification.id_supplier_unit).where(
+            SupplierCertification.is_deleted.is_(False)
+        ).distinct()
+        unit_ids = (await db.execute(stmt)).scalars().all()
+
+        rel_service = SupplierRelationService(db)
+        actor = _resolve_actor(current_user)
+        total_affected = 0
+        synced_units = 0
+        for unit_id in unit_ids:
+            affected = await rel_service.sync_quality_certification_for_unit(
+                unit_id,
+                triggered_by=actor,
+                change="update",
+            )
+            total_affected += len(affected)
+            synced_units += 1
+
+        return {
+            "status": "success",
+            "message": f"Synced {synced_units} supplier unit(s). {total_affected} evaluation(s) recomputed.",
+            "synced_units": synced_units,
+            "recomputed_evaluations": total_affected,
+        }
+    except Exception:
+        raise
+
+
+@router.get("/certifications/summary", response_model=dict)
+async def get_certifications_summary(
+    standard_type: Optional[str] = Query(None),
+    q: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Return counts by validity status for the KPI strip (unfiltered by status)."""
+    try:
+        service = SupplierService(db)
+        result = await service.get_certifications_summary(standard_type=standard_type, q=q)
+        return {"status": "success", "data": result}
+    except Exception:
+        raise
+
+
 @router.get("/certifications", response_model=dict)
 async def list_all_certifications(
     skip: int = Query(0, ge=0),
@@ -1176,6 +1284,7 @@ async def list_all_certifications(
     standard_type: Optional[str] = Query(None),
     expired_only: bool = Query(False),
     expiring_days: Optional[int] = Query(None, ge=1, le=365),
+    valid_only: bool = Query(False),
     q: Optional[str] = Query(None, description="Search by cert type, name, supplier code or group name"),
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user),
@@ -1189,6 +1298,7 @@ async def list_all_certifications(
             standard_type=standard_type,
             expired_only=expired_only,
             expiring_days=expiring_days,
+            valid_only=valid_only,
             q=q,
         )
         return {

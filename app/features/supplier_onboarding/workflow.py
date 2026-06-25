@@ -110,7 +110,17 @@ class SupplierOnboardingWorkflow:
                 annual_spend_currency=annual_spend_currency,
             )
 
-            # Step 4: Get primary contact for emails
+            # Step 4b: Sync quality cert criteria detail from certs just created
+            if certifications:
+                from app.features.supplier_relations.service import SupplierRelationService
+                rel_service = SupplierRelationService(self.db)
+                await rel_service.sync_quality_certification_for_unit(
+                    unit.id_supplier_unit,
+                    triggered_by=supplier_owner,
+                    change="create",
+                )
+
+            # Step 5: Get primary contact for emails
             primary_contact = self._get_primary_contact(contact_list)
             if not primary_contact:
                 raise AppException(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Optional
@@ -19,6 +20,7 @@ from app.db.models import (
     EvaluationCycle,
     ImpactEvaluationInput,
     OperationalEvaluationInput,
+    PldClassCriteriaDetail,
     PldClassEvaluationInput,
     PldScoringRules,
     ScoreCard,
@@ -39,6 +41,8 @@ from app.shared.utils.blob_storage import (
 )
 from app.shared.utils.email.email_service import send_email
 from app.shared.utils.blob_storage import delete_blob
+
+logger = logging.getLogger(__name__)
 
 CLASS_CRITERIA_FIELDS = (
     "top",
@@ -124,10 +128,21 @@ CRITERIA_VALUE_NORMALIZATION = {
         "biweekly del.": "Biweekly Del.",
     },
     "quality_certification": {
+        # Canonical scoring tiers (pld_scoring_rules.min_value):
+        #   "IATF / ISO9001 (cat BCD)" = 100 | "ISO9001" = 50 | "None" = 0
+        # Map every cert string the frontend can emit (CERT_TYPES_BY_STANDARD.quality)
+        # to one of these tiers, or scoring silently treats it as 0.
         "IATF 16949:2016": "IATF / ISO9001 (cat BCD)",
-        "IS09001 (cat BCD)": "IATF / ISO9001 (cat BCD)",
+        "ISO 9001 (cat BCD)": "IATF / ISO9001 (cat BCD)",
         "ISO9001 (cat BCD)": "IATF / ISO9001 (cat BCD)",
+        "IS09001 (cat BCD)": "IATF / ISO9001 (cat BCD)",  # legacy: digit-zero typo
+        "ISO 9001": "ISO9001",
+        "ISO9001": "ISO9001",
+        # ISO 13485 (medical-devices QMS) is treated as an ISO9001-equivalent tier.
+        # Adjust if the business wants it scored differently.
+        "ISO 13485": "ISO9001",
         "Distributor": "None",
+        "None": "None",
     },
     "prod_lia_ins": {
         "2M€ or +": "2M$ or +",
@@ -248,8 +263,9 @@ class SupplierRelationService:
                 "document_name": doc.document_name if doc else row["evidence_file_name"],
             }
 
-        # Build response — one item per relation that has any data
-        all_rel_ids = sorted(set(inputs_by_rel.keys()) | set(details_by_rel.keys()))
+        # Build response — only relations that have at least one eval input.
+        # Relations with no eval yet (no PldClassEvaluationInput) are excluded.
+        all_rel_ids = sorted(inputs_by_rel.keys())
         result: list[dict[str, Any]] = []
         for rel_id in all_rel_ids:
             inp = inputs_by_rel.get(rel_id)
@@ -388,7 +404,7 @@ class SupplierRelationService:
                     "id_document": d.id_document,
                     "document_type": d.document_type,
                     "document_name": d.document_name,
-                    "file_url": d.file_url,
+                    "file_url": get_fresh_doc_url(d.file_url) if d.file_url else None,
                     "uploaded_at": d.uploaded_at.isoformat() if d.uploaded_at else None,
                     "uploaded_by": d.uploaded_by,
                 }
@@ -3892,38 +3908,115 @@ class SupplierRelationService:
             }
         return latest_by_criteria
 
+    async def _get_best_quality_cert_for_unit(
+        self,
+        unit_id: int,
+    ) -> tuple[Optional[str], Optional[SupplierCertification]]:
+        """Return (scored_value, display_cert) for the best quality cert on the unit.
+
+        - scored_value: derived from VALID (non-expired) certs only. None when the unit
+          has no valid quality cert — so an expired cert never inflates the class score,
+          and an evaluator's manual "reset to None" is not auto-restored from a stale cert.
+        - display_cert: best cert for the validity-tracker view — a valid cert if one
+          exists, otherwise the best expired cert so the evaluator can see what lapsed.
+        Returns (None, None) when the unit has no quality certifications at all.
+        """
+        stmt = (
+            select(SupplierCertification)
+            .where(SupplierCertification.id_supplier_unit == unit_id)
+            .where(SupplierCertification.is_deleted.is_(False))
+        )
+        certifications = (await self.db.execute(stmt)).scalars().all()
+        if not certifications:
+            return None, None
+
+        SCORE_ORDER = ["IATF / ISO9001 (cat BCD)", "ISO9001", "None"]
+        today = date.today()
+
+        def pick_best(certs: list[SupplierCertification]) -> tuple[Optional[str], Optional[SupplierCertification]]:
+            best_cert: Optional[SupplierCertification] = None
+            best_value: Optional[str] = None
+            best_rank = len(SCORE_ORDER)
+            for cert in certs:
+                normalized = self._normalize_criteria_value("quality_certification", cert.certification_type)
+                rank = SCORE_ORDER.index(normalized) if normalized in SCORE_ORDER else best_rank
+                if rank < best_rank:
+                    best_rank = rank
+                    best_value = normalized
+                    best_cert = cert
+            return best_value, best_cert
+
+        valid_certs = [c for c in certifications if not c.end_date or c.end_date >= today]
+        scored_value, valid_cert = pick_best(valid_certs)
+        if valid_cert is not None:
+            # A valid cert exists and drives the score.
+            # For the tracker display: if the best valid cert has no end_date (no expiry
+            # set), prefer showing the most recently expired cert instead so the tracker
+            # reflects actual expiry dates and doesn't hide lapsed certs.
+            if not valid_cert.end_date:
+                expired_certs = [c for c in certifications if c.end_date and c.end_date < today]
+                _, expired_display = pick_best(expired_certs)
+                display_cert = expired_display if expired_display else valid_cert
+            else:
+                display_cert = valid_cert
+            return scored_value, display_cert
+        # No valid cert: score is None (expired certs don't count), but still surface
+        # the best expired cert in the validity tracker so the evaluator sees it lapsed.
+        _, display_cert = pick_best(list(certifications))
+        return None, display_cert
+
     async def _get_relation_quality_certification(
         self,
         relation: SupplierSiteRelation,
     ) -> Optional[str]:
+        value, _ = await self._get_best_quality_cert_for_unit(relation.id_supplier_unit)
+        return value
+
+    async def _sync_quality_cert_detail(
+        self,
+        relation_id: int,
+        cert_value: Optional[str],
+        best_cert: Optional[SupplierCertification],
+    ) -> None:
+        """Upsert the auto-derived PldClassCriteriaDetail row for quality_certification.
+
+        Only touches rows that were themselves auto-derived (auto_validity_end_date=True).
+        Manually edited rows are left untouched so evaluators can keep custom validity windows.
+        """
         stmt = (
-            select(SupplierCertification)
-            .where(SupplierCertification.id_supplier_unit == relation.id_supplier_unit)
-            .where(SupplierCertification.is_deleted.is_(False))
-            .where(func.lower(SupplierCertification.standard_type) == "quality")
+            select(PldClassCriteriaDetail)
+            .where(PldClassCriteriaDetail.id_relation == relation_id)
+            .where(PldClassCriteriaDetail.criteria_type == "quality_certification")
+            .where(PldClassCriteriaDetail.auto_validity_end_date.is_(True))
+            .where(PldClassCriteriaDetail.is_deleted.is_(False))
+            .order_by(PldClassCriteriaDetail.id_detail.desc())
+            .limit(1)
+            # Lock the row so two concurrent cert patches on the same unit can't both
+            # read "no existing row" and each INSERT a duplicate auto-detail.
+            .with_for_update()
         )
-        result = await self.db.execute(stmt)
-        certifications = result.scalars().all()
-        if not certifications:
-            return None
+        existing = (await self.db.execute(stmt)).scalar_one_or_none()
 
-        # Score order: IATF > ISO9001 > None.
-        # Prefer non-expired certs; if all expired, fall back to best expired
-        # so the evaluator can see which cert was there and act on it.
-        SCORE_ORDER = ["IATF / ISO9001 (cat BCD)", "ISO9001", "None"]
-        today = date.today()
-        valid_certs = [c for c in certifications if not c.end_date or c.end_date >= today]
-        candidates = valid_certs if valid_certs else list(certifications)
+        end_date = best_cert.end_date if best_cert else None
+        start_date = best_cert.start_date if best_cert else None
 
-        best: Optional[str] = None
-        best_rank = len(SCORE_ORDER)
-        for cert in candidates:
-            normalized = self._normalize_criteria_value("quality_certification", cert.certification_type)
-            rank = SCORE_ORDER.index(normalized) if normalized in SCORE_ORDER else best_rank
-            if rank < best_rank:
-                best_rank = rank
-                best = normalized
-        return best
+        if existing:
+            existing.selected_value = cert_value
+            existing.validity_start_date = start_date
+            existing.validity_end_date = end_date
+            existing.last_update_date = date.today()
+        else:
+            # Only create an auto-detail when we have at least a cert value or end_date
+            if cert_value or end_date:
+                self.db.add(PldClassCriteriaDetail(
+                    id_relation=relation_id,
+                    criteria_type="quality_certification",
+                    selected_value=cert_value,
+                    validity_start_date=start_date,
+                    validity_end_date=end_date,
+                    auto_validity_end_date=True,
+                    last_update_date=date.today(),
+                ))
 
     async def _get_latest_classification(
         self,
@@ -4041,12 +4134,32 @@ class SupplierRelationService:
             await self._get_relation_quality_certification(relation),
         )
 
-    async def sync_quality_certification_for_unit(self, unit_id: int) -> list[dict]:
+    async def sync_quality_certification_for_unit(
+        self,
+        unit_id: int,
+        triggered_by: Optional[str] = None,
+        source_cert_id: Optional[int] = None,
+        change: Optional[str] = None,
+    ) -> list[dict]:
         """Re-derive quality_certification on all active relations for a unit.
 
-        Called automatically after a SupplierCertification record is updated.
-        Only creates a new PldClassEvaluationInput when the derived value actually changes.
+        Called automatically after a SupplierCertification record is created, updated
+        or deleted.
+        - Always syncs PldClassCriteriaDetail so DocumentsValidityPage reflects cert expiry.
+        - Only creates a new PldClassEvaluationInput when the derived value actually changes.
+
+        `triggered_by` / `source_cert_id` / `change` are recorded on the generated
+        evaluation rows so the audit trail can trace each auto-update back to the cert
+        edit and the user who made it.
         """
+        # Build a traceable provenance note for the generated evaluation rows.
+        change_label = {"create": "added", "update": "updated", "delete": "removed"}.get(
+            change or "", "changed"
+        )
+        cert_ref = f" #{source_cert_id}" if source_cert_id else ""
+        actor = triggered_by or "unknown user"
+        provenance = f"Auto-sync: quality certification{cert_ref} {change_label} by {actor}."
+
         stmt = (
             select(SupplierSiteRelation)
             .where(SupplierSiteRelation.id_supplier_unit == unit_id)
@@ -4054,13 +4167,18 @@ class SupplierRelationService:
         )
         relations = (await self.db.execute(stmt)).scalars().all()
 
+        # Resolve best cert once — same unit_id for all relations
+        new_cert_value, best_cert = await self._get_best_quality_cert_for_unit(unit_id)
+
         affected: list[dict] = []
         for relation in relations:
+            # Always keep criteria detail in sync with the cert's actual dates
+            await self._sync_quality_cert_detail(relation.id_relation, new_cert_value, best_cert)
+
             previous_input = await self._get_latest_class_input(relation.id_relation)
             if not previous_input:
                 continue
 
-            new_cert_value = await self._get_relation_quality_certification(relation)
             current_value = self._normalize_criteria_value(
                 "quality_certification", self._pluck(previous_input, "quality_certification")
             )
@@ -4090,7 +4208,6 @@ class SupplierRelationService:
             new_input = PldClassEvaluationInput(
                 id_relation=relation.id_relation,
                 id_cycle=self._pluck(previous_input, "id_cycle"),
-                evaluation_date=date.today(),
                 top=merged["top"],
                 lta=merged["lta"],
                 productivity=merged["productivity"],
@@ -4107,7 +4224,7 @@ class SupplierRelationService:
                 impact_score=self._pluck(previous_input, "impact_score"),
                 strategic_mention=self._pluck(previous_input, "strategic_mention"),
                 panel_decision=self._pluck(previous_input, "panel_decision"),
-                comments="Auto-updated: quality certification record changed.",
+                comments=provenance,
                 entered_by="SYSTEM",
             )
             self.db.add(new_input)
@@ -4121,8 +4238,7 @@ class SupplierRelationService:
                 "new_class_value": class_value,
             })
 
-        if affected:
-            await self.db.commit()
+        await self.db.commit()
         return affected
 
     async def _store_criteria_details(
@@ -4432,7 +4548,15 @@ class SupplierRelationService:
             rule = result.scalars().first()
             if rule and rule.score is not None:
                 total += Decimal(str(rule.score))
-            # unrecognized value → 0 (already 0 from init)
+            else:
+                # No matching active scoring rule — the criterion contributes 0.
+                # Usually a normalization gap (value not mapped to a canonical tier);
+                # log it so silent score deflation is traceable rather than invisible.
+                logger.warning(
+                    "No active pld_scoring_rule for criteria_type=%r value=%r; "
+                    "scoring it as 0. Check CRITERIA_VALUE_NORMALIZATION mapping.",
+                    criteria_type, selected_value,
+                )
 
         if not any_filled:
             return None

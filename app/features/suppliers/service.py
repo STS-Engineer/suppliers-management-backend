@@ -485,7 +485,33 @@ class SupplierService:
         update_data = {k: v for k, v in data.model_dump(exclude_unset=True).items() if v is not None}
         if not update_data:
             return cert
+        # Cross-field date check against the STORED record: a partial patch that touches
+        # only one date must still be consistent with the value already on the cert.
+        effective_start = update_data.get("start_date", cert.start_date)
+        effective_end = update_data.get("end_date", cert.end_date)
+        if effective_start and effective_end and effective_end < effective_start:
+            raise AppException(
+                "end_date must be on or after start_date", status_code=422
+            )
         cert = await self.repo.update_certification(cert_id, update_data)
+        await self.db.commit()
+        return cert
+
+    async def soft_delete_certification(
+        self, unit_id: int, cert_id: int, deleted_by: Optional[str] = None
+    ) -> SupplierCertification:
+        """Soft-delete a certification (is_deleted=True), consistent with how every
+        read path filters certs. Hard delete is avoided so the cascade/sync logic and
+        any historical references stay intact."""
+        cert = await self.repo.find_certification_by_id(cert_id)
+        if not cert or cert.id_supplier_unit != unit_id:
+            raise AppException(f"Certification {cert_id} not found for unit {unit_id}", status_code=404)
+        if cert.is_deleted:
+            return cert
+        cert.is_deleted = True
+        cert.deleted_at = datetime.utcnow()
+        cert.deleted_by = deleted_by
+        await self.db.flush()
         await self.db.commit()
         return cert
 
@@ -560,8 +586,7 @@ class SupplierService:
             or "local"
         )
         resolved_owner = input_data.get("supplier_owner")
-
-        if resolved_scope == "global" and not resolved_owner and group and group.supplier_owner:
+        if not resolved_owner and group and group.supplier_owner:
             resolved_owner = group.supplier_owner
 
         if not resolved_owner:
@@ -1191,18 +1216,32 @@ class SupplierService:
         await self.db.refresh(fp)
         return fp
 
-    async def list_all_certifications(
+    def _build_certifications_base_query(
         self,
-        skip: int = 0,
-        limit: int = 100,
         standard_type: Optional[str] = None,
-        expired_only: bool = False,
-        expiring_days: Optional[int] = None,
         q: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """List all certifications across all supplier units with optional filters."""
-        from datetime import date, timedelta
-        from app.db.models import SupplierUnit as SupplierUnitModel, SupplierGroup as SupplierGroupModel
+    ):
+        """Build the base certifications query with non-status filters applied.
+
+        Only includes units that have at least one active relation with at least
+        one PldClassEvaluationInput — suppliers with no relation or no eval yet
+        are excluded from both the tracker and KPI counts.
+        """
+        from app.db.models import (
+            SupplierUnit as SupplierUnitModel,
+            SupplierGroup as SupplierGroupModel,
+            SupplierSiteRelation,
+            PldClassEvaluationInput,
+        )
+        units_with_eval = (
+            select(SupplierSiteRelation.id_supplier_unit)
+            .join(
+                PldClassEvaluationInput,
+                PldClassEvaluationInput.id_relation == SupplierSiteRelation.id_relation,
+            )
+            .where(SupplierSiteRelation.is_deleted.is_(False))
+            .distinct()
+        )
         base = (
             select(SupplierCertification, SupplierUnitModel.supplier_code, SupplierGroupModel.nom)
             .join(
@@ -1216,19 +1255,10 @@ class SupplierService:
                 isouter=True,
             )
             .where(SupplierCertification.is_deleted.is_(False))
+            .where(SupplierCertification.id_supplier_unit.in_(units_with_eval))
         )
         if standard_type:
             base = base.where(SupplierCertification.standard_type == standard_type)
-        if expired_only:
-            today = date.today()
-            base = base.where(SupplierCertification.end_date < today)
-        elif expiring_days is not None:
-            today = date.today()
-            threshold = today + timedelta(days=expiring_days)
-            base = base.where(
-                SupplierCertification.end_date >= today,
-                SupplierCertification.end_date <= threshold,
-            )
         if q:
             pattern = f"%{q}%"
             base = base.where(
@@ -1239,10 +1269,84 @@ class SupplierService:
                     SupplierGroupModel.nom.ilike(pattern),
                 )
             )
+        return base
+
+    async def get_certifications_summary(
+        self,
+        standard_type: Optional[str] = None,
+        q: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Return counts by validity status for the KPI strip, plus expired quality cert count."""
+        from datetime import date, timedelta
+        base = self._build_certifications_base_query(standard_type=standard_type, q=q)
+        today = date.today()
+        threshold_90 = today + timedelta(days=90)
+
+        def count_q(extra_where=None):
+            q2 = base
+            if extra_where is not None:
+                q2 = q2.where(extra_where)
+            return select(func.count()).select_from(q2.subquery())
+
+        total = (await self.db.execute(count_q())).scalar() or 0
+        expired = (await self.db.execute(count_q(SupplierCertification.end_date < today))).scalar() or 0
+        expiring = (await self.db.execute(count_q(
+            (SupplierCertification.end_date >= today) & (SupplierCertification.end_date <= threshold_90)
+        ))).scalar() or 0
+        valid = (await self.db.execute(count_q(
+            SupplierCertification.end_date > threshold_90
+        ))).scalar() or 0
+        no_date = (await self.db.execute(count_q(SupplierCertification.end_date.is_(None)))).scalar() or 0
+        # All certifications in this system are quality certifications — reuse expired count.
+        quality_expired = expired
+        # Global count ignoring the current filters — a stable reference for the
+        # "Total" KPI card so it doesn't silently shrink when a filter is applied.
+        unfiltered_base = self._build_certifications_base_query()
+        unfiltered_total = (await self.db.execute(
+            select(func.count()).select_from(unfiltered_base.subquery())
+        )).scalar() or 0
+        return {
+            "total": total,
+            "unfiltered_total": unfiltered_total,
+            "expired": expired,
+            "expiring": expiring,
+            "valid": valid,
+            "no_date": no_date,
+            "quality_expired": quality_expired,
+        }
+
+    async def list_all_certifications(
+        self,
+        skip: int = 0,
+        limit: int = 100,
+        standard_type: Optional[str] = None,
+        expired_only: bool = False,
+        expiring_days: Optional[int] = None,
+        valid_only: bool = False,
+        q: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """List all certifications across all supplier units with optional filters."""
+        from datetime import date, timedelta
+        base = self._build_certifications_base_query(standard_type=standard_type, q=q)
+        if expired_only:
+            today = date.today()
+            base = base.where(SupplierCertification.end_date < today)
+        elif expiring_days is not None:
+            today = date.today()
+            threshold = today + timedelta(days=expiring_days)
+            base = base.where(
+                SupplierCertification.end_date >= today,
+                SupplierCertification.end_date <= threshold,
+            )
+        elif valid_only:
+            today = date.today()
+            threshold_90 = today + timedelta(days=90)
+            base = base.where(SupplierCertification.end_date > threshold_90)
 
         count_stmt = select(func.count()).select_from(base.subquery())
         total = (await self.db.execute(count_stmt)).scalar() or 0
 
+        from app.db.models import SupplierUnit as SupplierUnitModel, SupplierGroup as SupplierGroupModel
         rows = (
             await self.db.execute(
                 base.order_by(
