@@ -74,7 +74,7 @@ class Settings(BaseSettings):
 
     SQLALCHEMY_ECHO: bool = False
 
-    FRONTEND_BASE_URL: str = "http://localhost:5173"
+    FRONTEND_BASE_URL: str = "https://avo-supplier-management.azurewebsites.net"
 
     model_config = SettingsConfigDict(
         env_file=".env",
