@@ -1,4 +1,5 @@
 """Suppliers repository layer."""
+from datetime import datetime
 from typing import List, Optional
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,6 +29,7 @@ class SupplierRepository:
         """Find all supplier groups with pagination."""
         stmt = (
             select(SupplierGroup)
+            .where(SupplierGroup.is_deleted.is_(False))
             .options(
                 selectinload(SupplierGroup.category_links).selectinload(
                     SupplierGroupCategory.category
@@ -41,7 +43,7 @@ class SupplierRepository:
     
     async def count_groups(self) -> int:
         """Count total number of supplier groups."""
-        stmt = select(func.count(SupplierGroup.id_group))
+        stmt = select(func.count(SupplierGroup.id_group)).where(SupplierGroup.is_deleted.is_(False))
         result = await self.db.execute(stmt)
         return result.scalar() or 0
     
@@ -50,6 +52,7 @@ class SupplierRepository:
         stmt = (
             select(SupplierGroup)
             .where(SupplierGroup.id_group == group_id)
+            .where(SupplierGroup.is_deleted.is_(False))
             .options(
                 selectinload(SupplierGroup.units),
                 selectinload(SupplierGroup.contacts),
@@ -66,6 +69,7 @@ class SupplierRepository:
         stmt = (
             select(SupplierGroup)
             .where(SupplierGroup.id_group == group_id)
+            .where(SupplierGroup.is_deleted.is_(False))
             .options(
                 selectinload(SupplierGroup.units),
                 selectinload(SupplierGroup.contacts),
@@ -82,6 +86,7 @@ class SupplierRepository:
         stmt = (
             select(SupplierGroup)
             .where(SupplierGroup.id_group == group_id)
+            .where(SupplierGroup.is_deleted.is_(False))
             .options(
                 selectinload(SupplierGroup.category_links)
                 .selectinload(SupplierGroupCategory.category)
@@ -92,7 +97,7 @@ class SupplierRepository:
    
     async def find_group_by_name(self, name: str) -> Optional[SupplierGroup]:
         """Find supplier group by name."""
-        stmt = select(SupplierGroup).where(SupplierGroup.nom == name)
+        stmt = select(SupplierGroup).where(SupplierGroup.nom == name, SupplierGroup.is_deleted.is_(False))
         result = await self.db.execute(stmt)
         return result.scalar_one_or_none()
     
@@ -160,11 +165,13 @@ class SupplierRepository:
             )
 
         await self.db.flush()
-    async def delete_group(self, group_id: int) -> bool:
-        """Delete a supplier group and cascade delete its units."""
+    async def delete_group(self, group_id: int, deleted_by: str = "SYSTEM") -> bool:
+        """Soft-delete a supplier group. Hard deletes are prohibited — audit trail must be preserved."""
         group = await self.find_group_by_id(group_id)
         if group:
-            await self.db.delete(group)
+            group.is_deleted = True
+            group.deleted_at = datetime.utcnow()
+            group.deleted_by = deleted_by
             await self.db.flush()
             return True
         return False
@@ -175,31 +182,31 @@ class SupplierRepository:
     
     async def find_all_units(self, skip: int = 0, limit: int = 100) -> List[SupplierUnit]:
         """Find all supplier units with pagination."""
-        stmt = select(SupplierUnit).offset(skip).limit(limit)
+        stmt = select(SupplierUnit).where(SupplierUnit.is_deleted.is_(False)).offset(skip).limit(limit)
         result = await self.db.execute(stmt)
         return result.scalars().all()
     
     async def find_units_by_group(self, group_id: int) -> List[SupplierUnit]:
         """Find all supplier units for a specific group."""
-        stmt = select(SupplierUnit).where(SupplierUnit.id_group == group_id)
+        stmt = select(SupplierUnit).where(SupplierUnit.id_group == group_id, SupplierUnit.is_deleted.is_(False))
         result = await self.db.execute(stmt)
         return result.scalars().all()
     
     async def count_units(self) -> int:
         """Count total number of supplier units."""
-        stmt = select(func.count(SupplierUnit.id_supplier_unit))
+        stmt = select(func.count(SupplierUnit.id_supplier_unit)).where(SupplierUnit.is_deleted.is_(False))
         result = await self.db.execute(stmt)
         return result.scalar() or 0
     
     async def find_unit_by_id(self, unit_id: int) -> Optional[SupplierUnit]:
         """Find supplier unit by ID."""
-        stmt = select(SupplierUnit).where(SupplierUnit.id_supplier_unit == unit_id)
+        stmt = select(SupplierUnit).where(SupplierUnit.id_supplier_unit == unit_id, SupplierUnit.is_deleted.is_(False))
         result = await self.db.execute(stmt)
         return result.scalar_one_or_none()
     
     async def find_unit_by_code(self, code: str, group_id: Optional[int] = None) -> Optional[SupplierUnit]:
         """Find supplier unit by supplier code, optionally scoped to one group."""
-        stmt = select(SupplierUnit).where(SupplierUnit.supplier_code == code)
+        stmt = select(SupplierUnit).where(SupplierUnit.supplier_code == code, SupplierUnit.is_deleted.is_(False))
         if group_id is None:
             stmt = stmt.where(SupplierUnit.id_group.is_(None))
         else:
@@ -224,11 +231,13 @@ class SupplierRepository:
             await self.db.flush()
         return unit
     
-    async def delete_unit(self, unit_id: int) -> bool:
-        """Delete a supplier unit."""
+    async def delete_unit(self, unit_id: int, deleted_by: str = "SYSTEM") -> bool:
+        """Soft-delete a supplier unit. Hard deletes are prohibited — audit trail must be preserved."""
         unit = await self.find_unit_by_id(unit_id)
         if unit:
-            await self.db.delete(unit)
+            unit.is_deleted = True
+            unit.deleted_at = datetime.utcnow()
+            unit.deleted_by = deleted_by
             await self.db.flush()
             return True
         return False

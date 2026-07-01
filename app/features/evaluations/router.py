@@ -1,12 +1,11 @@
 """Batch evaluation upload and scheduling router."""
 
-from fastapi import APIRouter, Depends, File, Query, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Query, UploadFile, status
 from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import AppException
-from app.shared.dependencies.auth import get_current_user
-from app.shared.dependencies.db import get_db
+from app.features.evaluations.scheduler import run_evaluation_notifications
 from app.features.evaluations.service import (
     generate_csv_template,
     generate_prefilled_template,
@@ -16,8 +15,12 @@ from app.features.evaluations.service import (
     parse_rows_from_csv,
     parse_rows_from_xlsx,
 )
+from app.shared.dependencies.auth import get_current_user
+from app.shared.dependencies.db import get_db
 
 router = APIRouter(prefix="/evaluations", tags=["evaluations"])
+
+_PRIVILEGED = {"vp_conversion", "purchasing_director"}
 
 
 @router.get("/template/csv")
@@ -44,18 +47,23 @@ async def download_xlsx_template():
 
 @router.get("/template/prefilled")
 async def download_prefilled_template(
+    filter: str = Query("all", description="'all' = full panel, 'due' = overdue/due-soon/never-evaluated only"),
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
     """
-    Download an Excel template pre-filled with ALL active supplier–plant relations.
-    supplier_code and plant_name are already populated — just add the grade and date.
+    Download a pre-filled Excel template.
+    - filter=all  → every approved relation (full panel)
+    - filter=due  → only OVERDUE, DUE_SOON, NEVER_EVALUATED, sorted by urgency,
+                    with extra context columns (urgency, frequency, last/next date, days overdue)
     """
-    content = await generate_prefilled_template(db)
+    due_only = filter.lower() == "due"
+    content = await generate_prefilled_template(db, due_only=due_only)
+    filename = "evaluation_due_only.xlsx" if due_only else "evaluation_prefilled.xlsx"
     return Response(
         content=content,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": "attachment; filename=evaluation_prefilled.xlsx"},
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
     )
 
 
@@ -118,16 +126,16 @@ async def batch_upload_evaluations(
 
 @router.get("/due", response_model=dict)
 async def get_due_evaluations(
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
     """
-    Return all active supplier-site relations with their evaluation urgency status:
-    - NEVER_EVALUATED: no evaluation on record
-    - OVERDUE: past the next_evaluation_date
-    - DUE_SOON: within the next 30 days
-    - PERFORMANCE_DRIFT: grade C/D or class ≥ 3 (needs attention even if not due)
-    - UP_TO_DATE: no action needed
+    Return all active supplier-site relations with their evaluation urgency status.
+
+    Lazy trigger: if the requesting user is vp_conversion or purchasing_director,
+    fire evaluation notifications in the background (first visit of the day only —
+    the DB lock in run_evaluation_notifications prevents duplicates).
     """
     items = await get_evaluations_due(db)
 
@@ -139,14 +147,58 @@ async def get_due_evaluations(
         "total": len(items),
     }
 
+    # Lazy trigger: privileged users cause notifications to fire on first page load each day
+    if current_user.get("access_profile") in _PRIVILEGED:
+        background_tasks.add_task(_background_notify)
+
     return {
         "status": "success",
         "data": {
             "items": items,
             "summary": summary,
         },
-        "message": f"{summary['OVERDUE']} overdue, {summary['DUE_SOON']} due soon, {summary['NEVER_EVALUATED']} never evaluated",
+        "message": (
+            f"{summary['OVERDUE']} overdue, {summary['DUE_SOON']} due soon, "
+            f"{summary['NEVER_EVALUATED']} never evaluated"
+        ),
     }
+
+
+@router.post("/trigger-notifications", response_model=dict, status_code=status.HTTP_200_OK)
+async def trigger_evaluation_notifications(
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Manually send evaluation-due notifications to vp_conversion and purchasing_director.
+    Safe to call multiple times — DB lock prevents duplicate sends on the same day.
+    """
+    result = await run_evaluation_notifications(db, source="manual")
+
+    if result.get("skipped"):
+        return {
+            "status": "success",
+            "notifications_sent": 0,
+            "message": "Notifications already sent today — no duplicates created.",
+        }
+
+    return {
+        "status": "success",
+        **result,
+        "message": (
+            f"Sent {result.get('notifications_sent', 0)} notification(s) to "
+            "vp_conversion and purchasing_director users."
+            if result.get("notifications_sent")
+            else "All supplier evaluations are up to date — no notifications needed."
+        ),
+    }
+
+
+async def _background_notify() -> None:
+    """Background task: opens its own DB session so the request session is already committed."""
+    from app.db.session import SessionLocal
+    async with SessionLocal() as db:
+        await run_evaluation_notifications(db, source="page_visit")
 
 
 def _resolve_actor(current_user: dict | None) -> str | None:

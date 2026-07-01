@@ -127,13 +127,13 @@ class SupplierService:
         await self.db.commit()
         return updated_group
     
-    async def delete_supplier_group(self, group_id: int) -> bool:
-        """Delete a supplier group."""
+    async def delete_supplier_group(self, group_id: int, changed_by: Optional[str] = None) -> bool:
+        """Soft-delete a supplier group."""
         group = await self.repo.find_group_by_id(group_id)
         if not group:
             raise AppException(f"Supplier group with ID {group_id} not found", status_code=404)
-        
-        success = await self.repo.delete_group(group_id)
+
+        success = await self.repo.delete_group(group_id, deleted_by=changed_by or "SYSTEM")
         if success:
             await self.db.commit()
         return success
@@ -259,6 +259,8 @@ class SupplierService:
         unit = await self.repo.create_unit(
             self._prepare_unit_payload(data.model_dump(exclude_unset=True))
         )
+        if unit.commodity and unit.id_group:
+            await self._sync_group_categories_from_units(unit.id_group)
         await self._record_audit_event(
             table_name="supplier_unit",
             record_pk=unit.id_supplier_unit,
@@ -294,6 +296,8 @@ class SupplierService:
         updated_unit = await self.repo.update_unit(
             unit_id, self._prepare_unit_payload(update_data)
         )
+        if "commodity" in update_data and updated_unit.id_group:
+            await self._sync_group_categories_from_units(updated_unit.id_group)
         await self._record_audit_event(
             table_name="supplier_unit",
             record_pk=unit_id,
@@ -316,7 +320,7 @@ class SupplierService:
             raise AppException(f"Supplier unit with ID {unit_id} not found", status_code=404)
         
         previous_snapshot = self._unit_audit_snapshot(unit)
-        success = await self.repo.delete_unit(unit_id)
+        success = await self.repo.delete_unit(unit_id, deleted_by=changed_by or "SYSTEM")
         if success:
             await self._record_audit_event(
                 table_name="supplier_unit",
@@ -379,7 +383,7 @@ class SupplierService:
             unit_data = self._prepare_unit_payload(unit_data or {}, group_data)
             unit_data = await self._apply_legacy_unit_schema_compatibility(unit_data)
             categories = self._extract_categories(group_data.pop("supplier_type", None))
-            
+
             # Create supplier group
             group = await self.repo.create_group(group_data)
             await self.repo.replace_group_categories(group, categories)
@@ -616,7 +620,17 @@ class SupplierService:
         relation_data["buyer_owner"] = resolved_owner
         relation_data["id_supplier_unit"] = unit_id
         relation_data["id_site"] = site_id
-        
+        # Auto-assign frequency from scope when caller didn't supply one
+        if "evaluation_frequency" not in relation_data:
+            _scope_freq: dict[str, str] = {
+                "strategic": "Quarterly",
+                "global": "Semi-Annual",
+                "local": "Annual",
+            }
+            relation_data["evaluation_frequency"] = _scope_freq.get(
+                resolved_scope.lower(), "Quarterly"
+            )
+
         relation = SupplierSiteRelation(**relation_data)
         self.db.add(relation)
         await self.db.flush()
@@ -942,6 +956,26 @@ class SupplierService:
         result = await self.db.execute(stmt)
         return [self._audit_event_to_dict(event) for event in result.scalars().all()]
 
+    async def _sync_group_categories_from_units(self, group_id: int) -> None:
+        """Rebuild group's supplier_type categories as the union of all its units' commodities."""
+        group = await self.repo.find_group_by_id(group_id)
+        if not group:
+            return
+        stmt = select(SupplierUnit).where(SupplierUnit.id_group == group_id, SupplierUnit.is_deleted.is_(False))
+        result = await self.db.execute(stmt)
+        units = result.scalars().all()
+        all_commodities: list[str] = []
+        seen: set[str] = set()
+        for unit in units:
+            if unit.commodity:
+                for c in unit.commodity.split(","):
+                    c = c.strip()
+                    if c and c not in seen:
+                        seen.add(c)
+                        all_commodities.append(c)
+        categories = self._extract_categories(all_commodities)
+        await self.repo.replace_group_categories(group, categories)
+
     @staticmethod
     def _prepare_group_payload(data: dict) -> dict:
         prepared = dict(data)
@@ -1240,6 +1274,7 @@ class SupplierService:
                 PldClassEvaluationInput.id_relation == SupplierSiteRelation.id_relation,
             )
             .where(SupplierSiteRelation.is_deleted.is_(False))
+            .where(SupplierSiteRelation.validation_status == "approved")
             .distinct()
         )
         base = (

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import calendar
 import csv
 import io
 from datetime import date, datetime, timedelta
@@ -21,6 +22,7 @@ from app.db.models import (
     SupplierStatusHistory,
     SupplierUnit,
 )
+from app.shared.utils.email.email_service import send_email
 
 
 # ---------------------------------------------------------------------------
@@ -78,19 +80,37 @@ FREQUENCY_DAYS: Dict[str, int] = {
     "Annual": 365,
 }
 
+# Month counts per frequency — used for month-exact next_evaluation_date
+FREQUENCY_MONTHS: Dict[str, int] = {
+    "Quarterly": 3,
+    "Semi-Annual": 6,
+    "Annual": 12,
+}
+
+# strategic = 3 months, global = 6 months, local = annually
 SCOPE_DEFAULT_FREQUENCY: Dict[str, str] = {
-    "global": "Quarterly",
     "strategic": "Quarterly",
+    "global": "Semi-Annual",
     "local": "Annual",
-    "regional": "Semi-Annual",
 }
 
 DUE_SOON_DAYS = 30  # flag as "due soon" within this window
 
 
+def _add_months(d: date, months: int) -> date:
+    """Return d + months calendar months, clamping to the last day of the target month."""
+    target_month = d.month - 1 + months
+    year = d.year + target_month // 12
+    month = target_month % 12 + 1
+    day = min(d.day, calendar.monthrange(year, month)[1])
+    return date(year, month, day)
+
+
 def compute_next_evaluation_date(eval_date: date, frequency: str) -> date:
-    days = FREQUENCY_DAYS.get(frequency, 365)
-    return eval_date + timedelta(days=days)
+    months = FREQUENCY_MONTHS.get(frequency)
+    if months:
+        return _add_months(eval_date, months)
+    return eval_date + timedelta(days=FREQUENCY_DAYS.get(frequency, 365))
 
 
 def infer_frequency(relation: SupplierSiteRelation) -> str:
@@ -131,6 +151,7 @@ async def get_evaluations_due(db: AsyncSession) -> List[Dict[str, Any]]:
         .join(AvocarbonSite, AvocarbonSite.id_site == SupplierSiteRelation.id_site)
         .where(SupplierSiteRelation.is_deleted.is_(False))
         .where(SupplierSiteRelation.inactivated_at.is_(None))
+        .where(SupplierSiteRelation.validation_status == "approved")
     )
     result = await db.execute(stmt)
     rows = result.all()
@@ -294,10 +315,13 @@ def generate_xlsx_template() -> bytes:
     return buf.getvalue()
 
 
-async def generate_prefilled_template(db: AsyncSession) -> bytes:
+async def generate_prefilled_template(db: AsyncSession, due_only: bool = False) -> bytes:
     """
-    Generate an Excel file pre-filled with every active supplier–plant relation.
-    supplier_code and plant_name are filled in; the user only adds grade/date.
+    Generate an Excel file pre-filled with active supplier–plant relations.
+
+    due_only=False  → all approved relations (full panel)
+    due_only=True   → only OVERDUE, DUE_SOON, NEVER_EVALUATED relations,
+                      with extra context columns (status, last/next date, days overdue)
     """
     stmt = (
         select(SupplierSiteRelation, SupplierUnit, AvocarbonSite)
@@ -308,10 +332,37 @@ async def generate_prefilled_template(db: AsyncSession) -> bytes:
         .join(AvocarbonSite, AvocarbonSite.id_site == SupplierSiteRelation.id_site)
         .where(SupplierSiteRelation.is_deleted.is_(False))
         .where(SupplierSiteRelation.inactivated_at.is_(None))
+        .where(SupplierSiteRelation.validation_status == "approved")
         .order_by(AvocarbonSite.site_name, SupplierUnit.supplier_code)
     )
     result = await db.execute(stmt)
-    rows = result.all()
+    all_rows = result.all()
+
+    today = date.today()
+    due_threshold = today + timedelta(days=DUE_SOON_DAYS)
+
+    def _eval_status(rel: SupplierSiteRelation) -> str:
+        last = rel.last_evaluation_date
+        nxt = rel.next_evaluation_date
+        if last is None:
+            return "NEVER_EVALUATED"
+        if nxt and nxt < today:
+            return "OVERDUE"
+        if nxt and nxt <= due_threshold:
+            return "DUE_SOON"
+        return "UP_TO_DATE"
+
+    if due_only:
+        rows = [
+            (rel, unit, site)
+            for rel, unit, site in all_rows
+            if _eval_status(rel) in ("OVERDUE", "DUE_SOON", "NEVER_EVALUATED")
+        ]
+        # Sort: OVERDUE first, then DUE_SOON, then NEVER_EVALUATED
+        _priority = {"OVERDUE": 0, "DUE_SOON": 1, "NEVER_EVALUATED": 2}
+        rows.sort(key=lambda x: _priority.get(_eval_status(x[0]), 99))
+    else:
+        rows = list(all_rows)
 
     openpyxl = _load_openpyxl_or_raise()
     from openpyxl.styles import Alignment, Font, PatternFill
@@ -325,26 +376,96 @@ async def generate_prefilled_template(db: AsyncSession) -> bytes:
     header_font = Font(bold=True, color="FFFFFF")
     locked_fill = PatternFill("solid", fgColor="F1F5F9")
     hint_font = Font(italic=True, color="94A3B8")
-    col_widths = [30, 28, 18, 20, 45]
-    col_hints = ["", "", "YYYY-MM-DD", "A / B / C / D", "Optional notes"]
 
-    for col_idx, col_name in enumerate(TEMPLATE_COLUMNS, start=1):
+    # Due-only template has extra context columns (read-only, for reference)
+    STATUS_LABEL = {
+        "OVERDUE": "⚠ Overdue",
+        "DUE_SOON": "⏳ Due soon",
+        "NEVER_EVALUATED": "— Never evaluated",
+    }
+    STATUS_COLOR = {
+        "OVERDUE": "FEE2E2",       # red-100
+        "DUE_SOON": "FEF3C7",      # amber-100
+        "NEVER_EVALUATED": "F1F5F9",  # slate-100
+    }
+
+    if due_only:
+        columns = [
+            ("supplier_code",       30, "",              True),
+            ("plant_name",          28, "",              True),
+            ("evaluation_date",     18, "YYYY-MM-DD",    False),
+            ("operational_grade",   18, "A / B / C / D", False),
+            ("comments",            40, "Optional notes", False),
+            # context columns (locked, reference only)
+            ("urgency",             18, "",              True),
+            ("frequency",           16, "",              True),
+            ("last_evaluation",     20, "",              True),
+            ("next_due",            20, "",              True),
+            ("days_overdue",        14, "",              True),
+        ]
+    else:
+        columns = [
+            ("supplier_code",   30, "",              True),
+            ("plant_name",      28, "",              True),
+            ("evaluation_date", 18, "YYYY-MM-DD",    False),
+            ("operational_grade", 20, "A / B / C / D", False),
+            ("comments",        45, "Optional notes", False),
+        ]
+
+    for col_idx, (col_name, width, hint, _locked) in enumerate(columns, start=1):
         cell = ws.cell(row=1, column=col_idx, value=col_name)
         cell.fill = header_fill
         cell.font = header_font
         cell.alignment = Alignment(horizontal="center")
-        ws.column_dimensions[get_column_letter(col_idx)].width = col_widths[col_idx - 1]
+        ws.column_dimensions[get_column_letter(col_idx)].width = width
 
     for row_idx, (rel, unit, site) in enumerate(rows, start=2):
-        ws.cell(row=row_idx, column=1, value=unit.supplier_code).fill = locked_fill
-        ws.cell(row=row_idx, column=2, value=site.site_name).fill = locked_fill
-        # Hint cells for columns the user must fill
-        for col_idx, hint in enumerate(col_hints[2:], start=3):
-            cell = ws.cell(row=row_idx, column=col_idx, value=hint if hint else "")
-            if hint:
-                cell.font = hint_font
+        status = _eval_status(rel) if due_only else None
 
-    ws.freeze_panes = "C2"  # keep supplier_code and plant_name visible when scrolling
+        def _write(col: int, value, locked: bool = False, fill_override=None):
+            cell = ws.cell(row=row_idx, column=col, value=value)
+            if locked:
+                cell.fill = fill_override or locked_fill
+            return cell
+
+        if due_only:
+            frequency = infer_frequency(rel)
+            last = rel.last_evaluation_date
+            nxt = rel.next_evaluation_date
+            days_overdue = (today - nxt).days if nxt and nxt < today else None
+
+            status_fill = PatternFill("solid", fgColor=STATUS_COLOR.get(status, "F1F5F9"))
+
+            _write(1, unit.supplier_code, locked=True)
+            _write(2, site.site_name, locked=True)
+            # hint cells for user-fill columns
+            for col_idx, hint in [(3, "YYYY-MM-DD"), (4, "A / B / C / D"), (5, "Optional notes")]:
+                c = ws.cell(row=row_idx, column=col_idx, value=hint)
+                c.font = hint_font
+            # context columns
+            _write(6,  STATUS_LABEL.get(status, status), locked=True, fill_override=status_fill)
+            _write(7,  frequency,                         locked=True)
+            _write(8,  last.isoformat() if last else "—", locked=True)
+            _write(9,  nxt.isoformat() if nxt else "—",   locked=True)
+            _write(10, days_overdue if days_overdue else "—", locked=True)
+        else:
+            _write(1, unit.supplier_code, locked=True)
+            _write(2, site.site_name, locked=True)
+            for col_idx, hint in [(3, "YYYY-MM-DD"), (4, "A / B / C / D"), (5, "Optional notes")]:
+                c = ws.cell(row=row_idx, column=col_idx, value=hint)
+                c.font = hint_font
+
+    ws.freeze_panes = "C2"
+
+    # Summary note at the top of due-only template
+    if due_only:
+        ws.insert_rows(1)
+        summary_cell = ws.cell(row=1, column=1,
+            value=f"Due / overdue evaluations as of {today.isoformat()} — {len(rows)} supplier(s) require action. Fill columns C–E only.")
+        summary_cell.font = Font(bold=True, color="062B49")
+        summary_cell.fill = PatternFill("solid", fgColor="DBEAFE")
+        ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(columns))
+        ws.freeze_panes = "C3"
 
     buf = io.BytesIO()
     wb.save(buf)
@@ -460,6 +581,12 @@ def _parse_record(record: Dict[str, Any], row_num: int) -> EvaluationRow:
     except (ValueError, AttributeError):
         raise ValueError(f"evaluation_date must be YYYY-MM-DD, got '{raw_date}'")
 
+    if eval_date > date.today():
+        raise ValueError(
+            f"evaluation_date cannot be in the future (got '{eval_date}'). "
+            "Evaluations record past events — enter the date the assessment took place."
+        )
+
     return EvaluationRow(sc, pn, eval_date, grade, comments)
 
 
@@ -516,6 +643,7 @@ async def ingest_batch(
             )
             .where(sqlfunc.lower(AvocarbonSite.site_name) == row.plant_name.lower())
             .where(SupplierSiteRelation.is_deleted.is_(False))
+            .where(SupplierSiteRelation.validation_status == "approved")
         )
         result = await db.execute(stmt)
         match = result.first()
@@ -621,11 +749,26 @@ async def ingest_batch(
             )
             db.add(history)
 
+        # Preserve a manually applied status override — if the relation's current
+        # supplier_status was deliberately set to something different from the computed
+        # value, keep the override rather than silently reverting it.
+        has_active_override = (
+            relation.supplier_status not in (None, "")
+            and new_status not in (None, "")
+            and relation.supplier_status != new_status
+        )
+        effective_status = relation.supplier_status if has_active_override else new_status
+
+        # Backfill history with the status actually applied, not the computed value,
+        # so the audit trail correctly reflects what happened.
+        if status_changed and history:
+            history.new_status = effective_status
+
         # Update relation
         relation.operational_grade = row.grade
         relation.class_value = existing_class
         relation.final_grade = final_grade
-        relation.supplier_status = new_status
+        relation.supplier_status = effective_status
         relation.panel_decision = new_panel
         relation.last_evaluation_date = row.evaluation_date
         relation.next_evaluation_date = next_eval
@@ -675,6 +818,48 @@ async def ingest_batch(
                 )
                 db.add(dev_plan)
                 dev_plan_created = True
+
+                # Notify the assigned buyer — a Grade C/D supplier is a supply risk
+                # that requires immediate attention; silent plan creation is not enough.
+                buyer_email = relation.buyer_owner
+                if buyer_email:
+                    supplier_display = unit.supplier_code if unit else f"Relation #{relation.id_relation}"
+                    site_display = site.site_name if site else f"Site #{relation.id_site}"
+                    grade_label = "D (Exit within 3 months)" if row.grade == "D" else "C (Exit within 6 months)"
+                    try:
+                        await send_email(
+                            subject=f"[Action Required] Grade {row.grade} Supplier — {supplier_display} · {site_display}",
+                            recipients=[buyer_email],
+                            body_html=f"""
+<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
+  <div style="background:#7f1d1d;padding:20px 28px;border-radius:8px 8px 0 0">
+    <h1 style="color:#fff;margin:0;font-size:18px">Supplier Risk Alert — Grade {row.grade}</h1>
+    <p style="color:#fca5a5;margin:4px 0 0;font-size:13px">Avocarbon · Supplier Management</p>
+  </div>
+  <div style="background:#f8fafc;padding:24px 28px;border:1px solid #e2e8f0;border-top:none">
+    <p style="margin:0 0 16px;font-size:14px;color:#1e293b">
+      A development plan has been automatically created for a Grade {row.grade} supplier
+      requiring your immediate attention.
+    </p>
+    <table style="width:100%;border-collapse:collapse;margin-bottom:20px;font-size:13px">
+      <tr style="background:#fee2e2"><td style="padding:8px 12px;font-weight:bold;width:40%">Supplier</td><td style="padding:8px 12px">{supplier_display}</td></tr>
+      <tr><td style="padding:8px 12px;font-weight:bold">Plant</td><td style="padding:8px 12px">{site_display}</td></tr>
+      <tr style="background:#fee2e2"><td style="padding:8px 12px;font-weight:bold">Grade</td><td style="padding:8px 12px;color:#991b1b;font-weight:bold">{grade_label}</td></tr>
+      <tr><td style="padding:8px 12px;font-weight:bold">Evaluation date</td><td style="padding:8px 12px">{row.evaluation_date.isoformat()}</td></tr>
+      <tr style="background:#fee2e2"><td style="padding:8px 12px;font-weight:bold">Plan due date</td><td style="padding:8px 12px;color:#991b1b;font-weight:bold">{plan_due.isoformat()}</td></tr>
+    </table>
+    <p style="margin:0;font-size:13px;color:#475569">
+      Please send the development plan request to the supplier and monitor their response.
+      Review the supplier workspace in Avocarbon Supplier Management for full details.
+    </p>
+  </div>
+  <div style="background:#f1f5f9;padding:12px 28px;border-radius:0 0 8px 8px;border:1px solid #e2e8f0;border-top:none">
+    <p style="color:#94a3b8;font-size:11px;margin:0">Avocarbon Supplier Management Platform — automated alert</p>
+  </div>
+</div>""",
+                        )
+                    except Exception:
+                        pass  # email failure must not roll back the evaluation batch
 
         processed.append(
             {

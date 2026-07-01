@@ -60,6 +60,7 @@ STRATEGIC_MENTION_VALUES = {"strategic", "monopolistic", "directed", "none"}
 PANEL_DECISION_VALUES = {
     "panel_add",
     "panel_add_exec_committee",
+    "panel_add_committee_validated",
     "panel_reject",
 }
 
@@ -94,16 +95,6 @@ class SupplierGroupCreate(SupplierGroupBase):
     """Schema for creating a new supplier group."""
     nom: str = Field(..., max_length=200, description="Supplier group name (required)")
     supplier_scope: str = Field(..., max_length=20, description="Scope of supplier: local, regional, or global (required)")
-    supplier_type: str | List[str] = Field(..., description="Supplier category or categories (required)")
-
-    @field_validator("supplier_type")
-    @classmethod
-    def validate_supplier_type_nonempty(cls, value: str | List[str]) -> str | List[str]:
-        if isinstance(value, list) and len(value) == 0:
-            raise ValueError("At least one supplier type must be selected")
-        if isinstance(value, str) and not value.strip():
-            raise ValueError("At least one supplier type must be selected")
-        return value
 
 
 class SupplierGroupUpdate(SupplierGroupBase):
@@ -115,9 +106,34 @@ class SupplierGroupResponse(SupplierGroupBase):
     """Response schema for supplier group."""
     id_group: int
     group_code: Optional[str] = None
-    
+    validation_status: str = "approved"
+
     class Config:
         from_attributes = True
+
+
+class PendingValidationItem(BaseModel):
+    """Summary of a supplier group awaiting purchasing-manager validation."""
+    group_id: int
+    group_name: Optional[str]
+    group_code: Optional[str]
+    validation_status: str
+    unit_id: int
+    unit_code: Optional[str]
+    unit_country: Optional[str]
+    relation_id: int
+    site_id: int
+    site_name: Optional[str]
+    supplier_scope: Optional[str]
+    supplier_owner: Optional[str]
+    created_at: Optional[datetime]
+
+    class Config:
+        from_attributes = True
+
+
+class ValidationDecisionRequest(BaseModel):
+    comment: Optional[str] = Field(None, max_length=500)
 
 
 # ============================================================================
@@ -144,42 +160,34 @@ class SupplierUnitBase(BaseModel):
     product_type: Optional[str] = Field(None, max_length=255, description="Type of products supplied (legacy)")
     product_category: Optional[str] = Field(None, max_length=255, description="Product category (legacy)")
     # Product classification — stored comma-separated, accept list or string
+    commodity: Optional[str] = Field(None, max_length=500, description="Commodity / purchasing category (comma-separated)")
     family: Optional[str] = Field(None, max_length=500, description="Product family (comma-separated)")
     sub_family: Optional[str] = Field(None, max_length=500, description="Product sub-family (comma-separated)")
     product_line: Optional[str] = Field(None, max_length=500, description="Product line (comma-separated)")
     website: Optional[str] = Field(None, max_length=500, description="Supplier unit website URL")
-    supplier_email: Optional[str] = Field(None, max_length=255, description="Main supplier contact email")
-    commodity_responsible: Optional[str] = Field(None, max_length=200, description="Avocarbon commodity responsible person")
-    main_plants: Optional[str] = Field(None, description="Avocarbon plants this unit primarily supplies (comma-separated)")
     # Environmental / GHG data (from SB6 board)
     carbon_footprint: Optional[str] = Field(None, max_length=100, description="Annual carbon footprint (tCO2e)")
     green_electricity_pct: Optional[str] = Field(None, max_length=10, description="Green electricity share (%)")
-    copper_brass_pct: Optional[str] = Field(None, max_length=10, description="Copper/Brass content (%)")
-    scope1_ghg: Optional[Decimal] = Field(None, description="Scope 1 GHG emissions (tCO2e)")
-    scope2_ghg: Optional[Decimal] = Field(None, description="Scope 2 GHG emissions (tCO2e)")
-    ghg_comments: Optional[str] = Field(None, description="GHG data comments")
-    ghg_requested_date: Optional[date] = Field(None, description="Date GHG data was requested from supplier")
-    ghg_completion_pct: Optional[str] = Field(None, max_length=50, description="GHG questionnaire completion percentage")
-    category: Optional[str] = Field(None, max_length=500, description="Product category (comma-separated, e.g. Ferrites,Chokes)")
     amount_value: Optional[Decimal] = Field(None, description="Annual spend value")
     amount_currency: Optional[str] = Field(None, max_length=10, description="Currency code (USD, EUR, etc.)")
     strategique: Optional[bool] = Field(False, description="Is this unit strategic?")
     monopolistique: Optional[bool] = Field(False, description="Is this unit monopolistic?")
     directed: Optional[bool] = Field(False, description="Is this unit directed?")
 
-    @field_validator("scope1_ghg", "scope2_ghg", "amount_value", mode="before")
+    @field_validator("amount_value", mode="before")
     @classmethod
     def coerce_unit_decimals(cls, v: object) -> Optional[Decimal]:
         return _coerce_decimal(v)
 
-    @field_validator("family", "sub_family", "product_line", "category", mode="before")
+    @field_validator("commodity", "family", "sub_family", "product_line", mode="before")
     @classmethod
     def coerce_list_to_csv(cls, v: object) -> Optional[str]:
         """Accept a list of strings and join as CSV, or pass through a plain string."""
         if v is None:
             return None
         if isinstance(v, list):
-            return ",".join(str(x).strip() for x in v if str(x).strip())
+            joined = ",".join(str(x).strip() for x in v if str(x).strip())
+            return joined if joined else None
         return str(v) if v != "" else None
 
     @field_validator(
@@ -192,24 +200,14 @@ class SupplierUnitBase(BaseModel):
         "product_type",
         "product_category",
         "website",
-        "commodity_responsible",
-        "main_plants",
         "carbon_footprint",
         "green_electricity_pct",
-        "copper_brass_pct",
-        "ghg_comments",
-        "ghg_completion_pct",
         "amount_currency",
         mode="before",
     )
     @classmethod
     def normalize_unit_strings(cls, value: Optional[str]) -> Optional[str]:
         return _normalize_optional_string(value)
-
-    @field_validator("supplier_email")
-    @classmethod
-    def validate_supplier_email(cls, value: Optional[str]) -> Optional[str]:
-        return _normalize_optional_email(value, "supplier_email")
 
 
 class SupplierUnitCreate(SupplierUnitBase):

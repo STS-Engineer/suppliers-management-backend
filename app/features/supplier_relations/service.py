@@ -12,6 +12,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.constants import PANEL_ACTIVE_DECISIONS
 from app.core.exceptions import AppException
 from app.db.models import (
     Classification,
@@ -178,9 +179,18 @@ class SupplierRelationService:
         """
         has_doc_col = await self._criteria_detail_has_document_column()
 
-        # Q1 — latest PldClassEvaluationInput per relation
+        # Q1 — latest PldClassEvaluationInput per relation, only panel-active approved relations
+        approved_rel_ids_subq = (
+            select(SupplierSiteRelation.id_relation)
+            .where(SupplierSiteRelation.validation_status == "approved")
+            .where(SupplierSiteRelation.panel_decision.in_(PANEL_ACTIVE_DECISIONS))
+            .where(SupplierSiteRelation.is_active.is_(True))
+            .where(SupplierSiteRelation.is_deleted.is_(False))
+            .scalar_subquery()
+        )
         latest_input_subq = (
             select(func.max(PldClassEvaluationInput.id_pld_input))
+            .where(PldClassEvaluationInput.id_relation.in_(approved_rel_ids_subq))
             .group_by(PldClassEvaluationInput.id_relation)
             .scalar_subquery()
         )
@@ -459,7 +469,38 @@ class SupplierRelationService:
             "impact_question_5": self._pluck(impact_input, "question_5"),
             "impact_question_6": self._pluck(impact_input, "question_6"),
             "evaluation_draft": relation.evaluation_draft,
+            "relation_validation_status": relation.validation_status or "draft",
+            "review_comment": relation.review_comment,
         }
+
+    async def submit_relation_for_review(self, relation_id: int) -> None:
+        relation = await self.get_relation(relation_id)
+        if relation.validation_status == "approved":
+            raise AppException("This relation is already approved.", status_code=400)
+        if relation.validation_status == "pending_review":
+            raise AppException("Already submitted for review.", status_code=400)
+        relation.validation_status = "pending_review"
+        await self.db.flush()  # defer commit to router so submitter stamp + notifications are atomic
+
+    async def approve_relation_review(self, relation_id: int) -> None:
+        relation = await self.get_relation(relation_id)
+        if relation.validation_status != "pending_review":
+            raise AppException(
+                f"Relation cannot be approved from '{relation.validation_status}' status. Submit for review first.",
+                status_code=400,
+            )
+        relation.validation_status = "approved"
+
+    async def reject_relation_review(self, relation_id: int, comment: str | None) -> None:
+        relation = await self.get_relation(relation_id)
+        if relation.validation_status != "pending_review":
+            raise AppException(
+                f"Relation cannot be rejected from '{relation.validation_status}' status. "
+                "Only relations under review (pending_review) can be rejected. "
+                "To revise an already-approved relation, reset it to draft first.",
+                status_code=400,
+            )
+        relation.validation_status = "rejected"
 
     async def save_evaluation_draft(
         self,
@@ -1013,6 +1054,10 @@ class SupplierRelationService:
                 AvocarbonSite,
                 AvocarbonSite.id_site == SupplierSiteRelation.id_site,
             )
+            .where(SupplierSiteRelation.panel_decision.in_(PANEL_ACTIVE_DECISIONS))
+            .where(SupplierSiteRelation.validation_status == "approved")
+            .where(SupplierSiteRelation.is_active.is_(True))
+            .where(SupplierSiteRelation.is_deleted.is_(False))
             .options(selectinload(SupplierDevelopmentPlan.document))
             .order_by(
                 SupplierDevelopmentPlan.due_date.asc().nullslast(),

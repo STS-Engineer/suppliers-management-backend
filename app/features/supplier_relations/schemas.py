@@ -4,8 +4,9 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 from app.features.suppliers.schemas import ClassCriterionDetail, EvaluationDetailsBase
+from app.core.constants import EVAL_FREQUENCY_DAYS
 
 
 class SupplierRelationSummaryResponse(BaseModel):
@@ -23,8 +24,22 @@ class SupplierRelationSummaryResponse(BaseModel):
     panel_decision: Optional[str] = None
     last_evaluation_date: Optional[date] = None
     next_evaluation_date: Optional[date] = None
+    evaluation_frequency: Optional[str] = None
     evaluation_comments: Optional[str] = None
     created_at: Optional[datetime] = None
+    global_status: Optional[str] = None
+    supplier_scope: Optional[str] = None
+    is_active: bool = True
+
+    @computed_field
+    @property
+    def is_overdue_for_evaluation(self) -> Optional[bool]:
+        if not self.last_evaluation_date or not self.evaluation_frequency:
+            return None
+        days = EVAL_FREQUENCY_DAYS.get(self.evaluation_frequency)
+        if days is None:
+            return None
+        return (date.today() - self.last_evaluation_date).days > days
 
     class Config:
         from_attributes = True
@@ -309,3 +324,35 @@ class RelationEvaluationWorkspaceResponse(EvaluationDetailsBase):
     evaluation_documents: list[dict] = Field(default_factory=list)
     criteria_scores: dict = Field(default_factory=dict)
     evaluation_draft: Optional[dict] = None
+    relation_validation_status: Optional[str] = None
+    review_comment: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Spend by year
+# ---------------------------------------------------------------------------
+
+class SpendByYearCreate(BaseModel):
+    fiscal_year: int = Field(..., ge=2000, le=2100, description="Fiscal year (e.g. 2025)")
+    spend_value: Decimal = Field(..., ge=0, description="Annual spend amount")
+    spend_currency: str = Field(default="EUR", max_length=10)
+
+
+class SpendByYearUpsertBody(BaseModel):
+    """Body for PUT /{relation_id}/spend/{fiscal_year} — fiscal_year comes from the URL."""
+    spend_value: Decimal = Field(..., ge=0, description="Annual spend amount")
+    spend_currency: str = Field(default="EUR", max_length=10)
+
+
+class SpendByYearResponse(BaseModel):
+    id_spend: int
+    id_relation: int
+    fiscal_year: int
+    spend_value: Decimal
+    spend_currency: str
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    updated_by: Optional[str] = None
+
+    class Config:
+        from_attributes = True
