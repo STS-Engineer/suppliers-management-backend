@@ -81,6 +81,12 @@ class SiteService:
             .selectinload(SupplierUnit.group)
             .selectinload(SupplierGroup.category_links)
             .selectinload(SupplierGroupCategory.category),
+            selectinload(AvocarbonSite.supplier_relations).selectinload(
+                SupplierSiteRelation.development_plans
+            ),
+            selectinload(AvocarbonSite.supplier_relations).selectinload(
+                SupplierSiteRelation.committee_reviews
+            ),
         ]
         if has_contact_relation:
             loader_options.append(
@@ -89,8 +95,10 @@ class SiteService:
                 .selectinload(ContactSiteRelation.contact)
             )
 
-        stmt = select(AvocarbonSite).options(*loader_options).order_by(
-            AvocarbonSite.site_name
+        stmt = (
+            select(AvocarbonSite)
+            .options(*loader_options)
+            .order_by(AvocarbonSite.site_name)
         )
         result = await self.db.execute(stmt)
         sites = result.scalars().unique().all()
@@ -131,7 +139,9 @@ class SiteService:
                 group = unit.group if unit else None
                 if not unit or not group:
                     continue
-                if not include_inactive and not unit.is_active:
+                if relation.validation_status != "approved":
+                    continue
+                if not include_inactive and not relation.is_active:
                     continue
 
                 if supplier_owner and not (
@@ -144,7 +154,7 @@ class SiteService:
                     continue
                 if status and not matches_text(relation.supplier_status, status):
                     continue
-                if panel_decision and not matches_text(relation.panel_decision, panel_decision):
+                if panel_decision and relation.panel_decision != panel_decision:
                     continue
 
                 if evaluation_start and (
@@ -184,23 +194,45 @@ class SiteService:
                     else []
                 )
                 combined_contacts = [*site.contacts, *relation_contacts]
-                if purchase_manager and not contacts_match(combined_contacts, purchase_manager):
+                if purchase_manager and not contacts_match(
+                    combined_contacts, purchase_manager
+                ):
                     continue
-                if plant_manager and not contacts_match(combined_contacts, plant_manager):
+                if plant_manager and not contacts_match(
+                    combined_contacts, plant_manager
+                ):
                     continue
 
+                latest_review = (
+                    max(relation.committee_reviews, key=lambda r: r.initiated_at or "")
+                    if relation.committee_reviews
+                    else None
+                )
                 relation_entries.append(
                     schemas.SitePanelRelationResponse(
                         relation=relation_schemas.SupplierRelationSummaryResponse.model_validate(
                             relation
                         ),
-                        unit=supplier_schemas.SupplierUnitResponse.model_validate(
-                            unit
-                        ),
+                        unit=supplier_schemas.SupplierUnitResponse.model_validate(unit),
                         group=supplier_schemas.SupplierGroupResponse.model_validate(
                             group
                         ),
                         group_categories=categories,
+                        has_development_plan=len(relation.development_plans) > 0,
+                        development_plan_status=(
+                            relation.development_plans[0].plan_status
+                            if relation.development_plans
+                            else None
+                        ),
+                        committee_review_status=(
+                            f"final_{latest_review.final_decision}"
+                            if latest_review and latest_review.final_decision
+                            else "pending_final"
+                            if latest_review and latest_review.status == "completed"
+                            else latest_review.status
+                            if latest_review
+                            else None
+                        ),
                     )
                 )
 
@@ -227,10 +259,10 @@ class SiteService:
             "skip": skip,
             "limit": limit,
         }
-    
+
     async def list_site_options(self):
         return await self.repo.find_options()
-    
+
     async def create_site(self, data: schemas.SiteCreate):
         site_data = data.model_dump(exclude_unset=True)
 
