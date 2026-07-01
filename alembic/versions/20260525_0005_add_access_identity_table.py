@@ -59,10 +59,18 @@ def upgrade() -> None:
             (
                 'olivier.grimaud@avocarbon.com',
             'Olivier GRIMAUD',
-                'purchasing_manager',
+                'vp_conversion',
                 '$pbkdf2-sha256$29000$0pqTMkYopdS6t/Z.zzmHkA$6UfUl5443TSAn3Fck2GQ7aXAMO.FWH4v0/ZyYDJa2Kg',
                 'local',
                 TRUE
+            ),
+            (
+            'jiehua.zhang@avocarbon.com',
+            'Jiehua ZHANG',
+            'purchasing_director',
+            '$pbkdf2-sha256$29000$0pqTMkYopdS6t/Z.zzmHkA$6UfUl5443TSAn3Fck2GQ7aXAMO.FWH4v0/ZyYDJa2Kg',
+            'local',
+            TRUE
             ),
             (
                 'supplier.owner@avocarbon.com',
