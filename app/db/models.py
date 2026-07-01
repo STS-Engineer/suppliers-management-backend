@@ -12,10 +12,12 @@ from decimal import Decimal
 from typing import Optional, List
 
 from sqlalchemy import (
+    and_,
     DateTime,
     String,
     Text,
     func,
+    text,
     Integer,
     BigInteger,
     Boolean,
@@ -172,6 +174,9 @@ class SupplierGroup(GovernanceMixin, Base):
         Boolean, server_default="false", nullable=False
     )
     strategic_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    validation_status: Mapped[str] = mapped_column(
+        String(20), server_default="approved", nullable=False
+    )
 
     units: Mapped[List["SupplierUnit"]] = relationship(
         back_populates="group", cascade="all, delete-orphan", passive_deletes=True
@@ -221,30 +226,6 @@ class SupplierGroup(GovernanceMixin, Base):
             for link in self.category_links
             if link.category and link.category.category_label
         ]
-
-    @property
-    def strategique(self) -> Optional[bool]:
-        return None
-
-    @strategique.setter
-    def strategique(self, value: Optional[bool]) -> None:
-        self._legacy_group_strategique = value
-
-    @property
-    def monopolistique(self) -> Optional[bool]:
-        return None
-
-    @monopolistique.setter
-    def monopolistique(self, value: Optional[bool]) -> None:
-        self._legacy_group_monopolistique = value
-
-    @property
-    def directed(self) -> bool:
-        return False
-
-    @directed.setter
-    def directed(self, value: Optional[bool]) -> None:
-        self._legacy_group_directed = value
 
     @property
     def group_code(self) -> Optional[str]:
@@ -307,6 +288,7 @@ class SupplierUnit(TimestampMixin, GovernanceMixin, Base):
     product_type: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     product_category: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     # Product classification (comma-separated multi-value)
+    commodity: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     family: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     sub_family: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     product_line: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
@@ -314,18 +296,8 @@ class SupplierUnit(TimestampMixin, GovernanceMixin, Base):
     website: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     carbon_footprint: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     green_electricity_pct: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
-    copper_brass_pct: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
-    category: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     continent: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     area: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
-    main_plants: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    supplier_email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    commodity_responsible: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
-    scope1_ghg: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 4), nullable=True)
-    scope2_ghg: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 4), nullable=True)
-    ghg_comments: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    ghg_requested_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
-    ghg_completion_pct: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     amount_value: Mapped[Optional[Decimal]] = mapped_column(
         Numeric(18, 2), nullable=True
     )
@@ -441,6 +413,9 @@ class SupplierSiteRelation(GovernanceMixin, Base):
     created_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime, server_default=func.current_timestamp(), nullable=True
     )
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, server_default="true", nullable=False
+    )
     inactivated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     last_status_change: Mapped[Optional[datetime]] = mapped_column(
         DateTime, nullable=True
@@ -448,6 +423,13 @@ class SupplierSiteRelation(GovernanceMixin, Base):
     evaluation_draft: Mapped[Optional[dict]] = mapped_column(
         JSONB, nullable=True
     )
+    validation_status: Mapped[Optional[str]] = mapped_column(
+        String(50), nullable=True, server_default="draft"
+    )
+    submitted_for_review_by: Mapped[Optional[str]] = mapped_column(
+        String(200), nullable=True
+    )
+    review_comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     site: Mapped["AvocarbonSite"] = relationship(back_populates="supplier_relations")
     supplier_unit: Mapped["SupplierUnit"] = relationship(
@@ -531,12 +513,61 @@ class SupplierSiteRelation(GovernanceMixin, Base):
     carbon_footprints: Mapped[List["SupplierCarbonFootprint"]] = relationship(
         back_populates="relation",
     )
+    committee_reviews: Mapped[List["CommitteeReview"]] = relationship(
+        back_populates="relation", cascade="all, delete-orphan", passive_deletes=True
+    )
+    spend_by_year: Mapped[List["SupplierSpendByYear"]] = relationship(
+        back_populates="relation",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="SupplierSpendByYear.fiscal_year.desc()",
+    )
+
+    @classmethod
+    def panel_active_filter(cls):
+        """Return a compound SQLAlchemy clause for all panel-active relation checks.
+
+        Usage: .where(SupplierSiteRelation.panel_active_filter())
+        """
+        from app.core.constants import PANEL_ACTIVE_DECISIONS
+        return and_(
+            cls.panel_decision.in_(PANEL_ACTIVE_DECISIONS),
+            cls.validation_status == "approved",
+            cls.is_active.is_(True),
+            cls.is_deleted.is_(False),
+        )
 
     def __repr__(self) -> str:
         return (
             f"<SupplierSiteRelation id={self.id_relation} "
             f"site={self.id_site} unit={self.id_supplier_unit}>"
         )
+
+
+class SupplierSpendByYear(Base):
+    """Annual purchasing spend for a supplier-site relation, tracked per fiscal year."""
+
+    __tablename__ = "supplier_spend_by_year"
+    __table_args__ = (
+        UniqueConstraint("id_relation", "fiscal_year", name="uq_spend_relation_year"),
+    )
+
+    id_spend: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id_relation: Mapped[int] = mapped_column(
+        ForeignKey("supplier_site_relation.id_relation", ondelete="CASCADE"),
+        nullable=False,
+    )
+    fiscal_year: Mapped[int] = mapped_column(Integer, nullable=False)
+    spend_value: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False)
+    spend_currency: Mapped[str] = mapped_column(String(10), nullable=False, default="EUR")
+    created_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, server_default=func.current_timestamp(), nullable=True
+    )
+    created_by: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    updated_by: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+
+    relation: Mapped["SupplierSiteRelation"] = relationship(back_populates="spend_by_year")
 
 
 class SupplierCarbonFootprint(Base):
@@ -821,7 +852,6 @@ class Document(TimestampMixin, GovernanceMixin, Base):
     original_file_name: Mapped[Optional[str]] = mapped_column(
         String(255), nullable=True
     )
-    file_path: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     file_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     mime_type: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     file_size: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2), nullable=True)
@@ -839,14 +869,6 @@ class Document(TimestampMixin, GovernanceMixin, Base):
         String(50), server_default="Uploaded", nullable=False
     )
     comments: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    # Document-control fields (added by previous migration)
-    document_owner: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
-    controlled_document: Mapped[bool] = mapped_column(
-        Boolean, server_default="false", nullable=False
-    )
-    retention_code: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
-    review_due_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
-    expiry_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
     file_hash_sha256: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     storage_provider: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     storage_object_key: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -873,12 +895,6 @@ class Document(TimestampMixin, GovernanceMixin, Base):
     )
     assessments: Mapped[List["SupplierAssessment"]] = relationship(
         back_populates="document"
-    )
-    revisions: Mapped[List["DocumentRevision"]] = relationship(
-        back_populates="document", cascade="all, delete-orphan", passive_deletes=True
-    )
-    approvals: Mapped[List["DocumentApproval"]] = relationship(
-        back_populates="document", cascade="all, delete-orphan", passive_deletes=True
     )
     import_batches: Mapped[List["ImportBatch"]] = relationship(
         back_populates="document"
@@ -947,12 +963,6 @@ class EvaluationCycle(TimestampMixin, GovernanceMixin, Base):
         back_populates="cycle"
     )
     kpi_details: Mapped[List["ScorecardKpiDetail"]] = relationship(
-        back_populates="cycle"
-    )
-    upload_registers: Mapped[List["ScorecardUploadRegister"]] = relationship(
-        back_populates="cycle"
-    )
-    data_quality_checks: Mapped[List["ScorecardDataQualityCheck"]] = relationship(
         back_populates="cycle"
     )
     input_otd: Mapped[List["InputOtdMonthly"]] = relationship(back_populates="cycle")
@@ -1309,71 +1319,6 @@ class ScorecardKpiDetail(TimestampMixin, GovernanceMixin, Base):
     )
     relation: Mapped[Optional["SupplierSiteRelation"]] = relationship(
         back_populates="scorecard_kpi_details"
-    )
-
-
-class ScorecardUploadRegister(TimestampMixin, GovernanceMixin, Base):
-    __tablename__ = "scorecard_upload_register"
-
-    id_upload_register: Mapped[int] = mapped_column(
-        Integer, primary_key=True, autoincrement=True
-    )
-    id_cycle: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("evaluation_cycle.id_cycle", ondelete="SET NULL"), nullable=True
-    )
-    id_document: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("document.id_document", ondelete="SET NULL"), nullable=True
-    )
-    reporting_period: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
-    plant: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
-    dataset: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
-    owner_function: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
-    contact: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
-    due_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
-    upload_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
-    filename: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    # FIX: removed extra quotes from server_default
-    validation_status: Mapped[str] = mapped_column(
-        String(50), server_default="Pending", nullable=False
-    )
-    plant_approval: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
-    comments: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    timeliness_flag: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
-
-    cycle: Mapped[Optional["EvaluationCycle"]] = relationship(
-        back_populates="upload_registers"
-    )
-
-
-class ScorecardDataQualityCheck(TimestampMixin, GovernanceMixin, Base):
-    __tablename__ = "scorecard_data_quality_checks"
-
-    id_check: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    id_cycle: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("evaluation_cycle.id_cycle", ondelete="SET NULL"), nullable=True
-    )
-    id_document: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("document.id_document", ondelete="SET NULL"), nullable=True
-    )
-    dataset: Mapped[str] = mapped_column(String(150), nullable=False)
-    check_name: Mapped[str] = mapped_column(String(200), nullable=False)
-    check_description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    metric_value: Mapped[Optional[Decimal]] = mapped_column(
-        Numeric(18, 4), nullable=True
-    )
-    target_operator: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
-    target_value: Mapped[Optional[Decimal]] = mapped_column(
-        Numeric(18, 4), nullable=True
-    )
-    check_status: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
-    formula_reference: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    comments: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    checked_at: Mapped[Optional[datetime]] = mapped_column(
-        DateTime, server_default=func.current_timestamp(), nullable=True
-    )
-
-    cycle: Mapped[Optional["EvaluationCycle"]] = relationship(
-        back_populates="data_quality_checks"
     )
 
 
@@ -1788,105 +1733,6 @@ class ImportBatch(Base):
     )
 
 
-class DocumentRevision(Base):
-    __tablename__ = "document_revision"
-    __table_args__ = (Index("idx_document_revision_document", "id_document"),)
-
-    id_document_revision: Mapped[int] = mapped_column(
-        BigInteger, primary_key=True, autoincrement=True
-    )
-    id_document: Mapped[int] = mapped_column(
-        ForeignKey("document.id_document", ondelete="CASCADE"), nullable=False
-    )
-    revision_code: Mapped[str] = mapped_column(String(50), nullable=False)
-    revision_date: Mapped[datetime] = mapped_column(
-        DateTime, server_default=func.current_timestamp(), nullable=False
-    )
-    changed_by: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
-    change_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    file_hash_sha256: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
-    file_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    is_current: Mapped[bool] = mapped_column(
-        Boolean, server_default="true", nullable=False
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime, server_default=func.current_timestamp(), nullable=False
-    )
-
-    document: Mapped["Document"] = relationship(back_populates="revisions")
-
-
-class DocumentApproval(Base):
-    __tablename__ = "document_approval"
-    __table_args__ = (Index("idx_document_approval_document", "id_document"),)
-
-    id_document_approval: Mapped[int] = mapped_column(
-        BigInteger, primary_key=True, autoincrement=True
-    )
-    id_document: Mapped[int] = mapped_column(
-        ForeignKey("document.id_document", ondelete="CASCADE"), nullable=False
-    )
-    approval_step: Mapped[int] = mapped_column(Integer, nullable=False)
-    approver_role: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
-    approver_email: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
-    # FIX: removed extra quotes from server_default
-    decision: Mapped[str] = mapped_column(
-        String(50), server_default="Pending", nullable=False
-    )
-    decision_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
-    decision_comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime, server_default=func.current_timestamp(), nullable=False
-    )
-
-    document: Mapped["Document"] = relationship(back_populates="approvals")
-
-
-class RecordRetentionPolicy(Base):
-    __tablename__ = "record_retention_policy"
-    __table_args__ = (
-        UniqueConstraint("retention_code", name="uq_retention_policy_code"),
-    )
-
-    id_retention_policy: Mapped[int] = mapped_column(
-        Integer, primary_key=True, autoincrement=True
-    )
-    retention_code: Mapped[str] = mapped_column(String(100), nullable=False)
-    record_category: Mapped[str] = mapped_column(String(150), nullable=False)
-    retention_years: Mapped[int] = mapped_column(Integer, nullable=False)
-    legal_hold_required: Mapped[bool] = mapped_column(
-        Boolean, server_default="false", nullable=False
-    )
-    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime, server_default=func.current_timestamp(), nullable=False
-    )
-
-
-class ElectronicSignature(Base):
-    __tablename__ = "electronic_signature"
-    __table_args__ = (
-        Index("idx_signature_object", "signed_object_type", "signed_object_id"),
-    )
-
-    id_signature: Mapped[int] = mapped_column(
-        BigInteger, primary_key=True, autoincrement=True
-    )
-    signed_object_type: Mapped[str] = mapped_column(String(100), nullable=False)
-    signed_object_id: Mapped[str] = mapped_column(String(255), nullable=False)
-    signature_meaning: Mapped[str] = mapped_column(String(150), nullable=False)
-    signed_by: Mapped[str] = mapped_column(String(200), nullable=False)
-    signed_at: Mapped[datetime] = mapped_column(
-        DateTime, server_default=func.current_timestamp(), nullable=False
-    )
-    signature_hash: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
-    authentication_method: Mapped[Optional[str]] = mapped_column(
-        String(100), nullable=True
-    )
-    reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    source_ip: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
-
-
 class SupplierActionPlan(GovernanceMixin, Base):
     """
     FIX: now inherits GovernanceMixin instead of duplicating columns inline.
@@ -2050,7 +1896,6 @@ class Opportunity(GovernanceMixin, Base):
     validation_decision: Mapped[Optional[str]] = mapped_column(
         String(255), nullable=True
     )
-    status2: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     change_mode: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     # Transaction currency of the monetary figures + rate to the group reporting
     # currency (EUR). Consolidated views convert via amount × fx_rate_to_eur.
@@ -2071,10 +1916,8 @@ class Opportunity(GovernanceMixin, Base):
         Numeric(10, 2), nullable=True
     )
     priority_category: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    priority_locked: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True, default=False)
     comments: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    lead_time: Mapped[Optional[int]] = mapped_column(
-        "Lead_time", Integer, nullable=True
-    )
     cash_impact: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2), nullable=True)
     validation_request_sent_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     validation_request_sent_by: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
@@ -2568,8 +2411,30 @@ class OpportunityBudgetYear(GovernanceMixin, Base):
     # Explanation of delta between EOY forecast and budget baseline for KPI chart
     # Allowed values: see DELTA_REASON_VALUES in schemas.py; multi-valued (TEXT[])
     delta_reason: Mapped[Optional[list]] = mapped_column(ARRAY(Text), nullable=True)
+    # True when this row was created AFTER the budget for fiscal_year was officially closed.
+    # Such rows represent post-closure additions ("Additional Opportunity") and are shown
+    # separately in the Budgeting page to preserve the historical baseline integrity.
+    is_additional: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false"), default=False
+    )
 
     opportunity: Mapped["Opportunity"] = relationship(back_populates="budget_years")
+
+
+class BudgetYearClosure(Base):
+    """Records when a director officially closes a fiscal-year budget.
+
+    Once a FY is closed, any new OpportunityBudgetYear row created for that FY is
+    automatically flagged `is_additional = True` so Finance can track post-closure
+    additions separately from the original committed baseline.
+    """
+
+    __tablename__ = "budget_year_closure"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    fiscal_year: Mapped[int] = mapped_column(Integer, nullable=False, unique=True)
+    closed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    closed_by: Mapped[str] = mapped_column(String(200), nullable=False)
 
 
 class EmailDeliveryHistory(Base):
@@ -2646,8 +2511,6 @@ __all__ = [
     "OperationalEvaluationInput",
     "ImpactEvaluationInput",
     "ScorecardKpiDetail",
-    "ScorecardUploadRegister",
-    "ScorecardDataQualityCheck",
     "PldScoringRules",
     "InputOtdMonthly",
     "InputQualityClaims",
@@ -2660,10 +2523,6 @@ __all__ = [
     # Domain 3b — Governance / IATF Evidence
     "AuditEvent",
     "ImportBatch",
-    "DocumentRevision",
-    "DocumentApproval",
-    "RecordRetentionPolicy",
-    "ElectronicSignature",
     "SupplierActionPlan",
     "SupplierActionPlanTask",
     "UserRoleAssignment",
@@ -2672,5 +2531,92 @@ __all__ = [
     "Project",
     "FinancialLine",
     "MonthlyFinancial",
+    # Domain 5 — Committee Review
+    "CommitteeMember",
+    "CommitteeReview",
+    "CommitteeDecision",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Domain 5 — Committee Review Workflow
+# ---------------------------------------------------------------------------
+
+
+class CommitteeMember(Base):
+    """Configurable list of committee members who vote on panel decisions."""
+    __tablename__ = "committee_member"
+
+    id_member: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    position: Mapped[str] = mapped_column(String(100), nullable=False)
+    email: Mapped[str] = mapped_column(String(200), nullable=False, unique=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, server_default=func.current_timestamp(), nullable=True
+    )
+
+
+class CommitteeReview(Base):
+    """One review process per relation per committee cycle."""
+    __tablename__ = "committee_review"
+
+    id_review: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id_relation: Mapped[int] = mapped_column(
+        ForeignKey("supplier_site_relation.id_relation", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    # pending | in_progress | completed
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="pending")
+    initiated_by: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    initiated_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, server_default=func.current_timestamp(), nullable=True
+    )
+    all_decided_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    # approved | rejected
+    final_decision: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    final_decision_by: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    final_decision_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    final_decision_comments: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # snapshot of supplier info sent with emails
+    supplier_snapshot: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+
+    relation: Mapped["SupplierSiteRelation"] = relationship(
+        "SupplierSiteRelation", back_populates="committee_reviews"
+    )
+    decisions: Mapped[List["CommitteeDecision"]] = relationship(
+        "CommitteeDecision",
+        back_populates="review",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
+
+
+class CommitteeDecision(Base):
+    """One decision record per committee member per review."""
+    __tablename__ = "committee_decision"
+
+    id_decision: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id_review: Mapped[int] = mapped_column(
+        ForeignKey("committee_review.id_review", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    member_email: Mapped[str] = mapped_column(String(200), nullable=False)
+    member_name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    member_position: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    # UUID token for secure public link
+    access_token: Mapped[str] = mapped_column(String(36), nullable=False, unique=True, index=True)
+    token_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    accessed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    # approved | rejected | None (pending)
+    decision: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    comments: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    decided_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    ip_address: Mapped[Optional[str]] = mapped_column(String(45), nullable=True)
+    suggested_supplier_status: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    suggested_strategic_mention: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+
+    review: Mapped["CommitteeReview"] = relationship(
+        "CommitteeReview", back_populates="decisions"
+    )
 
