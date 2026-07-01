@@ -88,7 +88,7 @@ async def _send_notifications(db: AsyncSession) -> dict:
     svc = NotificationService(db)
     for identity in recipients:
         await svc.create_notification(
-            recipient_id=identity.id,
+            recipient_id=identity.id_identity,
             notification_type="evaluation_due",
             title=f"Supplier evaluations require attention — {', '.join(parts)}",
             body=(

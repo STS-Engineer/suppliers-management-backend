@@ -23,13 +23,19 @@ async def lifespan(_app: FastAPI):
     from app.features.evaluations.listener import start_listener, stop_listener
 
     # 1. Pick up any jobs pg_cron inserted while the app was down/restarting
-    async with SessionLocal() as db:
-        missed = await process_pending_jobs(db)
-        if missed:
-            logger.info("Processed %d missed evaluation notification job(s) on startup", missed)
+    try:
+        async with SessionLocal() as db:
+            missed = await process_pending_jobs(db)
+            if missed:
+                logger.info("Processed %d missed evaluation notification job(s) on startup", missed)
+    except Exception as exc:
+        logger.warning("Startup eval-job scan skipped (migration may be pending): %s", exc)
 
     # 2. Listen for pg_notify('eval_due') fired by pg_cron at 08:00
-    start_listener()
+    try:
+        start_listener()
+    except Exception as exc:
+        logger.warning("eval_due listener could not start: %s", exc)
 
     yield
 
