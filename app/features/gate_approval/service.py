@@ -41,6 +41,51 @@ class GateApprovalService:
         if opp.status == "Cancelled":
             raise AppException(400, "Cannot request approval for a cancelled opportunity.", "OPP_CANCELLED")
 
+        _GATE_ELIGIBLE_PHASES = ("Phase 0", "Phase 1", "Phase 2", "Phase 3")
+        if opp.phase_status not in _GATE_ELIGIBLE_PHASES:
+            raise AppException(
+                400,
+                f"Gate approval is not applicable in phase '{opp.phase_status}'. "
+                "Only Phase 0-3 opportunities can go through gate approval.",
+                "INVALID_PHASE_FOR_APPROVAL",
+            )
+
+        if opp.phase_status == "Phase 0" and opp.status not in (
+            "Working on it", "Needs Rework", "Awaiting Validation"
+        ):
+            raise AppException(
+                400,
+                "Cannot request approval: Phase 0 opportunity must be in 'Working on it' or 'Needs Rework' status.",
+                "INVALID_PHASE_FOR_APPROVAL",
+            )
+
+        # STP completeness check — non-Negotiation/Cash types must have all key sections filled
+        NO_STP_TYPES = {"Negotiation", "Cash"}
+        if opp.phase_status == "Phase 0" and opp.opportunity_type not in NO_STP_TYPES:
+            stp_risks = opp.stp_risks or {}
+            stp_benefits = opp.stp_benefits or {}
+            missing: list[str] = []
+            if not (opp.scope_in and opp.customers):
+                missing.append("Scope (Scope IN + Customers)")
+            if not (opp.annual_quantity_n1 and float(opp.annual_quantity_n1) > 0):
+                missing.append("Quantities (Annual N1)")
+            if not (opp.current_price and opp.proposed_price):
+                missing.append("Prices (Before/After)")
+            if not (opp.incoterms_before and opp.incoterms_after and opp.country_after):
+                missing.append("Logistics (Incoterms + Country after)")
+            if not (stp_risks.get("material_indexation_before") and stp_risks.get("material_indexation_after")):
+                missing.append("Risks (Material indexation Before/After)")
+            if not (stp_benefits.get("if_we_do") or stp_benefits.get("if_not")):
+                missing.append("Benefits (If we do)")
+            if not (opp.phase1_weeks and int(opp.phase1_weeks) > 0):
+                missing.append("Planning (Phase 1 weeks)")
+            if missing:
+                raise AppException(
+                    422,
+                    f"STP format incomplete. Please fill all required sections before sending an approval request: {', '.join(missing)}",
+                    "STP_INCOMPLETE",
+                )
+
         now = datetime.utcnow()
 
         # Close any previously open request for this opportunity before creating a new one
@@ -71,14 +116,36 @@ class GateApprovalService:
         self.db.add(req)
         await self.db.flush()  # get request_id
 
+        # Transition opportunity to "Awaiting Validation" for all gate-eligible phases
+        # so the UI shows the correct state while votes are being collected.
+        if opp.phase_status in _GATE_ELIGIBLE_PHASES and opp.status in ("Working on it", "Needs Rework"):
+            opp.status = "Awaiting Validation"
+            opp.validation_request_sent_at = now
+            opp.validation_request_sent_by = requested_by
+
         email_svc = get_email_service()
         expires_at = now + timedelta(hours=TOKEN_TTL_HOURS)
 
-        # All approvers: plant manager first (flagged), then purchasing managers
-        all_approvers = [
+        # All approvers: plant manager first (flagged), then purchasing managers.
+        # Deduplicate by email so a person listed in both roles gets one vote row
+        # (as plant manager, which carries the PM designation responsibility).
+        seen_emails: set[str] = set()
+        all_approvers: list[tuple[str, bool]] = []
+        for email, is_pm in [
             (payload.plant_manager_email, True),
             *[(e, False) for e in payload.purchasing_manager_emails if e],
-        ]
+        ]:
+            if email and email not in seen_emails:
+                seen_emails.add(email)
+                all_approvers.append((email, is_pm))
+
+        if len(all_approvers) < 2:
+            raise AppException(
+                400,
+                "Gate approval requires at least 2 voters (Plant Manager + at least one Purchasing Manager). "
+                "A single approver cannot satisfy the segregation-of-duties requirement.",
+                "INSUFFICIENT_APPROVERS",
+            )
 
         for email, is_pm in all_approvers:
             token = str(uuid.uuid4())
@@ -330,13 +397,6 @@ class GateApprovalService:
                 return
             consensus = "Go"
 
-        req.consensus_result = consensus
-        req.status = "Completed"
-        req.applied_at = now
-        req.updated_at = now
-
-        await self.db.flush()
-
         if consensus == "Go":
             pm_email = plant_vote.project_manager_email if plant_vote else None
             gate_payload = GateDecisionRequest(
@@ -357,12 +417,23 @@ class GateApprovalService:
                 comments="Gate panel requested rework before re-submission.",
             )
 
+        # Apply the phase transition first — if it fails, let the exception propagate
+        # so the request is NOT marked Completed and stays correctable.
+        # _via_gate_approval=True bypasses the direct-call guard for Phase 1-3.
         pv_svc = PurchasingValueService(self.db)
-        try:
-            await pv_svc.apply_gate_decision(req.opportunity_id, gate_payload)
-            # Notify PM only after the phase advance actually succeeded
-            if consensus == "Go" and plant_vote and plant_vote.project_manager_email:
-                snap = req.opportunity_snapshot or {}
+        await pv_svc.apply_gate_decision(req.opportunity_id, gate_payload, _via_gate_approval=True)
+
+        # Phase transition succeeded — now seal the approval request.
+        req.consensus_result = consensus
+        req.status = "Completed"
+        req.applied_at = now
+        req.updated_at = now
+        await self.db.flush()
+
+        # PM email is best-effort; failure must not roll back the transition.
+        if consensus == "Go" and plant_vote and plant_vote.project_manager_email:
+            snap = req.opportunity_snapshot or {}
+            try:
                 self._notify_project_manager(
                     pm_email=plant_vote.project_manager_email,
                     opp_name=snap.get("opportunity_name") or "Opportunity",
@@ -371,8 +442,8 @@ class GateApprovalService:
                     idea_owner=snap.get("idea_owner") or "",
                     approver_email=plant_vote.approver_email or "",
                 )
-        except Exception:
-            pass  # Non-blocking — consensus is already recorded
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # Email HTML builder
@@ -387,11 +458,12 @@ class GateApprovalService:
     ) -> str:
         snap = req.opportunity_snapshot or {}
 
-        def fmt(v, suffix="") -> str:
+        def fmt(v, suffix="", decimals: int = 0) -> str:
             if v is None:
                 return "—"
             try:
-                return f"{float(v):,.0f}{suffix}"
+                fv = float(v)
+                return f"{fv:,.{decimals}f}{suffix}"
             except Exception:
                 return str(v)
 
@@ -402,8 +474,8 @@ class GateApprovalService:
             ("Owner (Idea)", snap.get("idea_owner") or "—"),
             ("Project Manager", snap.get("project_owner") or "—"),
             ("Change type", snap.get("change_mode") or "—"),
-            ("Current price", fmt(snap.get("current_price"), " €")),
-            ("Proposed price", fmt(snap.get("proposed_price"), " €")),
+            ("Current price", fmt(snap.get("current_price"), " €", 4)),
+            ("Proposed price", fmt(snap.get("proposed_price"), " €", 4)),
             ("Saving / year", fmt(snap.get("saving_year_n"), " €")),
             ("Period saving", fmt(snap.get("period_saving"), " €")),
             ("Planned start", snap.get("planned_start_date") or "—"),

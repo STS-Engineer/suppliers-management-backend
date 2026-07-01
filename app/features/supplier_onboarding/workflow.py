@@ -7,6 +7,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 
+# strategic = 3 months, global = 6 months, local = annually
+_SCOPE_FREQUENCY: dict[str, str] = {
+    "strategic": "Quarterly",
+    "global": "Semi-Annual",
+    "local": "Annual",
+}
+
 from app.db.models import (
     AssessmentTemplate,
     SupplierAssessment,
@@ -17,6 +24,7 @@ from app.db.models import (
     SupplierGroup,
     SupplierGroupCategory,
     SupplierSiteRelation,
+    SupplierSpendByYear,
     SupplierUnit,
     ScoreCard,
     Classification,
@@ -49,6 +57,7 @@ class SupplierOnboardingWorkflow:
         unit_contacts: Optional[List[Dict[str, Any]]] = None,
         annual_spend_value: Optional[Decimal] = None,
         annual_spend_currency: Optional[str] = None,
+        fiscal_year: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Complete supplier onboarding workflow:
@@ -108,6 +117,7 @@ class SupplierOnboardingWorkflow:
                 evaluation=evaluation,
                 annual_spend_value=annual_spend_value,
                 annual_spend_currency=annual_spend_currency,
+                fiscal_year=fiscal_year,
             )
 
             # Step 4b: Sync quality cert criteria detail from certs just created
@@ -265,7 +275,8 @@ class SupplierOnboardingWorkflow:
         group_name = str(group_data.get("nom") or "").strip()
         if group_name:
             existing_group_stmt = select(SupplierGroup).where(
-                SupplierGroup.nom == group_name
+                SupplierGroup.nom == group_name,
+                SupplierGroup.is_deleted.is_(False),
             )
             existing_group = (
                 await self.db.execute(existing_group_stmt)
@@ -282,6 +293,7 @@ class SupplierOnboardingWorkflow:
             existing_unit_stmt = select(SupplierUnit).where(
                 SupplierUnit.id_group == unit_group_id,
                 SupplierUnit.supplier_code == supplier_code,
+                SupplierUnit.is_deleted.is_(False),
             )
             existing_unit = (
                 await self.db.execute(existing_unit_stmt)
@@ -296,8 +308,9 @@ class SupplierOnboardingWorkflow:
         prepared_unit_data = self._prepare_unit_payload(unit_data, group_data)
         categories = self._extract_categories(group_data.get("supplier_type"))
 
-        # Create group
+        # Create group — always starts as pending until a purchasing manager approves
         group = SupplierGroup(**prepared_group_data)
+        group.validation_status = "pending"
         self.db.add(group)
         await self.db.flush()
         await self._replace_group_categories(group.id_group, categories)
@@ -351,6 +364,7 @@ class SupplierOnboardingWorkflow:
         evaluation: Optional[Dict[str, Any]] = None,
         annual_spend_value: Optional[Decimal] = None,
         annual_spend_currency: Optional[str] = None,
+        fiscal_year: Optional[int] = None,
     ) -> SupplierSiteRelation:
         """Create supplier-site relation with owner and classification."""
         existing_stmt = select(SupplierSiteRelation).where(
@@ -371,9 +385,9 @@ class SupplierOnboardingWorkflow:
             "buyer_owner": buyer_owner,
             "global_status": supplier_scope,
             "supplier_status": "Active",
-            "evaluation_frequency": "Quarterly"
-            if supplier_scope == "strategic"
-            else "Annual",
+            "evaluation_frequency": _SCOPE_FREQUENCY.get(
+                (supplier_scope or "local").lower(), "Quarterly"
+            ),
             "last_status_change": datetime.now(),
         }
         if annual_spend_value is not None:
@@ -414,6 +428,21 @@ class SupplierOnboardingWorkflow:
         relation = SupplierSiteRelation(**relation_data)
         self.db.add(relation)
         await self.db.flush()
+
+        # Create the initial spend-by-year entry when both value and year are supplied.
+        # The legacy annual_spend_value on the relation is kept for backward compat
+        # but SupplierSpendByYear is the authoritative source going forward.
+        if annual_spend_value is not None and fiscal_year is not None:
+            spend_entry = SupplierSpendByYear(
+                id_relation=relation.id_relation,
+                fiscal_year=fiscal_year,
+                spend_value=annual_spend_value,
+                spend_currency=annual_spend_currency or "EUR",
+                created_by=buyer_owner,
+            )
+            self.db.add(spend_entry)
+            await self.db.flush()
+
         return relation
 
     async def _launch_prequalification(
