@@ -14,13 +14,26 @@ from app.core.logging import logger
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(_app: FastAPI):
     """Application lifespan events."""
-
     logger.info("Starting Supplier Management API")
+
+    from app.db.session import SessionLocal
+    from app.features.evaluations.scheduler import process_pending_jobs
+    from app.features.evaluations.listener import start_listener, stop_listener
+
+    # 1. Pick up any jobs pg_cron inserted while the app was down/restarting
+    async with SessionLocal() as db:
+        missed = await process_pending_jobs(db)
+        if missed:
+            logger.info("Processed %d missed evaluation notification job(s) on startup", missed)
+
+    # 2. Listen for pg_notify('eval_due') fired by pg_cron at 08:00
+    start_listener()
 
     yield
 
+    await stop_listener()
     logger.info("Shutting down Supplier Management API")
 
 
