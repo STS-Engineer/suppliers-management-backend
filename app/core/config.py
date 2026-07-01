@@ -74,7 +74,22 @@ class Settings(BaseSettings):
 
     SQLALCHEMY_ECHO: bool = False
 
-    FRONTEND_BASE_URL: str = "http://localhost:5173"
+    FRONTEND_BASE_URL: str = (
+        "https://avo-supplier-management.azurewebsites.net/"  # "http://localhost:5173"
+    )
+
+    # Auth flows
+    OTP_EXPIRE_MINUTES: int = 15
+    ACTIVATION_LINK_EXPIRE_HOURS: int = 48
+    # Comma-separated list of access_profile values that may approve account requests.
+    APPROVER_ROLES: str = (
+        "purchasing_manager,purchasing_director,vp_conversion,supplier_owner"
+    )
+
+    ACTION_PLAN_API_URL: str = Field(
+        default="https://sales-feedback.azurewebsites.net",
+        validation_alias=AliasChoices("ACTION_PLAN_API_URL", "action_plan_api_url"),
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -101,6 +116,10 @@ class Settings(BaseSettings):
             )
 
         return self.DATABASE_URL
+
+    @property
+    def approver_roles(self) -> list[str]:
+        return [r.strip() for r in self.APPROVER_ROLES.split(",") if r.strip()]
 
     @property
     def cors_origins(self) -> list[str]:
