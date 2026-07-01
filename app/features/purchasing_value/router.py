@@ -1,6 +1,6 @@
 """Purchasing value management router."""
 
-from fastapi import APIRouter, Depends, File, Form, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import Response
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
 from datetime import date
 
-from app.db.models import FinancialLine, Opportunity
+from app.db.models import FinancialLine, MonthlyFinancial, Opportunity
 
 from app.core.exceptions import AppException
 from app.features.purchasing_value import schemas
@@ -21,6 +21,14 @@ from app.shared.dependencies.db import get_db
 
 router = APIRouter(prefix="/purchasing-value", tags=["purchasing-value"])
 
+_PRIVILEGED = ["vp_conversion", "purchasing_director"]
+_NON_VIEWER = ["purchasing_manager", "vp_conversion", "purchasing_director", "supplier_owner", "global_purchaser", "local_purchaser"]
+
+
+def _require(current_user: dict, allowed: list[str]) -> None:
+    if current_user.get("access_profile", "") not in allowed:
+        raise HTTPException(status_code=403, detail="Insufficient permissions for this action.")
+
 
 @router.get("/kpis", response_model=dict)
 async def get_kpis(
@@ -31,9 +39,23 @@ async def get_kpis(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
+    def _parse_ints(raw: Optional[str]) -> list[int]:
+        result = []
+        for token in (raw or "").split(","):
+            token = token.strip()
+            if token:
+                try:
+                    result.append(int(token))
+                except ValueError:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"Invalid plant_ids value: '{token}' is not an integer.",
+                    )
+        return result
+
     filters = KpiFilters(
         year=year,
-        plant_ids=[int(p) for p in plant_ids.split(",") if p.strip()] if plant_ids else [],
+        plant_ids=_parse_ints(plant_ids),
         categories=[c.strip() for c in categories.split(",") if c.strip()] if categories else [],
         buyer_emails=[b.strip() for b in buyers.split(",") if b.strip()] if buyers else [],
     )
@@ -68,6 +90,7 @@ async def create_opportunity(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
+    _require(current_user, _NON_VIEWER)
     try:
         svc = PurchasingValueService(db)
         opp = await svc.create_opportunity(payload)
@@ -101,6 +124,7 @@ async def update_opportunity(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
+    _require(current_user, _NON_VIEWER)
     try:
         svc = PurchasingValueService(db)
         await svc.update_opportunity(opportunity_id, payload)
@@ -124,6 +148,7 @@ async def request_stp_revision(
     current_user: dict = Depends(get_current_user),
 ):
     """Buyer submits proposed STP price/volume changes for Director approval (Phase 2/3)."""
+    _require(current_user, _NON_VIEWER)
     try:
         svc = PurchasingValueService(db)
         await svc.request_stp_revision(opportunity_id, payload)
@@ -146,6 +171,7 @@ async def decide_stp_revision(
     current_user: dict = Depends(get_current_user),
 ):
     """Purchasing Director approves or rejects a pending STP revision request."""
+    _require(current_user, _PRIVILEGED)
     try:
         svc = PurchasingValueService(db)
         await svc.decide_stp_revision(opportunity_id, payload)
@@ -167,6 +193,7 @@ async def start_study(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
+    _require(current_user, _NON_VIEWER)
     try:
         svc = PurchasingValueService(db)
         await svc.start_study(opportunity_id, payload)
@@ -191,6 +218,7 @@ async def submit_for_validation(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
+    _require(current_user, _NON_VIEWER)
     try:
         svc = PurchasingValueService(db)
         await svc.submit_for_validation(opportunity_id, payload)
@@ -216,6 +244,7 @@ async def submit_to_committee(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
+    _require(current_user, _NON_VIEWER)
     try:
         svc = PurchasingValueService(db)
         await svc.submit_to_committee(opportunity_id, payload)
@@ -241,6 +270,7 @@ async def apply_gate_decision(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
+    _require(current_user, _PRIVILEGED)
     try:
         svc = PurchasingValueService(db)
         await svc.apply_gate_decision(opportunity_id, payload)
@@ -280,6 +310,7 @@ async def send_validation_request(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
+    _require(current_user, _NON_VIEWER)
     try:
         svc = PurchasingValueService(db)
         await svc.send_validation_request(opportunity_id, payload)
@@ -310,6 +341,7 @@ async def update_project(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
+    _require(current_user, _NON_VIEWER)
     try:
         svc = PurchasingValueService(db)
         proj = await svc.update_project(project_id, payload)
@@ -333,6 +365,7 @@ async def escalate_financial_line(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
+    _require(current_user, _PRIVILEGED)
     try:
         svc = PurchasingValueService(db)
         line = await svc.escalate_financial_line(line_id, payload)
@@ -355,6 +388,7 @@ async def deescalate_financial_line(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
+    _require(current_user, _PRIVILEGED)
     try:
         svc = PurchasingValueService(db)
         line = await svc.deescalate_financial_line(line_id, None)
@@ -378,6 +412,7 @@ async def set_recovery(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
+    _require(current_user, _NON_VIEWER)
     try:
         svc = PurchasingValueService(db)
         line = await svc.set_recovery(line_id, payload)
@@ -401,6 +436,7 @@ async def create_component_line(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
+    _require(current_user, _NON_VIEWER)
     try:
         svc = PurchasingValueService(db)
         line = await svc.create_component_line(opportunity_id, payload)
@@ -426,6 +462,7 @@ async def rebuild_monthly_profile(
     """Rebuild monthly expected rows using equal monthly distribution (annual ÷ duration,
     escalating per STP year-window where applicable). Use this to regenerate the monthly
     profile for an existing line after its baseline or start date changed."""
+    _require(current_user, _NON_VIEWER)
     try:
         from app.db.models import FinancialLine as FL
         from sqlalchemy import select
@@ -467,6 +504,7 @@ async def revise_financial_line_baseline(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
+    _require(current_user, _PRIVILEGED)
     try:
         svc = PurchasingValueService(db)
         line = await svc.revise_financial_line_baseline(
@@ -492,6 +530,7 @@ async def complete_financial_line(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
+    _require(current_user, _NON_VIEWER)
     try:
         svc = PurchasingValueService(db)
         line = await svc.complete_financial_line(line_id, payload)
@@ -515,6 +554,12 @@ async def update_monthly_actual(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
+    _require(current_user, _NON_VIEWER)
+    # If this month already has a recorded actual saving or cash value, it is a
+    # modification/supervision action — only privileged roles (PD / VPC) may overwrite it.
+    existing = await db.get(MonthlyFinancial, month_id)
+    if existing and (existing.actual_saving is not None or existing.cash_actual is not None):
+        _require(current_user, _PRIVILEGED)
     try:
         svc = PurchasingValueService(db)
         row = await svc.update_monthly_actual(month_id, payload)
@@ -679,6 +724,7 @@ async def upload_document(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
+    _require(current_user, _NON_VIEWER)
     try:
         svc = PurchasingValueService(db)
         doc = await svc.upload_document(
@@ -835,6 +881,7 @@ async def delete_document(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
+    _require(current_user, _NON_VIEWER)
     try:
         svc = PurchasingValueService(db)
         await svc.delete_document(doc_id)
@@ -861,30 +908,45 @@ async def list_budget_years(
     budgeting page (year filter)."""
     svc = PurchasingValueService(db)
     items = await svc.list_budget_years(fiscal_year)
+    closure = await svc.get_budget_year_closure(fiscal_year)
 
     # Consolidated totals are in EUR (group reporting currency) — opportunities may be
     # recorded in EUR/USD/RMB/INR, so we sum the EUR-converted amounts.
     def eur(i):
         return i.get("applicable_amount_eur") or 0
 
-    total = sum(eur(i) for i in items)
-    budgeted = sum(eur(i) for i in items if i["budget_status"] == "Budgeted")
-    opportunity = sum(eur(i) for i in items if i["budget_status"] == "Opportunity")
-    empty = sum(eur(i) for i in items if i["budget_status"] == "Empty")
-    validated = sum(eur(i) for i in items if i["suggested_status"] == "Validate")
+    baseline = [i for i in items if not i.get("is_additional")]
+    additional = [i for i in items if i.get("is_additional")]
+
+    # Finance-meaningful breakdowns
+    baseline_budgeted_eur = sum(eur(i) for i in baseline if i["budget_status"] == "Budgeted")
+    additional_accepted_eur = sum(eur(i) for i in additional if i["budget_status"] == "Budgeted")
+    total_budget_eur = baseline_budgeted_eur + additional_accepted_eur
+
     return {
         "status": "success",
         "data": {
             "items": items,
             "fiscal_year": fiscal_year,
             "reporting_currency": "EUR",
+            "closure": closure,
             "summary": {
                 "total": len(items),
-                "total_applicable": round(total, 2),
-                "total_budgeted": round(budgeted, 2),
-                "total_opportunity": round(opportunity, 2),
-                "total_empty": round(empty, 2),
-                "total_validated": round(validated, 2),
+                "total_baseline": len(baseline),
+                "total_additional": len(additional),
+                # Finance KPIs
+                "baseline_budgeted_eur": round(baseline_budgeted_eur, 2),
+                "additional_accepted_eur": round(additional_accepted_eur, 2),
+                "total_budget_eur": round(total_budget_eur, 2),
+                "additional_pending": sum(1 for i in additional if i["budget_status"] == "Opportunity"),
+                "additional_accepted": sum(1 for i in additional if i["budget_status"] == "Budgeted"),
+                "additional_rejected": sum(1 for i in additional if i["budget_status"] == "Empty"),
+                # Legacy totals kept for compatibility
+                "total_applicable": round(sum(eur(i) for i in items), 2),
+                "total_budgeted": round(sum(eur(i) for i in items if i["budget_status"] == "Budgeted"), 2),
+                "total_opportunity": round(sum(eur(i) for i in items if i["budget_status"] == "Opportunity"), 2),
+                "total_empty": round(sum(eur(i) for i in items if i["budget_status"] == "Empty"), 2),
+                "total_validated": round(sum(eur(i) for i in items if i["suggested_status"] == "Validate"), 2),
             },
         },
     }
@@ -900,6 +962,7 @@ async def assign_budget(
     """Create Budget — set each chosen opportunity's per-year budget status
     (Empty / Opportunity / Budgeted) for the given fiscal year. The decision is locked
     so it survives recompute."""
+    _require(current_user, _PRIVILEGED)
     decided_by = (
         payload.decided_by
         or current_user.get("email")
@@ -909,7 +972,286 @@ async def assign_budget(
     try:
         svc = PurchasingValueService(db)
         result = await svc.assign_budget_year(
-            fiscal_year, [d.model_dump() for d in payload.decisions], decided_by
+            fiscal_year,
+            [d.model_dump(exclude_unset=True) for d in payload.decisions],
+            decided_by,
+        )
+        await db.commit()
+        return {"status": "success", "data": result}
+    except AppException:
+        await db.rollback()
+        raise
+    except Exception:
+        await db.rollback()
+        raise
+
+
+@router.get("/budget-years/{fiscal_year}/closure", response_model=dict)
+async def get_budget_year_closure(
+    fiscal_year: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Return the closure record for a fiscal year, or null if not yet closed."""
+    svc = PurchasingValueService(db)
+    closure = await svc.get_budget_year_closure(fiscal_year)
+    return {"status": "success", "data": closure}
+
+
+@router.post("/budget-years/{fiscal_year}/close", response_model=dict)
+async def close_budget_year(
+    fiscal_year: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Officially close the budget for a fiscal year (director action).
+
+    - Creates a BudgetYearClosure record (idempotent-safe: 409 if already closed).
+    - Locks all Budgeted rows for this FY.
+    - From this point, any new opportunity row for this FY is flagged is_additional=True.
+    """
+    _require(current_user, _PRIVILEGED)
+    user_email = (
+        current_user.get("email")
+        or current_user.get("upn")
+        or current_user.get("sub")
+        or "unknown"
+    )
+    try:
+        svc = PurchasingValueService(db)
+        result = await svc.close_budget_year(fiscal_year, user_email)
+        await db.commit()
+        return {"status": "success", "data": result}
+    except AppException:
+        await db.rollback()
+        raise
+    except Exception:
+        await db.rollback()
+        raise
+
+
+@router.post("/budgets/{fiscal_year}/delta-reasons", response_model=dict)
+async def update_delta_reasons(
+    fiscal_year: int,
+    payload: schemas.DeltaReasonUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Update delta_reason only for a set of opportunities in a fiscal year.
+    Does not touch budget_status or lock timestamps."""
+    _require(current_user, _PRIVILEGED)
+    try:
+        svc = PurchasingValueService(db)
+        result = await svc.update_delta_reasons(
+            fiscal_year, [d.model_dump() for d in payload.decisions]
+        )
+        await db.commit()
+        return {"status": "success", "data": result}
+    except Exception:
+        await db.rollback()
+        raise
+
+
+# ── Opportunity Action Plans ───────────────────────────────────────────────
+
+
+@router.get("/opportunities/{opportunity_id}/action-plans", response_model=dict)
+async def list_action_plans(
+    opportunity_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    svc = PurchasingValueService(db)
+    plans = await svc.list_action_plans(opportunity_id)
+    from app.features.purchasing_value.schemas import ActionPlanResponse
+    return {
+        "status": "success",
+        "data": [ActionPlanResponse.model_validate(p).model_dump() for p in plans],
+    }
+
+
+@router.post("/opportunities/{opportunity_id}/action-plans", response_model=dict)
+async def create_action_plan(
+    opportunity_id: int,
+    payload: schemas.ActionPlanCreateRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, _NON_VIEWER)
+    user_email = (
+        current_user.get("email")
+        or current_user.get("upn")
+        or current_user.get("sub")
+        or "unknown"
+    )
+    try:
+        svc = PurchasingValueService(db)
+        plan = await svc.create_action_plan(opportunity_id, payload, user_email)
+        await db.commit()
+        from app.features.purchasing_value.schemas import ActionPlanResponse
+        return {"status": "success", "data": ActionPlanResponse.model_validate(plan).model_dump()}
+    except AppException:
+        await db.rollback()
+        raise
+    except Exception:
+        await db.rollback()
+        raise
+
+
+@router.put("/opportunities/{opportunity_id}/action-plans/{action_plan_id}", response_model=dict)
+async def update_action_plan(
+    opportunity_id: int,
+    action_plan_id: int,
+    payload: schemas.ActionPlanUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, _NON_VIEWER)
+    user_email = (
+        current_user.get("email")
+        or current_user.get("upn")
+        or current_user.get("sub")
+        or "unknown"
+    )
+    try:
+        svc = PurchasingValueService(db)
+        plan = await svc.update_action_plan(action_plan_id, payload, user_email)
+        await db.commit()
+        from app.features.purchasing_value.schemas import ActionPlanResponse
+        return {"status": "success", "data": ActionPlanResponse.model_validate(plan).model_dump()}
+    except AppException:
+        await db.rollback()
+        raise
+    except Exception:
+        await db.rollback()
+        raise
+
+
+@router.delete("/opportunities/{opportunity_id}/action-plans/{action_plan_id}", response_model=dict)
+async def delete_action_plan(
+    opportunity_id: int,
+    action_plan_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, _NON_VIEWER)
+    try:
+        svc = PurchasingValueService(db)
+        await svc.delete_action_plan(action_plan_id)
+        await db.commit()
+        return {"status": "success", "message": "Action plan deleted"}
+    except AppException:
+        await db.rollback()
+        raise
+    except Exception:
+        await db.rollback()
+        raise
+
+
+@router.post(
+    "/opportunities/{opportunity_id}/action-plans/{action_plan_id}/sync",
+    response_model=dict,
+)
+async def sync_action_plan(
+    opportunity_id: int,
+    action_plan_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Push a pending action plan to the external sales-feedback API.
+    Use this once ACTION_PLAN_DATABASE_URL is configured on Azure.
+    """
+    _require(current_user, _NON_VIEWER)
+    try:
+        svc = PurchasingValueService(db)
+        result = await svc.sync_action_plan(action_plan_id)
+        await db.commit()
+        return {"status": "success", "data": result}
+    except AppException:
+        await db.rollback()
+        raise
+    except Exception:
+        await db.rollback()
+        raise
+
+
+@router.get("/action-plans/all-items", response_model=dict)
+async def list_all_action_items(
+    responsible_email: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    opportunity_id: Optional[int] = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Cross-opportunity action item feed, flattened from all plan JSONB documents.
+    Optionally filtered by responsible person, action status, or specific opportunity.
+    """
+    svc = PurchasingValueService(db)
+    items = await svc.list_all_action_items(responsible_email, status, opportunity_id)
+    return {"status": "success", "data": items}
+
+
+@router.post(
+    "/opportunities/{opportunity_id}/action-plans/{action_plan_id}/evidence",
+    response_model=dict,
+)
+async def upload_action_evidence(
+    opportunity_id: int,
+    action_plan_id: int,
+    sujet_idx: int = Query(..., description="Index of the subject in plan_data.sujets"),
+    action_idx: int = Query(..., description="Index of the action within that subject"),
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Upload an evidence file for a specific action inside an action plan.
+    The file is stored in Azure Blob and the download URL is appended to
+    plan_data.sujets[sujet_idx].actions[action_idx].attachments.
+    """
+    _require(current_user, _NON_VIEWER)
+    user_email = (
+        current_user.get("email")
+        or current_user.get("upn")
+        or current_user.get("sub")
+        or "unknown"
+    )
+    try:
+        svc = PurchasingValueService(db)
+        result = await svc.upload_action_evidence(
+            action_plan_id, sujet_idx, action_idx, file, user_email
+        )
+        await db.commit()
+        return {"status": "success", "data": result}
+    except AppException:
+        await db.rollback()
+        raise
+    except Exception:
+        await db.rollback()
+        raise
+
+
+@router.patch("/action-plans/{action_plan_id}/item-status", response_model=dict)
+async def update_action_item_status(
+    action_plan_id: int,
+    sujet_idx: int = Query(..., description="Index of the subject in plan_data.sujets"),
+    action_idx: int = Query(..., description="Index of the action within that subject"),
+    status: str = Query(..., description="New status: open | closed | blocked"),
+    implementation_date: Optional[str] = Query(None, description="ISO date (YYYY-MM-DD), required when closing"),
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Update a single action's status (and closed_date when closing) inside a plan's JSONB."""
+    _require(current_user, _NON_VIEWER)
+    user_email = (
+        current_user.get("email")
+        or current_user.get("upn")
+        or current_user.get("sub")
+        or "unknown"
+    )
+    try:
+        svc = PurchasingValueService(db)
+        result = await svc.update_action_item_status(
+            action_plan_id, sujet_idx, action_idx, status, implementation_date, user_email
         )
         await db.commit()
         return {"status": "success", "data": result}

@@ -5,7 +5,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Dict, Optional, List, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 # ---------------------------------------------------------------------------
@@ -29,10 +29,11 @@ class STPRisks(BaseModel):
     other_before: Optional[str] = None                # Yes / No
     other_after: Optional[str] = None                 # Yes / No
     other_desc: Optional[str] = None
-    # Spec questions
-    material_same_spec: Optional[str] = None   # Yes / No
-    same_tooling: Optional[str] = None         # Yes / No
-    same_dimension: Optional[str] = None       # Yes / No
+    # Spec questions — Yes / No / N/A
+    material_same_spec: Optional[str] = None
+    same_tooling: Optional[str] = None
+    same_dimension: Optional[str] = None
+    same_process: Optional[str] = None
 
 
 class STPBenefits(BaseModel):
@@ -273,15 +274,14 @@ def add_months_preserve_day(d: date, months: int) -> date:
 def budget_year_for_date(d: date) -> int:
     """Budget year label for a date.
 
-    Business rule: Budget year N runs from 1 December N-1 to 30 November N.
-    Therefore December 2026 belongs to budget year 2027.
+    Business rule: Budget year N = 1 January N → 31 December N (calendar year).
     """
-    return d.year + 1 if d.month == 12 else d.year
+    return d.year
 
 
 def budget_year_bounds(fiscal_year: int) -> tuple[date, date]:
-    """Return [start, end_exclusive) of a budget year."""
-    return date(fiscal_year - 1, 12, 1), date(fiscal_year, 12, 1)
+    """Return [start, end_exclusive) of a budget year (calendar year)."""
+    return date(fiscal_year, 1, 1), date(fiscal_year + 1, 1, 1)
 
 
 def recommend_savings_start_date(opp):
@@ -329,9 +329,9 @@ def compute_budget_year_portions(per_year_savings, savings_start, duration_month
     12 calendar months from `savings_start`; the whole stream is capped at
     `duration_months` (and at the number of windows available).
 
-    Budget year rule: year N = 01 Dec N-1 -> 30 Nov N. Allocation is done by
-    overlap in actual days, not by whole months. This means a start on 15 June
-    allocates only the exact days from 15 June to 30 November into that budget year.
+    Budget year rule: year N = 01 Jan N -> 31 Dec N (calendar year). Allocation is
+    done by overlap in actual days, not by whole months. This means a start on 15 June
+    allocates only the exact days from 15 June to 31 December into that budget year.
 
     portion_kind per budget year: "Total" if it receives a full budget year,
     "Applicable" for the partial first year, "Residual" for the partial tail.
@@ -413,11 +413,7 @@ def compute_budget_year_portions(per_year_savings, savings_start, duration_month
 
 
 def compute_saving_by_calendar_year(opp) -> dict:
-    """Estimated STP saving allocated to each budget year.
-
-    Compatibility note: the field name remains `saving_by_year`, but the split now
-    follows the budget year (01 Dec -> 30 Nov) with day-level prorata so it matches
-    the Budgeting module."""
+    """Estimated STP saving allocated to each budget year (calendar year Jan–Dec)."""
     per_year = compute_stp_financials(opp)["saving_per_year"]
     duration = getattr(opp, "duration_months", None)
     rows = compute_budget_year_portions(
@@ -470,6 +466,16 @@ class OpportunityUpdateRequest(BaseModel):
     change_mode: Optional[str] = Field(None, description="Standard | Silent")
     currency: Optional[str] = Field(None, description="EUR | USD | RMB | INR")
     fx_rate_to_eur: Optional[Decimal] = Field(None, ge=0, description="Rate to convert this currency to EUR")
+
+    @model_validator(mode="after")
+    def check_fx_rate_when_currency_set(self) -> "OpportunityUpdateRequest":
+        if self.currency and self.currency != "EUR":
+            if self.fx_rate_to_eur is None or self.fx_rate_to_eur <= 0:
+                raise ValueError(
+                    f"fx_rate_to_eur must be provided and > 0 when currency is '{self.currency}'. "
+                    f"Example: for USD enter 0.920000 (meaning 1 {self.currency} = 0.92 EUR)."
+                )
+        return self
     assumptions_summary: Optional[str] = None
     comments: Optional[str] = None
     plant_id: Optional[int] = None
@@ -477,9 +483,14 @@ class OpportunityUpdateRequest(BaseModel):
     # Owners
     purchasing_owner: Optional[str] = None
     conversion_owner: Optional[str] = None
-    # D score only — P and L are auto-calculated
+    # PLD scores — P and L are auto-calculated but can be manually overridden
     # D = Easy(1) / Relatively easy(2) / Moderately difficult(3) / Difficult(4) / Very Difficult(5)
+    payback_score: Optional[Decimal] = Field(None, ge=1, le=5)
+    lead_time_score: Optional[Decimal] = Field(None, ge=1, le=5)
     difficulty_score: Optional[Decimal] = Field(None, ge=1, le=5)
+    # Priority override — when True the computed P×L×D category is bypassed
+    priority_locked: Optional[bool] = None
+    priority_category_override: Optional[str] = None  # "High" | "Medium" | "Low" | ""
     # STP fields
     scope_in: Optional[str] = None
     scope_out: Optional[str] = None
@@ -778,9 +789,62 @@ class FinancialLineResponse(BaseModel):
         from_attributes = True
 
 
+# Ordered list of Monday.com delta-reason values (displayed as dropdown options).
+DELTA_REASON_VALUES: list[str] = [
+    "As planned",
+    "NTS",
+    "Inventory issue",
+    "Higher productivity / Volume",
+    "Inventory reduction",
+    "Check Data",
+    "Lower volume / Late start",
+    "Cancel & Replace",
+    "Stuck",
+    "Budget Mist",
+    "Price increase",
+    "Strategy change",
+    "Supplier Issue",
+    "Recovery",
+    "Late action",
+    "RM Not Available",
+]
+
+
+def _validate_delta_reasons(value: Optional[List[str]]) -> Optional[List[str]]:
+    if value is None:
+        return None
+    invalid = [reason for reason in value if reason not in DELTA_REASON_VALUES]
+    if invalid:
+        raise ValueError(
+            "Invalid delta_reason value(s): " + ", ".join(sorted(set(invalid)))
+        )
+    return value
+
+
 class BudgetDecision(BaseModel):
     opportunity_id: int
-    budget_status: str = Field(..., description="Empty | Opportunity | Budgeted")
+    budget_status: Literal["Empty", "Opportunity", "Budgeted"] = Field(
+        ..., description="Empty | Opportunity | Budgeted"
+    )
+    delta_reason: Optional[List[str]] = Field(
+        None,
+        description="Reasons explaining the EOY/budget delta (multi-value). "
+        f"Allowed values: {', '.join(DELTA_REASON_VALUES)}",
+    )
+
+    _delta_reason_validator = field_validator("delta_reason")(_validate_delta_reasons)
+
+
+class DeltaReasonDecision(BaseModel):
+    opportunity_id: int
+    delta_reason: Optional[List[str]] = None
+
+    _delta_reason_validator = field_validator("delta_reason")(_validate_delta_reasons)
+
+
+class DeltaReasonUpdateRequest(BaseModel):
+    """Lightweight update of delta_reason only — does not touch budget_status or lock timestamps."""
+    decisions: List[DeltaReasonDecision] = Field(default_factory=list)
 
 
 class BudgetAssignRequest(BaseModel):
@@ -800,6 +864,7 @@ class BudgetYearResponse(BaseModel):
     budget_status: Optional[str] = None
     status_locked_at: Optional[datetime] = None
     status_locked_by: Optional[str] = None
+    delta_reason: Optional[List[str]] = None
 
     class Config:
         from_attributes = True
@@ -848,6 +913,7 @@ class OpportunityResponse(BaseModel):
     difficulty_score: Optional[Decimal] = None
     priority_score: Optional[Decimal] = None
     priority_category: Optional[str] = None
+    priority_locked: Optional[bool] = None
     comments: Optional[str] = None
     validation_request_sent_at: Optional[datetime] = None
     # STP fields
@@ -970,3 +1036,88 @@ class SupplierOption(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+# ---------------------------------------------------------------------------
+# Action Plan schemas (mirrors the external PlanV2 / SujetNodeV2 / ActionNodeV2)
+# ---------------------------------------------------------------------------
+
+class ActionNodeV2(BaseModel):
+    titre: str = Field(..., min_length=1)
+    description: Optional[str] = None
+    responsable: Optional[str] = None
+    email_responsable: Optional[str] = None
+    kpi: Optional[str] = None
+    demandeur: Optional[str] = None
+    email_demandeur: Optional[str] = None
+    status: Optional[str] = "open"
+    priorite: Optional[int] = Field(None, ge=0)
+    due_date: Optional[date] = None
+    closed_date: Optional[date] = None
+    ordre: Optional[int] = None
+    importance: Optional[str] = None
+    urgency: Optional[str] = None
+    escalation_level: Optional[int] = Field(0, ge=0, le=3)
+    priority_index: Optional[int] = Field(None, ge=0, le=100)
+    estimated_duration_days: Optional[int] = Field(None, ge=0)
+    attachments: List[dict] = Field(default_factory=list)
+    sous_actions: List["ActionNodeV2"] = Field(default_factory=list)
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+ActionNodeV2.model_rebuild()
+
+
+class SujetNodeV2(BaseModel):
+    titre: str = Field(..., min_length=1)
+    code: Optional[str] = None
+    description: Optional[str] = None
+    inserted_by: Optional[str] = None
+    responsable: Optional[str] = None
+    email_responsable: Optional[str] = None
+    sous_sujets: List["SujetNodeV2"] = Field(default_factory=list)
+    actions: List[ActionNodeV2] = Field(default_factory=list)
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+SujetNodeV2.model_rebuild()
+
+
+class ActionPlanCreateRequest(BaseModel):
+    plan_title: str = Field(..., min_length=1)
+    phase_status: Optional[str] = None
+    plan_code: Optional[str] = None
+    responsable: Optional[str] = None
+    email_responsable: Optional[str] = None
+    demandeur: Optional[str] = None
+    email_demandeur: Optional[str] = None
+    sujets: List[SujetNodeV2] = Field(default_factory=list)
+
+
+class ActionPlanUpdateRequest(BaseModel):
+    plan_title: Optional[str] = None
+    phase_status: Optional[str] = None
+    responsable: Optional[str] = None
+    email_responsable: Optional[str] = None
+    demandeur: Optional[str] = None
+    email_demandeur: Optional[str] = None
+    sujets: Optional[List[SujetNodeV2]] = None
+
+
+class ActionPlanResponse(BaseModel):
+    action_plan_id: int
+    opportunity_id: int
+    phase_status: Optional[str] = None
+    plan_title: Optional[str] = None
+    plan_code: Optional[str] = None
+    plan_data: Optional[dict] = None
+    external_push_status: Optional[str] = None
+    external_push_error: Optional[str] = None
+    created_at: Optional[datetime] = None
+    created_by: Optional[str] = None
+    updated_at: Optional[datetime] = None
+    updated_by: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)

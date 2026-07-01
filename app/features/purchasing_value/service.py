@@ -13,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.constants import PANEL_ACTIVE_DECISIONS
 from app.core.exceptions import AppException
 from app.db.models import (
     FinancialLine,
@@ -22,6 +23,7 @@ from app.db.models import (
     OpportunityDocument,
     OpportunityPhaseSnapshot,
     Project,
+    SupplierGroup,
     SupplierSiteRelation,
     SupplierUnit,
 )
@@ -291,6 +293,28 @@ class PurchasingValueService:
         # R9 — if real_start_date changes (Phase 3), rebuild monthly profile
         old_real_start = opp.real_start_date
         _set_if(opp, "execution_start_date", payload.execution_start_date)
+        # Guard: real_start_date is immutable once the opportunity is committed to a
+        # locked budget row. Changing it would silently shift the pro-rata split and
+        # invalidate the director's historical commitment.
+        if (
+            payload.real_start_date is not None
+            and payload.real_start_date != old_real_start
+        ):
+            locked_row = (
+                await self.db.execute(
+                    select(OpportunityBudgetYear).where(
+                        OpportunityBudgetYear.opportunity_id == opp.opportunity_id,
+                        OpportunityBudgetYear.status_locked_at.is_not(None),
+                        OpportunityBudgetYear.is_deleted.is_(False),
+                    )
+                )
+            ).scalars().first()
+            if locked_row is not None:
+                raise AppException(
+                    "real_start_date cannot be modified: this opportunity is locked in a "
+                    "committed budget. Contact your purchasing director to unlock.",
+                    status_code=422,
+                )
         _set_if(opp, "real_start_date", payload.real_start_date)
         real_start_changed = (
             payload.real_start_date is not None
@@ -327,13 +351,18 @@ class PurchasingValueService:
                     "is recorded. It cannot be changed without voiding the financial audit trail.",
                     "CURRENCY_LOCKED",
                 )
-            if payload.fx_rate_to_eur is not None and payload.fx_rate_to_eur != opp.fx_rate_to_eur:
-                raise AppException(
-                    422,
-                    "FX rate is frozen after the first budget commitment or actual saving "
-                    "is recorded. Historical EUR-consolidated figures must remain stable.",
-                    "FX_RATE_LOCKED",
-                )
+            if payload.fx_rate_to_eur is not None:
+                # Compare as Decimal to avoid float/Decimal precision mismatch
+                # (e.g. Decimal("1.15") != 1.15 in Python float arithmetic).
+                new_rate = Decimal(str(payload.fx_rate_to_eur))
+                current_rate = opp.fx_rate_to_eur if opp.fx_rate_to_eur is not None else Decimal("1")
+                if new_rate != current_rate:
+                    raise AppException(
+                        422,
+                        "FX rate is frozen after the first budget commitment or actual saving "
+                        "is recorded. Historical EUR-consolidated figures must remain stable.",
+                        "FX_RATE_LOCKED",
+                    )
         else:
             _set_if(opp, "currency", payload.currency)
             _set_if(opp, "fx_rate_to_eur", payload.fx_rate_to_eur)
@@ -342,6 +371,19 @@ class PurchasingValueService:
         # left over from a previous currency can never distort consolidated EUR totals.
         if (opp.currency or "EUR") == "EUR":
             opp.fx_rate_to_eur = Decimal("1")
+
+        # Final-state guard: non-EUR opportunity must have a valid rate in the DB after
+        # this update, even if currency was set in a previous request and fx_rate was
+        # never populated. Catching this here prevents silent 1:1 fallback in KPI rollups.
+        if (opp.currency or "EUR") != "EUR":
+            if not opp.fx_rate_to_eur or opp.fx_rate_to_eur <= 0:
+                raise AppException(
+                    422,
+                    f"A valid FX rate to EUR is required for {opp.currency} opportunities. "
+                    f"Set fx_rate_to_eur (e.g. 0.920000 for USD) before saving.",
+                    "FX_RATE_REQUIRED",
+                )
+
         _set_if(opp, "assumptions_summary", payload.assumptions_summary)
         _set_if(opp, "comments", payload.comments)
         _set_if(opp, "plant_id", payload.plant_id)
@@ -480,7 +522,10 @@ class PurchasingValueService:
             float(opp.total_investment or 0) if opp.total_investment else None,
             float(payback_annual) if payback_annual else None,
         )
-        if auto_p is not None:
+        if payload.payback_score is not None:
+            # Manual override takes priority over auto-calculation
+            opp.payback_score = Decimal(str(payload.payback_score))
+        elif auto_p is not None:
             opp.payback_score = Decimal(str(auto_p))
 
         # L score — Phase 1+2+3 ONLY per Olivier: "durée phase 1, 2 et 3"
@@ -489,16 +534,26 @@ class PurchasingValueService:
             filter(None, [opp.phase1_weeks, opp.phase2_weeks, opp.phase3_weeks])
         )
         auto_l = auto_leadtime_score(float(total_weeks) if total_weeks else None)
-        if auto_l is not None:
+        if payload.lead_time_score is not None:
+            # Manual override takes priority over auto-calculation
+            opp.lead_time_score = Decimal(str(payload.lead_time_score))
+        elif auto_l is not None:
             opp.lead_time_score = Decimal(str(auto_l))
 
-        # Auto-compute PLD priority
-        p_score, p_cat = compute_priority(
-            opp.payback_score, opp.lead_time_score, opp.difficulty_score
-        )
-        if p_score is not None:
-            opp.priority_score = Decimal(str(p_score))
-            opp.priority_category = p_cat
+        # Priority lock — buyer can force the category regardless of P×L×D
+        if payload.priority_locked is not None:
+            opp.priority_locked = payload.priority_locked
+        if payload.priority_category_override is not None:
+            if payload.priority_category_override:
+                opp.priority_category = payload.priority_category_override
+        # Auto-compute PLD priority only when not manually locked
+        if not opp.priority_locked:
+            p_score, p_cat = compute_priority(
+                opp.payback_score, opp.lead_time_score, opp.difficulty_score
+            )
+            if p_score is not None:
+                opp.priority_score = Decimal(str(p_score))
+                opp.priority_category = p_cat
 
         opp.updated_at = datetime.utcnow()
         opp.updated_by = payload.changed_by
@@ -637,7 +692,10 @@ class PurchasingValueService:
         return result
 
     async def apply_gate_decision(
-        self, opportunity_id: int, payload: GateDecisionRequest
+        self,
+        opportunity_id: int,
+        payload: GateDecisionRequest,
+        _via_gate_approval: bool = False,
     ) -> Opportunity:
         if payload.decision not in ("Go", "No Go", "Review"):
             raise AppException(
@@ -647,6 +705,19 @@ class PurchasingValueService:
         opp = await self.get_opportunity(opportunity_id)
         now = datetime.utcnow()
         phase_before = opp.phase_status or "Phase 0"
+
+        # FX gate check — block Go on non-EUR opportunity without a valid rate.
+        # A missing rate would silently count all savings at 1:1, distorting every
+        # EUR-consolidated KPI, budget total, and monthly chart after this point.
+        if payload.decision == "Go" and (opp.currency or "EUR") != "EUR":
+            if not opp.fx_rate_to_eur or float(opp.fx_rate_to_eur) <= 0:
+                raise AppException(
+                    422,
+                    f"Cannot apply a Go decision: the opportunity uses {opp.currency} "
+                    f"but has no FX rate to EUR. Set fx_rate_to_eur in the opportunity "
+                    f"settings before submitting for gate validation.",
+                    "FX_RATE_REQUIRED_FOR_GATE",
+                )
 
         # Store only Phase 0 gate decision in validation_decision (the primary Go/No Go)
         # Later phases record their decision in comments to preserve Phase 0 outcome
@@ -671,6 +742,12 @@ class PurchasingValueService:
                 by.status_locked_at = None
                 by.status_locked_by = None
                 by.updated_at = now
+
+            # Opportunity-level derived state must reflect cancellation immediately.
+            # _sync_budget_years() is skipped for No Go (it would overwrite the Empty
+            # rows we just set), so we update these two fields directly here.
+            opp.validation_status = "Empty"
+            opp.budget_year = None
 
             # B1/B3 — cascade to financial lines and recovery plans.
             for fl in list(opp.financial_lines or []):
@@ -705,6 +782,19 @@ class PurchasingValueService:
         # ------ GO → advance phase ------
         else:
             current_phase = opp.phase_status or "Phase 0"
+
+            # Phases 1-3 are material: financial lines, deployment, and close-out.
+            # A single privileged user must NOT advance them without a quorum vote.
+            # The _via_gate_approval flag is set only by GateApprovalService._check_consensus,
+            # so direct API calls (e.g. from the UI gate-decision endpoint) are blocked.
+            if current_phase in ("Phase 1", "Phase 2", "Phase 3") and not _via_gate_approval:
+                raise AppException(
+                    422,
+                    f"Phase {current_phase} transitions require a completed gate approval "
+                    "workflow. Submit a gate approval request and wait for the panel to vote — "
+                    "the phase advances automatically once quorum is reached.",
+                    "GATE_APPROVAL_REQUIRED",
+                )
 
             if current_phase in ("Assigned", "Phase 0"):
                 # Phase 0 Go: validate the opportunity
@@ -1386,6 +1476,15 @@ class PurchasingValueService:
             return "Validate"
         return "In progress"
 
+    # Phases where savings are confirmed and real_start_date is expected to be set.
+    _BUDGET_ELIGIBLE_PHASES = {"Phase 3", "Phase 4", "Closed"}
+
+    async def _closed_fiscal_years(self) -> set[int]:
+        """Return the set of fiscal years that have been officially closed."""
+        from app.db.models import BudgetYearClosure
+        result = await self.db.execute(select(BudgetYearClosure))
+        return {row.fiscal_year for row in result.scalars().all()}
+
     async def _sync_budget_years(self, opp: Opportunity) -> None:
         """Recompute the per-fiscal-year budget rows from the SAME per-year savings as
         the STP calendar-year estimate (escalating windows), anchored on the savings
@@ -1393,23 +1492,21 @@ class PurchasingValueService:
         the flat expected_annual_saving repeated across the duration. Status is fully
         derived from validation (_validation_status) — no manual override.
 
+        Budget eligibility rule (Option A):
+        - opp.real_start_date must be confirmed (not None)
+        - opp.phase_status must be Phase 3, Phase 4 or Completed
+        Opps that don't meet this are not eligible for budget rows. Any unlocked
+        rows previously created are cleaned up.
+
+        is_additional: a new row created for a fiscal year that is already closed
+        (BudgetYearClosure exists) is flagged is_additional=True so Finance can
+        distinguish post-closure additions from the original committed baseline.
+
         IMPORTANT: do not rely on `opp.budget_years` being preloaded. In async
         SQLAlchemy, touching an unloaded relationship here can trigger an implicit
         lazy-load outside the greenlet context (`MissingGreenlet`). Query the rows
         explicitly instead so the recompute path is safe in API, tests and batch
         flows alike."""
-        duration = int(opp.duration_months or 0)
-        anchor = compute_savings_start_date(opp)
-        per_year = compute_stp_financials(opp)["saving_per_year"]
-        if any(v is not None for v in per_year):
-            windows = per_year  # STP escalating per-year savings
-        elif opp.expected_annual_saving is not None:
-            n_years = max(1, ceil(duration / 12)) if duration else 1
-            windows = [float(opp.expected_annual_saving)] * n_years
-        else:
-            windows = []
-        portions = compute_budget_year_portions(windows, anchor, duration or None)
-        status = self._validation_status(opp)
         existing_rows = (
             (
                 await self.db.execute(
@@ -1422,6 +1519,32 @@ class PurchasingValueService:
             .scalars()
             .all()
         )
+
+        # If opp is not budget-eligible, clean up any unlocked rows and stop.
+        if (
+            opp.real_start_date is None
+            or opp.phase_status not in self._BUDGET_ELIGIBLE_PHASES
+        ):
+            for row in existing_rows:
+                if row.status_locked_at is None:
+                    await self.db.delete(row)
+            await self.db.flush()
+            return
+
+        duration = int(opp.duration_months or 0)
+        anchor = compute_savings_start_date(opp)
+        per_year = compute_stp_financials(opp)["saving_per_year"]
+        if any(v is not None for v in per_year):
+            windows = per_year  # STP escalating per-year savings
+        elif opp.expected_annual_saving is not None:
+            n_years = max(1, ceil(duration / 12)) if duration else 1
+            windows = [float(opp.expected_annual_saving)] * n_years
+        else:
+            windows = []
+        portions = compute_budget_year_portions(windows, anchor, duration or None)
+        status = self._validation_status(opp)
+        closed_fys = await self._closed_fiscal_years()
+
         existing = {by.fiscal_year: by for by in existing_rows}
         seen = set()
 
@@ -1448,6 +1571,7 @@ class PurchasingValueService:
                         portion_kind=p["kind"],
                         suggested_status=status,
                         budget_status="Opportunity",
+                        is_additional=fy in closed_fys,
                     )
                 )
 
@@ -1605,7 +1729,11 @@ class PurchasingValueService:
 
     async def list_budget_years(self, fiscal_year: int) -> list:
         """Flattened opportunity+budget-year rows for a given fiscal year, for the
-        budgeting page."""
+        budgeting page.
+
+        Budget eligibility filter (Option A): only Phase 3 / Phase 4 / Completed
+        opportunities with a confirmed real_start_date appear in the official budget.
+        """
         result = await self.db.execute(
             select(OpportunityBudgetYear)
             .where(
@@ -1615,7 +1743,10 @@ class PurchasingValueService:
             .options(
                 selectinload(OpportunityBudgetYear.opportunity).selectinload(
                     Opportunity.plant
-                )
+                ),
+                selectinload(OpportunityBudgetYear.opportunity).selectinload(
+                    Opportunity.financial_lines
+                ),
             )
             .order_by(OpportunityBudgetYear.id)
         )
@@ -1624,10 +1755,51 @@ class PurchasingValueService:
             opp = r.opportunity
             if opp is None or opp.is_deleted:
                 continue
-            # B1 — exclude cancelled / closed opportunities so directors never see
+            # B1 — exclude cancelled opportunities so directors never see
             # phantom budget commitments on dead projects.
-            if opp.status == "Cancelled" or opp.phase_status == "Closed":
+            if opp.status == "Cancelled":
                 continue
+            # Budget eligibility: only confirmed Phase 3+ opps with real_start_date.
+            if (
+                opp.real_start_date is None
+                or opp.phase_status not in self._BUDGET_ELIGIBLE_PHASES
+            ):
+                continue
+            # Enrich with financial line data — sum ALL active+completed lines
+            # (an opp may have multiple component lines; first-only would under-count)
+            fx = float(opp.fx_rate_to_eur or 1)
+            contributing_lines = [
+                fl for fl in (opp.financial_lines or [])
+                if fl.status in ("Active", "Completed") and not fl.is_deleted
+            ]
+
+            def _n(v):
+                return float(v) if v is not None else None
+
+            eoy_forecast_eur = None
+            expected_annual_saving_eur = None
+            actual_ytd_eur = None
+            delta_ytd_eur = None
+            delta_eoy_budget = None
+
+            if contributing_lines:
+                raw_eoy = sum(
+                    _n(fl.forecast_eoy_current) if fl.forecast_eoy_current is not None
+                    else (_n(fl.expected_annual_saving) or 0.0)
+                    for fl in contributing_lines
+                )
+                raw_exp = sum(_n(fl.expected_annual_saving) or 0.0 for fl in contributing_lines)
+                raw_actual = sum(_n(fl.cumulated_real_saving) or 0.0 for fl in contributing_lines)
+                raw_delta_ytd = sum(_n(fl.delta_vs_expected_ytd) or 0.0 for fl in contributing_lines)
+                eoy_forecast_eur = round(raw_eoy * fx, 2) if raw_eoy else None
+                expected_annual_saving_eur = round(raw_exp * fx, 2) if raw_exp else None
+                actual_ytd_eur = round(raw_actual * fx, 2) if raw_actual else None
+                delta_ytd_eur = round(raw_delta_ytd * fx, 2) if raw_delta_ytd else None
+                # Δ EOY − Budget: both annual figures → meaningful comparison
+                # (applicable_amount is FY pro-rata; using it as denominator would mix units)
+                if eoy_forecast_eur is not None and expected_annual_saving_eur is not None:
+                    delta_eoy_budget = round(eoy_forecast_eur - expected_annual_saving_eur, 2)
+
             items.append(
                 {
                     "id": r.id,
@@ -1651,13 +1823,50 @@ class PurchasingValueService:
                     "portion_kind": r.portion_kind,
                     "suggested_status": r.suggested_status,
                     "budget_status": r.budget_status,
+                    "is_additional": bool(r.is_additional),
                     "status_locked_at": r.status_locked_at.isoformat()
                     if r.status_locked_at
                     else None,
                     "status_locked_by": r.status_locked_by,
+                    "plant_id": opp.plant_id,
+                    "delta_reason": list(r.delta_reason) if r.delta_reason else [],
+                    "eoy_forecast_eur": eoy_forecast_eur,
+                    "expected_annual_saving_eur": expected_annual_saving_eur,
+                    "actual_ytd_eur": actual_ytd_eur,
+                    "delta_ytd_eur": delta_ytd_eur,
+                    "delta_eoy_budget": delta_eoy_budget,
+                    "real_start_date": opp.real_start_date.isoformat()
+                    if opp.real_start_date
+                    else None,
+                    "duration_months": int(opp.duration_months)
+                    if opp.duration_months is not None
+                    else None,
                 }
             )
         return items
+
+    async def update_delta_reasons(self, fiscal_year: int, decisions: list) -> dict:
+        """Update delta_reason only — does not touch budget_status or lock timestamps."""
+        reason_by_opp: dict[int, list] = {
+            d["opportunity_id"]: d.get("delta_reason") or []
+            for d in decisions
+            if d.get("opportunity_id") is not None
+        }
+        rows = (
+            await self.db.execute(
+                select(OpportunityBudgetYear).where(
+                    OpportunityBudgetYear.fiscal_year == fiscal_year,
+                    OpportunityBudgetYear.is_deleted.is_(False),
+                )
+            )
+        ).scalars().all()
+        updated = 0
+        for r in rows:
+            if r.opportunity_id in reason_by_opp:
+                r.delta_reason = reason_by_opp[r.opportunity_id] or None
+                updated += 1
+        await self.db.flush()
+        return {"updated": updated}
 
     async def assign_budget_year(
         self, fiscal_year: int, decisions: list, decided_by: Optional[str]
@@ -1675,6 +1884,13 @@ class PurchasingValueService:
             d["opportunity_id"]: d["budget_status"]
             for d in (decisions or [])
             if d.get("budget_status") in valid
+        }
+        # Preserve existing delta reasons unless the assign payload explicitly
+        # includes a replacement. Create Budget usually updates status only.
+        delta_reason_by_opp = {
+            d["opportunity_id"]: d.get("delta_reason")
+            for d in (decisions or [])
+            if d.get("opportunity_id") is not None and "delta_reason" in d
         }
         rows = (
             (
@@ -1707,6 +1923,8 @@ class PurchasingValueService:
             r.budget_status = new_status
             r.status_locked_at = now
             r.status_locked_by = decided_by
+            if opp.opportunity_id in delta_reason_by_opp:
+                r.delta_reason = delta_reason_by_opp[opp.opportunity_id]
             counts[new_status] += 1
 
         await self.db.flush()
@@ -1726,6 +1944,74 @@ class PurchasingValueService:
                 synced_opp_ids.add(opp.opportunity_id)
 
         return {"fiscal_year": fiscal_year, "counts": counts}
+
+    async def close_budget_year(self, fiscal_year: int, user_email: str) -> dict:
+        """Officially close the budget for a fiscal year.
+
+        Creates a BudgetYearClosure record (one per FY, unique constraint prevents
+        double-close). Locks all Budgeted rows for this FY that are not yet locked
+        (rows already locked by assign_budget_year keep their original timestamp).
+        From this point on, any new OpportunityBudgetYear row created for this FY by
+        _sync_budget_years will be flagged is_additional=True.
+        """
+        from app.db.models import BudgetYearClosure
+        existing_closure = (
+            await self.db.execute(
+                select(BudgetYearClosure).where(BudgetYearClosure.fiscal_year == fiscal_year)
+            )
+        ).scalar_one_or_none()
+        if existing_closure is not None:
+            raise AppException(
+                f"Budget year {fiscal_year} is already closed "
+                f"(closed on {existing_closure.closed_at.date()} by {existing_closure.closed_by}).",
+                status_code=409,
+            )
+
+        now = datetime.utcnow()
+        closure = BudgetYearClosure(fiscal_year=fiscal_year, closed_at=now, closed_by=user_email)
+        self.db.add(closure)
+
+        # Lock all Budgeted rows not yet locked
+        rows = (
+            await self.db.execute(
+                select(OpportunityBudgetYear)
+                .where(
+                    OpportunityBudgetYear.fiscal_year == fiscal_year,
+                    OpportunityBudgetYear.is_deleted.is_(False),
+                    OpportunityBudgetYear.budget_status == "Budgeted",
+                    OpportunityBudgetYear.status_locked_at.is_(None),
+                )
+                .with_for_update()
+            )
+        ).scalars().all()
+
+        for row in rows:
+            row.status_locked_at = now
+            row.status_locked_by = user_email
+
+        await self.db.flush()
+        return {
+            "fiscal_year": fiscal_year,
+            "closed_at": now.isoformat(),
+            "closed_by": user_email,
+            "newly_locked": len(rows),
+        }
+
+    async def get_budget_year_closure(self, fiscal_year: int) -> Optional[dict]:
+        """Return the closure record for a fiscal year, or None if not closed."""
+        from app.db.models import BudgetYearClosure
+        row = (
+            await self.db.execute(
+                select(BudgetYearClosure).where(BudgetYearClosure.fiscal_year == fiscal_year)
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            return None
+        return {
+            "fiscal_year": row.fiscal_year,
+            "closed_at": row.closed_at.isoformat(),
+            "closed_by": row.closed_by,
+        }
 
     async def _rebuild_monthly_profile(
         self,
@@ -2166,6 +2452,20 @@ class PurchasingValueService:
                 yr = stp_fin["saving_per_year"][idx]
                 setattr(opp, attr, Decimal(str(yr)) if yr is not None else None)
             opp.saving_by_year = compute_saving_by_calendar_year(opp) or None
+            # ROI and cash fields must also be refreshed — they depend on the same
+            # STP formulas and are stale without this block.
+            if stp_fin["roi_full_year_pct"] is not None:
+                opp.roi_percent = Decimal(str(stp_fin["roi_full_year_pct"]))
+            if stp_fin["roi_period_pct"] is not None:
+                opp.roi_period_percent = Decimal(str(stp_fin["roi_period_pct"]))
+            if stp_fin["inventory_gap"] is not None:
+                opp.cash_inventory_gap = Decimal(str(stp_fin["inventory_gap"]))
+            if stp_fin["ap_gap"] is not None:
+                opp.cash_ap_gap = Decimal(str(stp_fin["ap_gap"]))
+            if stp_fin["inventory_gap"] is not None or stp_fin["ap_gap"] is not None:
+                opp.cash_impact = Decimal(str(round(
+                    (stp_fin["inventory_gap"] or 0.0) + (stp_fin["ap_gap"] or 0.0), 2
+                )))
 
             # Rebuild monthly profile if Phase 3, line is active, and no actuals yet
             if opp.phase_status == "Phase 3":
@@ -2260,14 +2560,22 @@ class PurchasingValueService:
             or date.today().replace(day=1)
         )
         # D1 — preserve STP escalating window structure on revision.
-        # For STP types the per-year windows are derived from the stored STP formulas
-        # (prices × quantities). Passing is_period_total=True + windows keeps the
-        # Year-N / N+1 / N+2 / N+3 escalation intact after a revision, instead of
-        # collapsing it to a flat annual/12 profile that under-states later years.
+        # Scale the formula-derived per-year windows proportionally to the revised
+        # period total so the Year-N/N+1/N+2/N+3 shape is kept while the monthly
+        # profile sums to the new baseline (not the old formula total).
         # For flat types (Negotiation / Cash) the existing flat behaviour is preserved.
         # opp already loaded above for the Closed guard — no second query needed.
         is_stp = self._is_period(opp) if opp else False
         stp_windows = self._stp_year_windows(opp) if is_stp else None
+        if is_stp and stp_windows:
+            window_total = sum(stp_windows)
+            if window_total:
+                scale = float(revised_saving) / window_total
+                stp_windows = [w * scale for w in stp_windows]
+            else:
+                # All windows are zero — fall back to flat so the revised saving is applied.
+                is_stp = False
+                stp_windows = None
         await self._rebuild_monthly_profile(
             line, revised_saving, start, duration,
             is_period_total=is_stp,
@@ -2372,12 +2680,19 @@ class PurchasingValueService:
                 SupplierSiteRelation,
                 SupplierSiteRelation.id_supplier_unit == SupplierUnit.id_supplier_unit,
             )
+            .join(SupplierGroup, SupplierGroup.id_group == SupplierUnit.id_group)
             .where(
                 SupplierSiteRelation.id_site == plant_id,
+                SupplierSiteRelation.validation_status == "approved",
+                SupplierSiteRelation.panel_decision.in_(PANEL_ACTIVE_DECISIONS),
+                SupplierSiteRelation.is_active.is_(True),
+                SupplierSiteRelation.is_deleted.is_(False),
                 SupplierUnit.is_deleted.is_(False),
+                SupplierGroup.is_deleted.is_(False),
             )
             .options(selectinload(SupplierUnit.group))
             .order_by(SupplierUnit.id_supplier_unit)
+            .distinct()
         )
         units = result.scalars().all()
         return [
@@ -2390,6 +2705,320 @@ class PurchasingValueService:
             }
             for u in units
         ]
+
+    # -----------------------------------------------------------------------
+    # Action Plan methods
+    # -----------------------------------------------------------------------
+
+
+    async def list_action_plans(self, opportunity_id: int):
+        from app.db.models import OpportunityActionPlan
+        result = await self.db.execute(
+            select(OpportunityActionPlan)
+            .where(OpportunityActionPlan.opportunity_id == opportunity_id)
+            .order_by(OpportunityActionPlan.created_at.desc())
+        )
+        return list(result.scalars().all())
+
+    async def get_action_plan(self, action_plan_id: int):
+        from app.db.models import OpportunityActionPlan
+        result = await self.db.execute(
+            select(OpportunityActionPlan).where(
+                OpportunityActionPlan.action_plan_id == action_plan_id
+            )
+        )
+        plan = result.scalar_one_or_none()
+        if plan is None:
+            raise AppException("Action plan not found", status_code=404)
+        return plan
+
+    async def create_action_plan(self, opportunity_id: int, payload, user_email: str):
+        from app.db.models import OpportunityActionPlan
+
+        # Verify opportunity exists
+        await self.get_opportunity(opportunity_id)
+
+        plan_code = payload.plan_code or f"SM-OPP-{opportunity_id}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+
+        def _strip_none(obj):
+            if isinstance(obj, dict):
+                return {k: _strip_none(v) for k, v in obj.items() if v is not None}
+            if isinstance(obj, list):
+                return [_strip_none(i) for i in obj]
+            return obj
+
+        # plan_data is the exact payload that will be sent to the external API on sync.
+        # Format matches POST /api/v2/plans expected by sales-feedback service.
+        plan_data = _strip_none({
+            "version": "2.0",
+            "plan_code": plan_code,
+            "plan_title": payload.plan_title,
+            "inserted_by": user_email,
+            "responsable": payload.responsable,
+            "email_responsable": payload.email_responsable,
+            "demandeur": payload.demandeur,
+            "email_demandeur": payload.email_demandeur,
+            "sujets": [s.model_dump(mode="json") for s in payload.sujets],
+        })
+
+        # External push disabled — stored locally, sync via POST .../sync when ready.
+        # TODO: re-enable once ACTION_PLAN_DATABASE_URL is configured on Azure.
+        # push_status, push_error = await self._push_to_external(plan_data)
+        push_status = "pending"
+        push_error = None
+
+        now = datetime.utcnow()
+        plan = OpportunityActionPlan(
+            opportunity_id=opportunity_id,
+            phase_status=payload.phase_status,
+            plan_title=payload.plan_title,
+            plan_code=plan_code,
+            plan_data=plan_data,
+            external_push_status=push_status,
+            external_push_error=push_error,
+            created_at=now,
+            created_by=user_email,
+            updated_at=now,
+            updated_by=user_email,
+        )
+        self.db.add(plan)
+        await self.db.flush()
+        return plan
+
+    async def update_action_plan(self, action_plan_id: int, payload, user_email: str):
+        plan = await self.get_action_plan(action_plan_id)
+
+        if payload.plan_title is not None:
+            plan.plan_title = payload.plan_title
+        if payload.phase_status is not None:
+            plan.phase_status = payload.phase_status
+
+        existing = dict(plan.plan_data or {})
+
+        def _strip_none(obj):
+            if isinstance(obj, dict):
+                return {k: _strip_none(v) for k, v in obj.items() if v is not None}
+            if isinstance(obj, list):
+                return [_strip_none(i) for i in obj]
+            return obj
+
+        if payload.responsable is not None:
+            existing["responsable"] = payload.responsable
+        if payload.email_responsable is not None:
+            existing["email_responsable"] = payload.email_responsable
+        if payload.demandeur is not None:
+            existing["demandeur"] = payload.demandeur
+        if payload.email_demandeur is not None:
+            existing["email_demandeur"] = payload.email_demandeur
+        if payload.sujets is not None:
+            existing["sujets"] = _strip_none([s.model_dump(mode="json") for s in payload.sujets])
+        if payload.plan_title is not None:
+            existing["plan_title"] = payload.plan_title
+
+        plan.plan_data = existing
+        plan.updated_at = datetime.utcnow()
+        plan.updated_by = user_email
+
+        # External push disabled — mark as pending for future sync.
+        # TODO: re-enable once ACTION_PLAN_DATABASE_URL is configured on Azure.
+        # push_status, push_error = await self._push_to_external(existing)
+        plan.external_push_status = "pending"
+        plan.external_push_error = None
+
+        await self.db.flush()
+        return plan
+
+    async def sync_action_plan(self, action_plan_id: int) -> dict:
+        """Push a locally stored action plan to the external sales-feedback API.
+        Call POST .../action-plans/{id}/sync once ACTION_PLAN_DATABASE_URL is configured.
+        Returns {"status": "ok"} or raises AppException on failure.
+        """
+        import httpx
+        from app.core.config import settings
+
+        plan = await self.get_action_plan(action_plan_id)
+        if not plan.plan_data:
+            raise AppException(400, "Plan has no data to sync.", "NO_PLAN_DATA")
+
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.post(
+                    f"{settings.ACTION_PLAN_API_URL}/api/v2/plans",
+                    json=plan.plan_data,
+                )
+            if resp.status_code in (200, 201):
+                plan.external_push_status = "ok"
+                plan.external_push_error = None
+                await self.db.flush()
+                return {"status": "ok", "external_response": resp.json()}
+            else:
+                plan.external_push_status = "failed"
+                plan.external_push_error = resp.text[:500]
+                await self.db.flush()
+                raise AppException(502, f"External API error {resp.status_code}: {resp.text[:200]}", "SYNC_FAILED")
+        except AppException:
+            raise
+        except Exception as exc:
+            plan.external_push_status = "failed"
+            plan.external_push_error = str(exc)[:500]
+            await self.db.flush()
+            raise AppException(502, f"Could not reach external API: {exc}", "SYNC_UNREACHABLE")
+
+    async def delete_action_plan(self, action_plan_id: int) -> None:
+        plan = await self.get_action_plan(action_plan_id)
+        await self.db.delete(plan)
+        await self.db.flush()
+
+    async def list_all_action_items(
+        self,
+        responsible_email: Optional[str] = None,
+        status: Optional[str] = None,
+        opportunity_id: Optional[int] = None,
+    ) -> list[dict]:
+        """Flatten all action plan actions across all opportunities into a single list.
+
+        Each item represents one action inside a sujet, enriched with plan + opportunity context.
+        Useful for the cross-opp action management dashboard grouped by responsible person.
+        """
+        from app.db.models import OpportunityActionPlan
+
+        q = select(OpportunityActionPlan)
+        if opportunity_id:
+            q = q.where(OpportunityActionPlan.opportunity_id == opportunity_id)
+        result = await self.db.execute(q)
+        plans = list(result.scalars().all())
+
+        opp_ids = {p.opportunity_id for p in plans}
+        if opp_ids:
+            opps_result = await self.db.execute(
+                select(Opportunity).where(
+                    Opportunity.opportunity_id.in_(opp_ids),
+                    Opportunity.is_deleted.is_(False),
+                )
+            )
+            opp_by_id: dict[int, Opportunity] = {o.opportunity_id: o for o in opps_result.scalars().all()}
+        else:
+            opp_by_id = {}
+
+        items: list[dict] = []
+        for plan in plans:
+            if not plan.plan_data:
+                continue
+            opp = opp_by_id.get(plan.opportunity_id)
+            opp_name = (opp.opportunity_name or f"Opp #{plan.opportunity_id}") if opp else f"Opp #{plan.opportunity_id}"
+            plan_resp_email = plan.plan_data.get("email_responsable")
+            plan_resp_name = plan.plan_data.get("responsable")
+
+            for s_idx, sujet in enumerate(plan.plan_data.get("sujets", [])):
+                for a_idx, action in enumerate(sujet.get("actions", [])):
+                    act_email = action.get("email_responsable") or plan_resp_email
+                    act_name = action.get("responsable") or plan_resp_name
+                    if responsible_email and act_email != responsible_email:
+                        continue
+                    if status and action.get("status") != status:
+                        continue
+                    items.append({
+                        "plan_id": plan.action_plan_id,
+                        "plan_code": plan.plan_code,
+                        "plan_title": plan.plan_title,
+                        "plan_created_at": plan.created_at.isoformat() if plan.created_at else None,
+                        "opportunity_id": plan.opportunity_id,
+                        "opportunity_name": opp_name,
+                        "opp_phase": opp.phase_status if opp else None,
+                        "sujet_idx": s_idx,
+                        "action_idx": a_idx,
+                        "sujet_titre": sujet.get("titre"),
+                        "action_titre": action.get("titre"),
+                        "action_status": action.get("status", "open"),
+                        "due_date": action.get("due_date"),
+                        "closed_date": action.get("closed_date"),
+                        "responsible_name": act_name,
+                        "responsible_email": act_email,
+                        "attachments": action.get("attachments", []),
+                        "attachment_count": len(action.get("attachments", [])),
+                        "description": action.get("description"),
+                    })
+
+        items.sort(key=lambda x: (x["responsible_email"] or "zzz", x["due_date"] or "9999"))
+        return items
+
+    async def upload_action_evidence(
+        self,
+        action_plan_id: int,
+        sujet_idx: int,
+        action_idx: int,
+        file,
+        user_email: str,
+    ) -> dict:
+        """Upload a file as evidence for a specific action and append it to the JSONB attachments."""
+        from app.shared.utils.blob_storage import upload_opportunity_document
+
+        plan = await self.get_action_plan(action_plan_id)
+        data = dict(plan.plan_data or {})
+        sujets = data.get("sujets", [])
+
+        if sujet_idx >= len(sujets):
+            raise AppException(404, "Subject index out of range.", "SUJET_NOT_FOUND")
+        actions = sujets[sujet_idx].get("actions", [])
+        if action_idx >= len(actions):
+            raise AppException(404, "Action index out of range.", "ACTION_NOT_FOUND")
+
+        upload_result = await upload_opportunity_document(
+            file=file,
+            opportunity_id=plan.opportunity_id,
+            phase_label="action-plan",
+        )
+        attachment = {
+            **upload_result,
+            "uploaded_by": user_email,
+            "uploaded_at": datetime.utcnow().isoformat(),
+        }
+
+        if "attachments" not in actions[action_idx]:
+            actions[action_idx]["attachments"] = []
+        actions[action_idx]["attachments"].append(attachment)
+
+        plan.plan_data = data
+        plan.updated_at = datetime.utcnow()
+        plan.updated_by = user_email
+        await self.db.flush()
+        return attachment
+
+    async def update_action_item_status(
+        self,
+        action_plan_id: int,
+        sujet_idx: int,
+        action_idx: int,
+        status: str,
+        implementation_date: Optional[str],
+        user_email: str,
+    ) -> dict:
+        """Update the status of a single action inside a plan's JSONB. Sets closed_date when closing."""
+        valid_statuses = {"open", "closed", "blocked"}
+        if status not in valid_statuses:
+            raise AppException(400, f"Invalid status. Must be one of: {', '.join(sorted(valid_statuses))}.", "INVALID_STATUS")
+
+        plan = await self.get_action_plan(action_plan_id)
+        data = dict(plan.plan_data or {})
+        sujets = data.get("sujets", [])
+
+        if sujet_idx >= len(sujets):
+            raise AppException(404, "Subject index out of range.", "SUJET_NOT_FOUND")
+        actions = sujets[sujet_idx].get("actions", [])
+        if action_idx >= len(actions):
+            raise AppException(404, "Action index out of range.", "ACTION_NOT_FOUND")
+
+        actions[action_idx]["status"] = status
+        if status == "closed":
+            actions[action_idx]["closed_date"] = implementation_date or datetime.utcnow().date().isoformat()
+        else:
+            actions[action_idx].pop("closed_date", None)
+
+        plan.plan_data = data
+        plan.updated_at = datetime.utcnow()
+        plan.updated_by = user_email
+        await self.db.flush()
+        return actions[action_idx]
 
     async def _recalculate_ytd(self, financial_line_id: int) -> None:
         """Recalculate monthly cumulated fields AND push totals back to FinancialLine.

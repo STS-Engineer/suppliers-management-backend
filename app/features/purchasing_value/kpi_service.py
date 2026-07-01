@@ -19,7 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.db.models import FinancialLine, Opportunity, Project
+from app.db.models import FinancialLine, GateApprovalRequest, Opportunity, Project
 from app.features.purchasing_value.schemas import budget_year_bounds, budget_year_for_date
 
 
@@ -57,7 +57,7 @@ class PurchasingKpiService:
         # KPIs (program value lifetime, open pipeline count, validated opps, etc.).
         # "Closed" = deliberately terminated (No Go or Phase 4 complete).
         # "Stuck" = blocked with no progress — still technically open but not actionable.
-        INACTIVE_PHASES: frozenset = frozenset({"Closed", "Stuck"})
+        INACTIVE_PHASES: frozenset = frozenset({"Closed", "Stuck", "Cancelled"})
 
         today = date.today()
         active_budget_year = budget_year_for_date(today)
@@ -145,6 +145,15 @@ class PurchasingKpiService:
         )
         all_projects: list[Project] = list(projs_result.scalars().all())
 
+        gate_result = await self.db.execute(
+            select(GateApprovalRequest).where(
+                GateApprovalRequest.is_deleted.is_(False),
+                GateApprovalRequest.status == "Completed",
+                GateApprovalRequest.consensus_result.in_(["Go", "No Go", "Review"]),
+            )
+        )
+        all_gate_requests: list[GateApprovalRequest] = list(gate_result.scalars().all())
+
         # lines_by_opp: all lines (for conversion-rate check — needs lifetime actuals)
         # kpi_lines_by_opp: FY-scoped lines (for by_type financial figures)
         lines_by_opp: dict[int, list[FinancialLine]] = {}
@@ -166,8 +175,11 @@ class PurchasingKpiService:
             # rate (defensive: heals bad data without needing a migration).
             if (opp.currency or "EUR") == "EUR":
                 return 1.0
-            r = float(opp.fx_rate_to_eur) if opp.fx_rate_to_eur else 1.0
-            return r if r > 0 else 1.0
+            # Non-EUR with no usable rate: return 0.0 so the line contributes nothing
+            # to EUR totals rather than being silently converted at 1:1.  The caller
+            # sees the line in non_eur_missing_rate so the exclusion is transparent.
+            r = float(opp.fx_rate_to_eur) if opp.fx_rate_to_eur else 0.0
+            return r if r > 0 else 0.0
 
         rate_by_line: dict[int, float] = {
             line.financial_line_id: _rate(line) for line in all_lines
@@ -180,8 +192,9 @@ class PurchasingKpiService:
                 return _n(line.forecast_eoy_current)
             return _n(line.expected_annual_saving)
 
-        # Data-quality: non-EUR lines with no usable rate are summed at 1:1 — surface
-        # the count so a missing rate is visible rather than silently distorting totals.
+        # Data-quality: non-EUR lines with no usable rate are excluded from EUR totals
+        # (0-rated by _rate).  Surface the count so Finance knows how much pipeline
+        # is missing from the consolidated figures.
         non_eur_missing_rate = len(
             [
                 line
@@ -203,12 +216,14 @@ class PurchasingKpiService:
         def _opp_rate(o) -> float:
             if o is None or (o.currency or "EUR") == "EUR":
                 return 1.0
-            r = float(o.fx_rate_to_eur) if o.fx_rate_to_eur else 1.0
-            return r if r > 0 else 1.0
+            r = float(o.fx_rate_to_eur) if o.fx_rate_to_eur else 0.0
+            return r if r > 0 else 0.0
 
         committed_budget_by_opp: dict[int, float] = {}
         # Full budget status per opp for the current FY (used in EOY-by-status breakdown)
         budget_status_by_opp: dict[int, str] = {}
+        # Delta reason per committed opp (for "by reason" stacked chart in by_plant)
+        delta_reason_by_opp: dict[int, list] = {}
         for o in all_opps:
             # Closed/Stuck opps are no longer active — their budget commitment must not
             # inflate total_budget, budgeted_expected_annual, or eoy_vs_budget_pct.
@@ -224,6 +239,8 @@ class PurchasingKpiService:
                         committed_budget_by_opp[o.opportunity_id] = (
                             _n(by.applicable_amount) * _opp_rate(o)
                         )
+                        if by.delta_reason:
+                            delta_reason_by_opp[o.opportunity_id] = list(by.delta_reason)
         committed_opp_ids = set(committed_budget_by_opp)
 
         # "Opportunity" = validated (Go decision) but not yet committed to budget this FY.
@@ -305,11 +322,8 @@ class PurchasingKpiService:
             for line in over_budget_lines
         )
 
-        # EOY vs Budget: budgeted EOY forecast vs budgeted expected annual saving.
-        # Both are full-year annual figures → ratio is meaningful (e.g. 95% = slight shortfall).
-        # total_budget (applicable_amount) is intentionally NOT used here: it is FY pro-rata
-        # and dividing an annual figure by a partial-year amount produces nonsense (e.g. 600%).
-        eoy_vs_budget_pct = _pct(budgeted_eoy_forecast, budgeted_expected_annual)
+        # EOY vs Budget: budgeted EOY forecast vs total committed budget (applicable_amount sum).
+        eoy_vs_budget_pct = _pct(budgeted_eoy_forecast, total_budget)
         eoy_vs_expected_pct = _pct(total_eoy_forecast, total_expected)
 
         # Forecast drift: latest forecast_eoy_saving vs previous month's
@@ -318,7 +332,7 @@ class PurchasingKpiService:
             [
                 (
                     r.period_month,
-                    _n(r.forecast_eoy_saving) * rate_by_line.get(r.financial_line_id, 1.0),
+                    _n(r.forecast_eoy_saving) * rate_by_line.get(r.financial_line_id, 0.0),
                 )
                 for line in kpi_lines
                 for r in line.monthly_financials
@@ -351,7 +365,7 @@ class PurchasingKpiService:
         validated_opps = [
             o
             for o in all_opps
-            if o.validation_decision == "Go" and o.phase_status not in INACTIVE_PHASES
+            if o.validation_decision == "Go"
         ]
         converted_opps = [
             o
@@ -384,12 +398,12 @@ class PurchasingKpiService:
 
         ytd_rows = ytd_rows_for(kpi_lines)
         actual_ytd = sum(
-            _n(r.actual_saving) * rate_by_line.get(r.financial_line_id, 1.0)
+            _n(r.actual_saving) * rate_by_line.get(r.financial_line_id, 0.0)
             for r in ytd_rows
             if r.actual_saving is not None
         )
         expected_ytd = sum(
-            _n(r.expected_saving) * rate_by_line.get(r.financial_line_id, 1.0)
+            _n(r.expected_saving) * rate_by_line.get(r.financial_line_id, 0.0)
             for r in ytd_rows
         )
 
@@ -397,26 +411,57 @@ class PurchasingKpiService:
             [line for line in kpi_lines if line.opportunity_id in committed_opp_ids]
         )
         budget_actual_ytd = sum(
-            _n(r.actual_saving) * rate_by_line.get(r.financial_line_id, 1.0)
+            _n(r.actual_saving) * rate_by_line.get(r.financial_line_id, 0.0)
             for r in budgeted_ytd_rows
             if r.actual_saving is not None
         )
         budget_expected_ytd = sum(
-            _n(r.expected_saving) * rate_by_line.get(r.financial_line_id, 1.0)
+            _n(r.expected_saving) * rate_by_line.get(r.financial_line_id, 0.0)
             for r in budgeted_ytd_rows
         )
 
         actual_vs_expected_ytd_pct = _pct(actual_ytd, expected_ytd)
         actual_vs_budget_ytd_pct = _pct(budget_actual_ytd, budget_expected_ytd)
 
+        # Fixed-date KPI: total actual savings since Jan 1 2026 (calendar-year reference from Monday board).
+        # Uses all_lines (not kpi_lines) — FY-agnostic, covers any line with actuals on/after that date.
+        _jan_2026 = date(2026, 1, 1)
+        total_saving_from_jan2026 = round(
+            sum(
+                _n(r.actual_saving) * rate_by_line.get(r.financial_line_id, 0.0)
+                for line in all_lines
+                for r in line.monthly_financials
+                if r.actual_saving is not None
+                and r.period_month
+                and r.period_month >= _jan_2026
+                and r.period_month <= ytd_cutoff
+            ),
+            2,
+        )
+
         # ── EFFICIENCY KPIs ───────────────────────────────────────────────
 
-        # Phase 0 Go Rate — FIX: denominator = all opps that have had any gate decision
-        phase0_decided = [
-            o for o in all_opps if o.validation_decision in ("Go", "No Go", "Review")
-        ]
-        phase0_go = [o for o in phase0_decided if o.validation_decision == "Go"]
-        phase0_go_rate_pct = _pct(len(phase0_go), len(phase0_decided))
+        # Per-phase gate go rates — sourced from completed GateApprovalRequest decisions.
+        # Phase 0 = initial validation gate; Phase 1/2/3 = subsequent progression gates.
+        _GATE_PHASES = ["Phase 0", "Phase 1", "Phase 2", "Phase 3"]
+        gate_go_rates: list[dict] = []
+        for _phase in _GATE_PHASES:
+            _decided = [r for r in all_gate_requests if r.phase_from == _phase]
+            _go = [r for r in _decided if r.consensus_result == "Go"]
+            _no_go = [r for r in _decided if r.consensus_result == "No Go"]
+            gate_go_rates.append({
+                "phase": _phase,
+                "decided": len(_decided),
+                "go": len(_go),
+                "no_go": len(_no_go),
+                "rate": _pct(len(_go), len(_decided)),
+            })
+
+        # Backward-compat scalar kept in kpis dict
+        _p0 = gate_go_rates[0]
+        phase0_go_rate_pct = _p0["rate"]
+        phase0_decided = [r for r in all_gate_requests if r.phase_from == "Phase 0"]
+        phase0_go = [r for r in phase0_decided if r.consensus_result == "Go"]
 
         active_projects = [
             p for p in all_projects if p.status in ("On time", "Late", "On hold")
@@ -561,6 +606,13 @@ class PurchasingKpiService:
                     "eoy_by_status": {"Budgeted": 0.0, "Opportunity": 0.0, "Empty": 0.0},
                     "opp_count": set(),
                     "type_breakdown": {},
+                    # EOY and budget breakdown by opportunity type (for grouped/stacked bar charts)
+                    "eoy_by_type": {},
+                    "budgeted_eoy_by_type": {},
+                    "budgeted_expected_annual_by_type": {},
+                    # EOY and budget breakdown by delta_reason (for "main reason" stacked chart)
+                    "budgeted_eoy_by_reason": {},
+                    "budgeted_expected_annual_by_reason": {},
                 }
             plant_map[pid]["expected_annual"] += _n(line.expected_annual_saving) * _rate(line)
             # "budget_value" = committed FY pro-rata (for informational display only,
@@ -595,6 +647,28 @@ class PurchasingKpiService:
                 plant_map[pid]["type_breakdown"][t] = plant_map[pid][
                     "type_breakdown"
                 ].get(t, 0.0) + _n(line.expected_annual_saving) * _rate(line)
+                plant_map[pid]["eoy_by_type"][t] = (
+                    plant_map[pid]["eoy_by_type"].get(t, 0.0) + _eoy(line) * _rate(line)
+                )
+                if line.opportunity_id in committed_opp_ids:
+                    plant_map[pid]["budgeted_eoy_by_type"][t] = (
+                        plant_map[pid]["budgeted_eoy_by_type"].get(t, 0.0) + _eoy(line) * _rate(line)
+                    )
+                    plant_map[pid]["budgeted_expected_annual_by_type"][t] = (
+                        plant_map[pid]["budgeted_expected_annual_by_type"].get(t, 0.0)
+                        + _n(line.expected_annual_saving) * _rate(line)
+                    )
+                    _reasons = delta_reason_by_opp.get(line.opportunity_id) or ["As planned"]
+                    _share = 1.0 / len(_reasons)
+                    for _reason in _reasons:
+                        plant_map[pid]["budgeted_eoy_by_reason"][_reason] = (
+                            plant_map[pid]["budgeted_eoy_by_reason"].get(_reason, 0.0)
+                            + _eoy(line) * _rate(line) * _share
+                        )
+                        plant_map[pid]["budgeted_expected_annual_by_reason"][_reason] = (
+                            plant_map[pid]["budgeted_expected_annual_by_reason"].get(_reason, 0.0)
+                            + _n(line.expected_annual_saving) * _rate(line) * _share
+                        )
 
         by_plant = []
         for d in sorted(
@@ -628,8 +702,77 @@ class PurchasingKpiService:
                     "eoy_vs_expected_pct": _pct(d["eoy_forecast"], d["expected_annual"])
                     if d["expected_annual"]
                     else None,
+                    "eoy_by_type": {k: round(v, 2) for k, v in d["eoy_by_type"].items()},
+                    # delta = budgeted EOY forecast − budgeted expected annual (both annual figures)
+                    # positive → outperforming budget, negative → below budget
+                    "delta_eoy_budget_by_type": {
+                        t: round(
+                            d["budgeted_eoy_by_type"].get(t, 0.0)
+                            - d["budgeted_expected_annual_by_type"].get(t, 0.0),
+                            2,
+                        )
+                        for t in set(
+                            list(d["budgeted_eoy_by_type"].keys())
+                            + list(d["budgeted_expected_annual_by_type"].keys())
+                        )
+                    },
+                    # delta by delta_reason — "As planned" when no reason is set
+                    "delta_eoy_budget_by_reason": {
+                        r: round(
+                            d["budgeted_eoy_by_reason"].get(r, 0.0)
+                            - d["budgeted_expected_annual_by_reason"].get(r, 0.0),
+                            2,
+                        )
+                        for r in set(
+                            list(d["budgeted_eoy_by_reason"].keys())
+                            + list(d["budgeted_expected_annual_by_reason"].keys())
+                        )
+                    },
                 }
             )
+
+        # ── BY SUPPLIER (Top 10 by projected EOY savings) ────────────────
+        supplier_map: dict[str, dict] = {}
+        for line in kpi_lines:
+            opp = line.opportunity
+            sup_name = (opp.proposed_supplier_name if opp and opp.proposed_supplier_name else None) or "Unknown"
+            opp_type = (opp.opportunity_type if opp else None) or "Unknown"
+            if sup_name not in supplier_map:
+                supplier_map[sup_name] = {
+                    "supplier_name": sup_name,
+                    "opp_ids": set(),
+                    "eoy_forecast": 0.0,
+                    "expected_annual": 0.0,
+                    "actual_ytd": 0.0,
+                    "eoy_by_type": {},
+                }
+            sm = supplier_map[sup_name]
+            sm["opp_ids"].add(line.opportunity_id)
+            sm["eoy_forecast"] += _eoy(line) * _rate(line)
+            sm["expected_annual"] += _n(line.expected_annual_saving) * _rate(line)
+            sm["eoy_by_type"][opp_type] = (
+                sm["eoy_by_type"].get(opp_type, 0.0) + _eoy(line) * _rate(line)
+            )
+            for row in ytd_rows_for([line]):
+                if row.actual_saving is not None:
+                    sm["actual_ytd"] += _n(row.actual_saving) * _rate(line)
+
+        by_supplier = sorted(
+            [
+                {
+                    "supplier_name": sm["supplier_name"],
+                    "opp_count": len(sm["opp_ids"]),
+                    "eoy_forecast": round(sm["eoy_forecast"], 2),
+                    "expected_annual": round(sm["expected_annual"], 2),
+                    "actual_ytd": round(sm["actual_ytd"], 2),
+                    "eoy_by_type": {k: round(v, 2) for k, v in sm["eoy_by_type"].items()},
+                }
+                for sm in supplier_map.values()
+                if sm["supplier_name"] != "Unknown"
+            ],
+            key=lambda x: x["eoy_forecast"],
+            reverse=True,
+        )[:10]
 
         # ── C2 — BY SAVING TYPE (STP run-rate vs Flat annual) ────────────
         # STP types (Sourcing / Technical Productivity): the comparable unit is the
@@ -658,11 +801,11 @@ class PurchasingKpiService:
                 "line_count": len(stp_lines),
                 "expected_annual": round(sum(_stp_annual(ln) for ln in stp_lines), 2),
                 "actual_ytd": round(sum(
-                    _n(r.actual_saving) * rate_by_line.get(r.financial_line_id, 1.0)
+                    _n(r.actual_saving) * rate_by_line.get(r.financial_line_id, 0.0)
                     for r in stp_ytd_rows if r.actual_saving is not None
                 ), 2),
                 "expected_ytd": round(sum(
-                    _n(r.expected_saving) * rate_by_line.get(r.financial_line_id, 1.0)
+                    _n(r.expected_saving) * rate_by_line.get(r.financial_line_id, 0.0)
                     for r in stp_ytd_rows
                 ), 2),
                 "eoy_forecast": round(sum(_eoy(ln) * _rate(ln) for ln in stp_lines), 2),
@@ -678,11 +821,11 @@ class PurchasingKpiService:
                 "line_count": len(flat_lines),
                 "expected_annual": round(sum(_n(ln.expected_annual_saving) * _rate(ln) for ln in flat_lines), 2),
                 "actual_ytd": round(sum(
-                    _n(r.actual_saving) * rate_by_line.get(r.financial_line_id, 1.0)
+                    _n(r.actual_saving) * rate_by_line.get(r.financial_line_id, 0.0)
                     for r in flat_ytd_rows if r.actual_saving is not None
                 ), 2),
                 "expected_ytd": round(sum(
-                    _n(r.expected_saving) * rate_by_line.get(r.financial_line_id, 1.0)
+                    _n(r.expected_saving) * rate_by_line.get(r.financial_line_id, 0.0)
                     for r in flat_ytd_rows
                 ), 2),
                 "eoy_forecast": round(sum(_eoy(ln) * _rate(ln) for ln in flat_lines), 2),
@@ -702,7 +845,7 @@ class PurchasingKpiService:
             if (ln.opportunity and (ln.opportunity.opportunity_type or "") == "Cash")
         ]
         cash_ytd_rows = [
-            (r, rate_by_line.get(r.financial_line_id, 1.0))
+            (r, rate_by_line.get(r.financial_line_id, 0.0))
             for ln in cash_lines
             for r in ln.monthly_financials
             if r.period_month
@@ -849,9 +992,11 @@ class PurchasingKpiService:
             if (o.currency or "EUR") == "EUR":
                 fx = 1.0
             else:
-                fx = float(o.fx_rate_to_eur) if o.fx_rate_to_eur else 1.0
+                fx = float(o.fx_rate_to_eur) if o.fx_rate_to_eur else 0.0
                 if fx <= 0:
-                    fx = 1.0
+                    fx = 0.0
+            if fx == 0.0 and (o.currency or "EUR") != "EUR":
+                continue  # missing FX — exclude from EUR estimate rather than 1:1
             for yr, amt in (o.saving_by_year or {}).items():
                 estimate_by_year[yr] = (
                     estimate_by_year.get(yr, 0.0) + float(amt or 0) * fx
@@ -871,9 +1016,11 @@ class PurchasingKpiService:
                 if (o.currency or "EUR") == "EUR":
                     fx = 1.0
                 else:
-                    fx = float(o.fx_rate_to_eur) if o.fx_rate_to_eur else 1.0
+                    fx = float(o.fx_rate_to_eur) if o.fx_rate_to_eur else 0.0
                     if fx <= 0:
-                        fx = 1.0
+                        fx = 0.0
+                if fx == 0.0 and (o.currency or "EUR") != "EUR":
+                    continue  # missing FX — exclude from EUR total rather than 1:1
                 program_value_lifetime += float(o.period_saving) * fx
 
         # ── BY BUYER (P4 — Team & Governance) ────────────────────────────
@@ -1000,13 +1147,17 @@ class PurchasingKpiService:
                 # Validated-but-not-yet-committed pipeline (budget_status == "Opportunity")
                 "opportunity_pipeline_amount": round(sum(opportunity_pipeline_by_opp.values()), 2),
                 "opportunity_pipeline_count": len(opportunity_opp_ids),
+                # Fixed-date total: actual savings since Jan 1 2026 (Monday board calendar-year reference)
+                "total_saving_from_jan2026": total_saving_from_jan2026,
             },
+            "gate_go_rates": gate_go_rates,
             "monthly_actuals": monthly_actuals,
             "year_split": year_split,
             "estimate_saving_by_year": estimate_saving_by_year,
             "by_saving_type": by_saving_type,
             "cash_kpis": cash_kpis,
             "by_plant": by_plant,
+            "by_supplier": by_supplier,
             "by_type": by_type,
             "by_buyer": by_buyer,
             "late_projects": late_projects,
