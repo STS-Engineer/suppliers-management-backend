@@ -1,7 +1,7 @@
 """Supplier onboarding workflow service."""
 
 from typing import Dict, Any, Optional, List
-from datetime import datetime, timedelta
+from datetime import datetime
 from decimal import Decimal
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -15,8 +15,6 @@ _SCOPE_FREQUENCY: dict[str, str] = {
 }
 
 from app.db.models import (
-    AssessmentTemplate,
-    SupplierAssessment,
     AvocarbonSite,
     Contact,
     SupplierCategory,
@@ -26,13 +24,6 @@ from app.db.models import (
     SupplierSiteRelation,
     SupplierSpendByYear,
     SupplierUnit,
-    ScoreCard,
-    Classification,
-    SupplierStatusHistory,
-    PldClassEvaluationInput,
-    OperationalEvaluationInput,
-    ImpactEvaluationInput,
-    EvaluationCycle,
 )
 from app.core.exceptions import AppException
 
@@ -100,7 +91,7 @@ class SupplierOnboardingWorkflow:
             contact_list = supplier_result["contacts"]
 
             # Step 3: Create unit-level contacts if provided
-            for uc_data in (unit_contacts or []):
+            for uc_data in unit_contacts or []:
                 uc_data["id_supplier_unit"] = unit.id_supplier_unit
                 uc = Contact(**uc_data)
                 self.db.add(uc)
@@ -122,7 +113,10 @@ class SupplierOnboardingWorkflow:
 
             # Step 4b: Sync quality cert criteria detail from certs just created
             if certifications:
-                from app.features.supplier_relations.service import SupplierRelationService
+                from app.features.supplier_relations.service import (
+                    SupplierRelationService,
+                )
+
                 rel_service = SupplierRelationService(self.db)
                 await rel_service.sync_quality_certification_for_unit(
                     unit.id_supplier_unit,
@@ -445,76 +439,6 @@ class SupplierOnboardingWorkflow:
 
         return relation
 
-    async def _launch_prequalification(
-        self,
-        relation: SupplierSiteRelation,
-        supplier_group: SupplierGroup,
-        supplier_unit: SupplierUnit,
-        template_id: Optional[int] = None,
-    ) -> Dict[str, Any]:
-        """
-        Launch prequalification:
-        1. Create evaluation cycle
-        2. Create supplier assessment from template
-        """
-        try:
-            # Create evaluation cycle
-            cycle = EvaluationCycle(
-                id_relation=relation.id_relation,
-                cycle_type="Prequalification",
-                supplier_type=supplier_group.supplier_type or "Standard",
-                frequency="One-time",
-                period_start=datetime.now().date(),
-                period_end=(datetime.now() + timedelta(days=30)).date(),
-                due_date=(datetime.now() + timedelta(days=14)).date(),
-                cycle_status="Active",
-                launched_by="SYSTEM",
-                launched_at=datetime.now(),
-                comments=f"Prequalification cycle for {supplier_group.nom}",
-            )
-            self.db.add(cycle)
-            await self.db.flush()
-
-            # Fetch assessment template
-            template = None
-            assessment = None
-
-            if template_id:
-                template = await self.db.get(AssessmentTemplate, template_id)
-            # else:
-            #     Get default prequalification template
-            #     stmt = select(AssessmentTemplate).where(
-            #         AssessmentTemplate.template_type == "SELF_ASSESSMENT"
-            #     ).where(
-            #         AssessmentTemplate.status == "Active"
-            #     )
-            #     result = await self.db.execute(stmt)
-            #     template = result.scalars().first()
-
-            # Create supplier assessment
-            if template:
-                assessment = SupplierAssessment(
-                    id_relation=relation.id_relation,
-                    id_template=template.id_template,
-                    id_cycle=cycle.id_cycle,
-                    assessment_date=datetime.now().date(),
-                    status="Pending",
-                    comments=f"Prequalification assessment for {supplier_group.nom}",
-                )
-                self.db.add(assessment)
-                await self.db.flush()
-
-            return {
-                "cycle": cycle,
-                "assessment": assessment,
-                "template": template,
-            }
-
-        except Exception as e:
-            raise AppException(
-                f"Failed to launch prequalification: {str(e)}", status_code=400
-            )
-
     @staticmethod
     def _get_primary_contact(
         contacts: List[Dict[str, Any]],
@@ -524,184 +448,6 @@ class SupplierOnboardingWorkflow:
             if contact.get("is_primary_contact"):
                 return contact
         return contacts[0] if contacts else None
-
-    async def _create_initial_evaluation_baseline(
-        self,
-        relation: SupplierSiteRelation,
-        cycle: Optional[EvaluationCycle],
-        group_data: Dict[str, Any],
-        evaluation: Optional[Dict[str, Any]],
-        certifications: List[Dict[str, Any]],
-    ) -> Dict[str, Any]:
-        """Create the initial theoretical evaluation baseline for onboarding."""
-        if not cycle or not evaluation:
-            return {
-                "score_card": None,
-                "classification": None,
-                "class_input": None,
-                "operational_input": None,
-                "impact_input": None,
-                "status_history": None,
-            }
-
-        certification_type = (
-            certifications[0].get("certification_type") if certifications else None
-        )
-        quality_certification = (
-            evaluation.get("quality_certification") or certification_type
-        )
-        strategic_mention = self._extract_strategic_mention(
-            evaluation,
-            unit_defaults=group_data,
-        )
-        panel_decision = self._extract_panel_decision(evaluation)
-        class_value = self._extract_class_value(evaluation)
-        operational_grade = self._extract_operational_grade(evaluation)
-        class_score = self._to_decimal(evaluation.get("class_score"))
-        operational_score = self._to_decimal(evaluation.get("operational_score"))
-        impact_score = self._extract_impact_score(evaluation)
-        final_grade = self._compose_final_grade(operational_grade, class_value)
-
-        class_input = PldClassEvaluationInput(
-            id_relation=relation.id_relation,
-            id_cycle=cycle.id_cycle,
-            top=evaluation.get("top"),
-            lta=evaluation.get("lta"),
-            productivity=evaluation.get("prod"),
-            quality_certification=quality_certification,
-            prod_lia_ins=evaluation.get("prod_lia_ins"),
-            competitiveness=evaluation.get("competitiveness"),
-            sqma=evaluation.get("sqma"),
-            family_coverage=evaluation.get("family_coverage"),
-            geo_coverage=evaluation.get("geo_coverage"),
-            cons_or_wd=evaluation.get("cons_or_wd"),
-            financial_health=evaluation.get("financial_health"),
-            class_score=class_score,
-            class_value=class_value,
-            impact_score=impact_score,
-            strategic_mention=strategic_mention,
-            panel_decision=panel_decision,
-            comments=evaluation.get("comments"),
-            entered_by="SYSTEM",
-        )
-        self.db.add(class_input)
-
-        operational_input = OperationalEvaluationInput(
-            id_relation=relation.id_relation,
-            id_cycle=cycle.id_cycle,
-            source_type="self_assessment",
-            management_system=self._to_decimal(evaluation.get("management_system")),
-            customer_communication=self._to_decimal(
-                evaluation.get("customer_communication")
-            ),
-            development_design=self._to_decimal(evaluation.get("development_design")),
-            production_manufacturing=self._to_decimal(
-                evaluation.get("production_manufacturing")
-            ),
-            quality_audits=self._to_decimal(evaluation.get("quality_audits")),
-            suppliers_subcontractors=self._to_decimal(
-                evaluation.get("suppliers_subcontractors")
-            ),
-            deliveries=self._to_decimal(evaluation.get("deliveries")),
-            environment_ethic_rules=self._to_decimal(
-                evaluation.get("environment_ethic_rules")
-            ),
-            average_score=operational_score,
-            operational_grade=operational_grade,
-            comments=evaluation.get("comments"),
-            entered_by="SYSTEM",
-        )
-        self.db.add(operational_input)
-
-        impact_input = ImpactEvaluationInput(
-            id_relation=relation.id_relation,
-            id_cycle=cycle.id_cycle,
-            question_1=evaluation.get("impact_question_1"),
-            question_2=evaluation.get("impact_question_2"),
-            question_3=evaluation.get("impact_question_3"),
-            question_4=evaluation.get("impact_question_4"),
-            question_5=evaluation.get("impact_question_5"),
-            question_6=evaluation.get("impact_question_6"),
-            impact_score=impact_score,
-            comments=evaluation.get("comments"),
-            entered_by="SYSTEM",
-        )
-        self.db.add(impact_input)
-
-        score_card = ScoreCard(
-            id_relation=relation.id_relation,
-            id_cycle=cycle.id_cycle,
-            scorecard_date=datetime.now().date(),
-            score=operational_score,
-            grade=operational_grade,
-            comments="Initial theoretical operational evaluation from onboarding self-assessment.",
-            entered_by="SYSTEM",
-        )
-        self.db.add(score_card)
-        await self.db.flush()
-
-        classification = Classification(
-            id_relation=relation.id_relation,
-            id_cycle=cycle.id_cycle,
-            classification_date=datetime.now().date(),
-            classification_score=class_score,
-            class_value=class_value,
-            operational_score=operational_score,
-            operational_grade=operational_grade,
-            final_grade=final_grade,
-            impact_score=impact_score,
-            strategic_mention=strategic_mention,
-            panel_decision=panel_decision,
-            comments="Initial onboarding class evaluation baseline.",
-            entered_by="SYSTEM",
-        )
-        self.db.add(classification)
-
-        status_history = SupplierStatusHistory(
-            id_relation=relation.id_relation,
-            old_status=None,
-            new_status=relation.supplier_status,
-            old_class=None,
-            new_class=class_value,
-            old_grade=None,
-            new_grade=operational_grade,
-            old_final_grade=None,
-            new_final_grade=final_grade,
-            old_strategic_mention=None,
-            new_strategic_mention=strategic_mention,
-            old_panel_decision=None,
-            new_panel_decision=panel_decision,
-            change_reason="Initial onboarding theoretical baseline created.",
-            changed_by="SYSTEM",
-        )
-        self.db.add(status_history)
-
-        relation.class_value = class_value
-        relation.operational_grade = operational_grade
-        relation.final_grade = final_grade
-        relation.strategic_mention = strategic_mention
-        relation.panel_decision = panel_decision
-        relation.evaluation_suggestion = (
-            panel_decision or relation.evaluation_suggestion
-        )
-        relation.last_evaluation_date = datetime.now().date()
-
-        await self.db.flush()
-
-        return {
-            "score_card": score_card,
-            "classification": classification,
-            "class_input": class_input,
-            "operational_input": operational_input,
-            "impact_input": impact_input,
-            "status_history": status_history,
-        }
-
-    @staticmethod
-    def _to_decimal(value: Any) -> Optional[Decimal]:
-        if value in (None, ""):
-            return None
-        return Decimal(str(value))
 
     @staticmethod
     def _compose_final_grade(
@@ -878,4 +624,3 @@ class SupplierOnboardingWorkflow:
             seen.add(category_key)
             categories.append((category_key, item))
         return categories
-

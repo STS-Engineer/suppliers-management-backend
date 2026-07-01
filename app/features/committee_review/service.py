@@ -1,4 +1,5 @@
 """Committee review workflow service."""
+
 from __future__ import annotations
 
 import json
@@ -11,14 +12,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
-from app.core.exceptions import AppException, ForbiddenError, NotFoundError
+from app.core.exceptions import AppException, NotFoundError
 from app.db.models import (
     CommitteeDecision,
     CommitteeMember,
     CommitteeReview,
     SupplierSiteRelation,
-    SupplierUnit,
-    AvocarbonSite,
 )
 from app.features.auth.models import AccessIdentity
 from app.features.committee_review import schemas
@@ -46,10 +45,16 @@ class CommitteeReviewService:
         stmt = stmt.order_by(CommitteeMember.id_member)
         return list((await self.db.execute(stmt)).scalars().all())
 
-    async def create_member(self, payload: schemas.CommitteeMemberCreate) -> CommitteeMember:
-        existing = (await self.db.execute(
-            select(CommitteeMember).where(CommitteeMember.email == payload.email.lower())
-        )).scalar_one_or_none()
+    async def create_member(
+        self, payload: schemas.CommitteeMemberCreate
+    ) -> CommitteeMember:
+        existing = (
+            await self.db.execute(
+                select(CommitteeMember).where(
+                    CommitteeMember.email == payload.email.lower()
+                )
+            )
+        ).scalar_one_or_none()
         if existing:
             existing.name = payload.name
             existing.position = payload.position
@@ -125,12 +130,14 @@ class CommitteeReviewService:
 
         # Prevent concurrent review cycles on the same relation — multiple active
         # token sets would create competing outcomes and break the auto-approval logic.
-        existing_active = (await self.db.execute(
-            select(CommitteeReview).where(
-                CommitteeReview.id_relation == relation_id,
-                CommitteeReview.status == "in_progress",
+        existing_active = (
+            await self.db.execute(
+                select(CommitteeReview).where(
+                    CommitteeReview.id_relation == relation_id,
+                    CommitteeReview.status == "in_progress",
+                )
             )
-        )).scalar_one_or_none()
+        ).scalar_one_or_none()
         if existing_active:
             raise AppException(
                 status_code=409,
@@ -249,7 +256,9 @@ class CommitteeReviewService:
         decision.decided_at = _now()
         decision.ip_address = ip_address
         decision.suggested_supplier_status = payload.suggested_supplier_status or None
-        decision.suggested_strategic_mention = payload.suggested_strategic_mention or None
+        decision.suggested_strategic_mention = (
+            payload.suggested_strategic_mention or None
+        )
         if not decision.accessed_at:
             decision.accessed_at = _now()
 
@@ -281,7 +290,9 @@ class CommitteeReviewService:
                 review_fresh.final_decision = "approved"
                 review_fresh.final_decision_by = "auto"
                 review_fresh.final_decision_at = _now()
-                review_fresh.final_decision_comments = "Automatically approved: all committee members agreed."
+                review_fresh.final_decision_comments = (
+                    "Automatically approved: all committee members agreed."
+                )
                 await self.db.flush()
 
                 relation = await self._load_relation(review_fresh.id_relation)
@@ -299,7 +310,9 @@ class CommitteeReviewService:
                 review_fresh.final_decision = "rejected"
                 review_fresh.final_decision_by = "auto"
                 review_fresh.final_decision_at = _now()
-                review_fresh.final_decision_comments = "Automatically rejected: all committee members rejected."
+                review_fresh.final_decision_comments = (
+                    "Automatically rejected: all committee members rejected."
+                )
                 await self.db.flush()
 
                 relation = await self._load_relation(review_fresh.id_relation)
@@ -314,8 +327,12 @@ class CommitteeReviewService:
                 )
             else:
                 # Mixed result → VP must decide manually
-                approved_count = sum(1 for d in review_fresh.decisions if d.decision == "approved")
-                rejected_count = sum(1 for d in review_fresh.decisions if d.decision == "rejected")
+                approved_count = sum(
+                    1 for d in review_fresh.decisions if d.decision == "approved"
+                )
+                rejected_count = sum(
+                    1 for d in review_fresh.decisions if d.decision == "rejected"
+                )
                 await self._notify_vp(
                     title="Committee review requires your decision",
                     body=(
@@ -430,6 +447,7 @@ class CommitteeReviewService:
 
     async def _get_latest_eval_doc_url(self, relation_id: int) -> Optional[str]:
         from app.db.models import Document
+
         stmt = (
             select(Document)
             .where(

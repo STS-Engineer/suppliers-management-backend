@@ -1,7 +1,7 @@
 """Suppliers router."""
 
 from typing import Optional
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status, Query
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy import select
@@ -12,7 +12,12 @@ from app.features.suppliers.service import SupplierService
 from app.features.suppliers import schemas
 from app.features.supplier_onboarding.workflow import SupplierOnboardingWorkflow
 from app.core.exceptions import AppException
-from app.db.models import SupplierGroup, SupplierUnit, SupplierSiteRelation, AvocarbonSite
+from app.db.models import (
+    SupplierGroup,
+    SupplierUnit,
+    SupplierSiteRelation,
+    AvocarbonSite,
+)
 from app.features.auth.models import AccessIdentity
 from app.features.notifications.service import NotificationService
 
@@ -21,24 +26,30 @@ from sqlalchemy.orm import Session
 router = APIRouter(prefix="/suppliers", tags=["suppliers"])
 
 
-_NON_VIEWER = ["purchasing_manager", "vp_conversion", "purchasing_director", "supplier_owner", "global_purchaser", "local_purchaser"]
+_NON_VIEWER = [
+    "purchasing_manager",
+    "vp_conversion",
+    "purchasing_director",
+    "supplier_owner",
+    "global_purchaser",
+    "local_purchaser",
+]
 
 
 def _block_viewer(current_user: dict) -> None:
     """Raise 403 if the caller is a viewer (read-only role)."""
     if current_user.get("access_profile") == "viewer":
-        raise HTTPException(status_code=403, detail="Viewer role cannot perform write operations.")
-
-
-def _require_purchasing_manager(current_user: dict = Depends(get_current_user)) -> dict:
-    if current_user.get("access_profile") != "purchasing_manager":
-        raise HTTPException(status_code=403, detail="Purchasing manager role required")
-    return current_user
+        raise HTTPException(
+            status_code=403, detail="Viewer role cannot perform write operations."
+        )
 
 
 def _require_vp_conversion(current_user: dict = Depends(get_current_user)) -> dict:
     if current_user.get("access_profile") != "vp_conversion":
-        raise HTTPException(status_code=403, detail="VP Conversion role required for supplier validation.")
+        raise HTTPException(
+            status_code=403,
+            detail="VP Conversion role required for supplier validation.",
+        )
     return current_user
 
 
@@ -50,12 +61,15 @@ def _raise_clearer_unit_persistence_error(exc: Exception) -> None:
     if "character varying" not in message:
         return
 
-    if "too long" in message or "trop longue" in message or "righttruncation" in message:
+    if (
+        "too long" in message
+        or "trop longue" in message
+        or "righttruncation" in message
+    ):
         raise AppException(
             "One of the supplier unit fields is longer than the database allows. Please shorten values like country, unit name, category, or percentage fields and try again.",
             status_code=400,
         ) from exc
-
 
 
 def _resolve_actor(current_user: dict | None) -> Optional[str]:
@@ -153,7 +167,9 @@ async def complete_supplier_onboarding(
             evaluation=data.evaluation.model_dump(exclude_unset=True)
             if data.evaluation
             else None,
-            unit_contacts=[c.model_dump(exclude_unset=True) for c in data.unit_contacts],
+            unit_contacts=[
+                c.model_dump(exclude_unset=True) for c in data.unit_contacts
+            ],
             annual_spend_value=data.annual_spend_value,
             annual_spend_currency=data.annual_spend_currency,
         )
@@ -161,13 +177,19 @@ async def complete_supplier_onboarding(
         # Notify all purchasing managers that a new supplier awaits validation
         group_name = result["supplier"]["group_name"]
         group_id = result["supplier"]["group_id"]
-        managers = (await db.execute(
-            select(AccessIdentity).where(
-                AccessIdentity.access_profile == "purchasing_manager",
-                AccessIdentity.is_active == True,
-                AccessIdentity.registration_status == "active",
+        managers = (
+            (
+                await db.execute(
+                    select(AccessIdentity).where(
+                        AccessIdentity.access_profile == "purchasing_manager",
+                        AccessIdentity.is_active == True,
+                        AccessIdentity.registration_status == "active",
+                    )
+                )
             )
-        )).scalars().all()
+            .scalars()
+            .all()
+        )
 
         notif_svc = NotificationService(db)
         for mgr in managers:
@@ -201,23 +223,30 @@ async def list_pending_validation(
     current_user: dict = Depends(_require_vp_conversion),
 ):
     """List all supplier groups awaiting purchasing manager validation."""
-    rows = (await db.execute(
-        select(
-            SupplierGroup,
-            SupplierUnit,
-            SupplierSiteRelation,
-            AvocarbonSite,
+    rows = (
+        await db.execute(
+            select(
+                SupplierGroup,
+                SupplierUnit,
+                SupplierSiteRelation,
+                AvocarbonSite,
+            )
+            .join(SupplierUnit, SupplierUnit.id_group == SupplierGroup.id_group)
+            .outerjoin(
+                SupplierSiteRelation,
+                SupplierSiteRelation.id_supplier_unit == SupplierUnit.id_supplier_unit,
+            )
+            .outerjoin(
+                AvocarbonSite, AvocarbonSite.id_site == SupplierSiteRelation.id_site
+            )
+            .where(
+                SupplierGroup.validation_status == "pending",
+                SupplierGroup.is_deleted == False,
+                SupplierUnit.is_deleted == False,
+            )
+            .order_by(SupplierGroup.id_group.desc())
         )
-        .join(SupplierUnit, SupplierUnit.id_group == SupplierGroup.id_group)
-        .outerjoin(SupplierSiteRelation, SupplierSiteRelation.id_supplier_unit == SupplierUnit.id_supplier_unit)
-        .outerjoin(AvocarbonSite, AvocarbonSite.id_site == SupplierSiteRelation.id_site)
-        .where(
-            SupplierGroup.validation_status == "pending",
-            SupplierGroup.is_deleted == False,
-            SupplierUnit.is_deleted == False,
-        )
-        .order_by(SupplierGroup.id_group.desc())
-    )).all()
+    ).all()
 
     # Deduplicate by group_id: one card per group even if multiple relations exist
     seen_groups: set[int] = set()
@@ -226,21 +255,23 @@ async def list_pending_validation(
         if group.id_group in seen_groups:
             continue
         seen_groups.add(group.id_group)
-        items.append({
-            "group_id": group.id_group,
-            "group_name": group.nom,
-            "group_code": f"GRP-{group.id_group:06d}",
-            "validation_status": group.validation_status,
-            "unit_id": unit.id_supplier_unit,
-            "unit_code": unit.supplier_code,
-            "unit_country": unit.country,
-            "relation_id": relation.id_relation if relation else None,
-            "site_id": site.id_site if site else None,
-            "site_name": site.site_name if site else None,
-            "supplier_scope": relation.global_status if relation else None,
-            "supplier_owner": relation.buyer_owner if relation else None,
-            "created_at": group.updated_at,
-        })
+        items.append(
+            {
+                "group_id": group.id_group,
+                "group_name": group.nom,
+                "group_code": f"GRP-{group.id_group:06d}",
+                "validation_status": group.validation_status,
+                "unit_id": unit.id_supplier_unit,
+                "unit_code": unit.supplier_code,
+                "unit_country": unit.country,
+                "relation_id": relation.id_relation if relation else None,
+                "site_id": site.id_site if site else None,
+                "site_name": site.site_name if site else None,
+                "supplier_scope": relation.global_status if relation else None,
+                "supplier_owner": relation.buyer_owner if relation else None,
+                "created_at": group.updated_at,
+            }
+        )
 
     return {"status": "success", "data": items, "total": len(items)}
 
@@ -256,21 +287,28 @@ async def _notify_buyer_for_group(
     """Find the buyer_owner on the first relation of this group and notify them."""
     result = await db.execute(
         select(SupplierSiteRelation)
-        .join(SupplierUnit, SupplierUnit.id_supplier_unit == SupplierSiteRelation.id_supplier_unit)
+        .join(
+            SupplierUnit,
+            SupplierUnit.id_supplier_unit == SupplierSiteRelation.id_supplier_unit,
+        )
         .where(SupplierUnit.id_group == group.id_group)
         .limit(1)
     )
     relation = result.scalar_one_or_none()
-    buyer_email = (relation.buyer_owner if relation else None) or group.group_supplier_owner_email
+    buyer_email = (
+        relation.buyer_owner if relation else None
+    ) or group.group_supplier_owner_email
     if not buyer_email:
         return
 
-    buyer = (await db.execute(
-        select(AccessIdentity).where(
-            AccessIdentity.email == buyer_email,
-            AccessIdentity.is_active == True,
+    buyer = (
+        await db.execute(
+            select(AccessIdentity).where(
+                AccessIdentity.email == buyer_email,
+                AccessIdentity.is_active == True,
+            )
         )
-    )).scalar_one_or_none()
+    ).scalar_one_or_none()
 
     if buyer:
         notif_svc = NotificationService(db)
@@ -295,7 +333,9 @@ async def approve_supplier(
     if not group:
         raise HTTPException(status_code=404, detail="Supplier group not found")
     if group.validation_status != "pending":
-        raise HTTPException(status_code=400, detail=f"Supplier is already '{group.validation_status}'")
+        raise HTTPException(
+            status_code=400, detail=f"Supplier is already '{group.validation_status}'"
+        )
 
     group.validation_status = "approved"
 
@@ -309,7 +349,10 @@ async def approve_supplier(
     )
     await db.commit()
 
-    return {"status": "success", "message": f"Supplier '{group.nom}' approved and added to panel."}
+    return {
+        "status": "success",
+        "message": f"Supplier '{group.nom}' approved and added to panel.",
+    }
 
 
 @router.post("/groups/{group_id}/reject", response_model=dict, tags=["validation"])
@@ -324,7 +367,9 @@ async def reject_supplier(
     if not group:
         raise HTTPException(status_code=404, detail="Supplier group not found")
     if group.validation_status != "pending":
-        raise HTTPException(status_code=400, detail=f"Supplier is already '{group.validation_status}'")
+        raise HTTPException(
+            status_code=400, detail=f"Supplier is already '{group.validation_status}'"
+        )
 
     group.validation_status = "rejected"
 
@@ -472,7 +517,9 @@ async def delete_supplier_group(
     _block_viewer(current_user)
     try:
         service = SupplierService(db)
-        success = await service.delete_supplier_group(group_id, changed_by=_resolve_actor(current_user))
+        success = await service.delete_supplier_group(
+            group_id, changed_by=_resolve_actor(current_user)
+        )
         return {
             "status": "success",
             "data": {"deleted": success},
@@ -582,6 +629,7 @@ async def create_unit_complete(
 
     # Verify group exists
     from app.db.models import SupplierGroup
+
     group = await db.get(SupplierGroup, group_id)
     if not group:
         raise AppException(f"Supplier group {group_id} not found", status_code=404)
@@ -1168,6 +1216,7 @@ async def add_certification_to_unit(
         service = SupplierService(db)
         cert = await service.create_certification_for_unit(unit_id, data)
         from app.features.supplier_relations.service import SupplierRelationService
+
         rel_service = SupplierRelationService(db)
         affected = await rel_service.sync_quality_certification_for_unit(
             unit_id,
@@ -1180,7 +1229,7 @@ async def add_certification_to_unit(
             "data": schemas.SupplierCertificationResponse.model_validate(cert),
             "affected_evaluations": affected,
             "message": f"Certification added to unit {unit_id}."
-                       f"{f' {len(affected)} evaluation(s) recomputed.' if affected else ''}",
+            f"{f' {len(affected)} evaluation(s) recomputed.' if affected else ''}",
             "id": cert.id_certification,
         }
     except AppException:
@@ -1206,6 +1255,7 @@ async def patch_certification(
         # referencing it as a quality cert.
         cert = await service.patch_certification(unit_id, cert_id, data)
         from app.features.supplier_relations.service import SupplierRelationService
+
         rel_service = SupplierRelationService(db)
         affected = await rel_service.sync_quality_certification_for_unit(
             unit_id,
@@ -1241,6 +1291,7 @@ async def delete_certification(
             unit_id, cert_id, deleted_by=_resolve_actor(current_user)
         )
         from app.features.supplier_relations.service import SupplierRelationService
+
         rel_service = SupplierRelationService(db)
         affected = await rel_service.sync_quality_certification_for_unit(
             unit_id,
@@ -1270,13 +1321,21 @@ async def upload_certification_file(
 ):
     """Upload or replace the document file for a certification."""
     _block_viewer(current_user)
-    from app.shared.utils.blob_storage import upload_certification_document, _extract_blob_name, delete_blob
+    from app.shared.utils.blob_storage import (
+        upload_certification_document,
+        _extract_blob_name,
+        delete_blob,
+    )
+
     try:
         service = SupplierService(db)
         cert = await service.repo.find_certification_by_id(cert_id)
         if not cert or cert.id_supplier_unit != unit_id:
             from app.core.exceptions import AppException
-            raise AppException(f"Certification {cert_id} not found for unit {unit_id}", status_code=404)
+
+            raise AppException(
+                f"Certification {cert_id} not found for unit {unit_id}", status_code=404
+            )
 
         # Delete old blob if present
         if cert.file_url:
@@ -1288,11 +1347,14 @@ async def upload_certification_file(
                     pass
 
         result = await upload_certification_document(file, unit_id, cert_id)
-        await service.repo.update_certification(cert_id, {
-            "file_name": result["filename"],
-            "file_url":  result["file_url"],
-            "file_size": result["size"],
-        })
+        await service.repo.update_certification(
+            cert_id,
+            {
+                "file_name": result["filename"],
+                "file_url": result["file_url"],
+                "file_size": result["size"],
+            },
+        )
         await db.commit()
         updated = await service.repo.find_certification_by_id(cert_id)
         return {
@@ -1346,9 +1408,13 @@ async def list_carbon_footprints(
     relation_id: Optional[int] = Query(None, description="Filter by relation ID"),
     year: Optional[int] = Query(None, description="Filter by year"),
     continent: Optional[str] = Query(None, description="Filter by supplier continent"),
-    origin: Optional[str] = Query(None, description="Filter by supplier origin country"),
+    origin: Optional[str] = Query(
+        None, description="Filter by supplier origin country"
+    ),
     site_location: Optional[str] = Query(None, description="Filter by site location"),
-    supplier_unit_code: Optional[str] = Query(None, description="Filter by supplier unit code (SAP)"),
+    supplier_unit_code: Optional[str] = Query(
+        None, description="Filter by supplier unit code (SAP)"
+    ),
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
@@ -1371,8 +1437,12 @@ async def list_carbon_footprints(
             "data": {
                 "items": [
                     {
-                        **schemas.SupplierCarbonFootprintResponse.model_validate(fp).model_dump(),
-                        "supplier_unit_code": fp.supplier_unit.supplier_code if fp.supplier_unit else None,
+                        **schemas.SupplierCarbonFootprintResponse.model_validate(
+                            fp
+                        ).model_dump(),
+                        "supplier_unit_code": fp.supplier_unit.supplier_code
+                        if fp.supplier_unit
+                        else None,
                     }
                     for fp in result["items"]
                 ],
@@ -1398,14 +1468,22 @@ async def update_carbon_footprint(
     _block_viewer(current_user)
     try:
         service = SupplierService(db)
-        fp = await service.update_carbon_footprint(fp_id, body.model_dump(exclude_none=True))
+        fp = await service.update_carbon_footprint(
+            fp_id, body.model_dump(exclude_none=True)
+        )
         if not fp:
-            raise AppException(status_code=404, detail="Carbon footprint record not found")
+            raise AppException(
+                status_code=404, detail="Carbon footprint record not found"
+            )
         return {
             "status": "success",
             "data": {
-                **schemas.SupplierCarbonFootprintResponse.model_validate(fp).model_dump(),
-                "supplier_unit_code": fp.supplier_unit.supplier_code if fp.supplier_unit else None,
+                **schemas.SupplierCarbonFootprintResponse.model_validate(
+                    fp
+                ).model_dump(),
+                "supplier_unit_code": fp.supplier_unit.supplier_code
+                if fp.supplier_unit
+                else None,
             },
             "message": "Carbon footprint record updated",
         }
@@ -1429,7 +1507,9 @@ async def create_carbon_footprint(
         return {
             "status": "success",
             "data": {
-                **schemas.SupplierCarbonFootprintResponse.model_validate(fp).model_dump(),
+                **schemas.SupplierCarbonFootprintResponse.model_validate(
+                    fp
+                ).model_dump(),
                 "supplier_unit_code": None,
             },
             "message": "Carbon footprint record created",
@@ -1454,13 +1534,15 @@ async def sync_quality_certifications(
     _block_viewer(current_user)
     try:
         from sqlalchemy import select as sa_select
-        from app.db.models import SupplierCertification, SupplierSiteRelation
+        from app.db.models import SupplierCertification
         from app.features.supplier_relations.service import SupplierRelationService
 
         # Find all distinct unit IDs that have at least one certification
-        stmt = sa_select(SupplierCertification.id_supplier_unit).where(
-            SupplierCertification.is_deleted.is_(False)
-        ).distinct()
+        stmt = (
+            sa_select(SupplierCertification.id_supplier_unit)
+            .where(SupplierCertification.is_deleted.is_(False))
+            .distinct()
+        )
         unit_ids = (await db.execute(stmt)).scalars().all()
 
         rel_service = SupplierRelationService(db)
@@ -1496,7 +1578,9 @@ async def get_certifications_summary(
     """Return counts by validity status for the KPI strip (unfiltered by status)."""
     try:
         service = SupplierService(db)
-        result = await service.get_certifications_summary(standard_type=standard_type, q=q)
+        result = await service.get_certifications_summary(
+            standard_type=standard_type, q=q
+        )
         return {"status": "success", "data": result}
     except Exception:
         raise
@@ -1510,7 +1594,9 @@ async def list_all_certifications(
     expired_only: bool = Query(False),
     expiring_days: Optional[int] = Query(None, ge=1, le=365),
     valid_only: bool = Query(False),
-    q: Optional[str] = Query(None, description="Search by cert type, name, supplier code or group name"),
+    q: Optional[str] = Query(
+        None, description="Search by cert type, name, supplier code or group name"
+    ),
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
@@ -1593,11 +1679,3 @@ async def delete_supplier(
     return await delete_supplier_group(
         group_id=supplier_id, db=db, current_user=current_user
     )
-
-
-
-
-
-
-
-
