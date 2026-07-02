@@ -398,17 +398,7 @@ class SupplierSiteRelation(GovernanceMixin, Base):
         String(255), nullable=True
     )
     last_eval_score: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
-    transit_days: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    transport_mode: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
-    real_ap_days: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    real_ap_days_validated: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    incoterm_place: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
-    consignment: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
     preferred_dev_supplier: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
-    data_validity: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
-    quality_cert_required: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
-    delivery_status: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
-    req_ap_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
     sb1_item_name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
     created_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime, server_default=func.current_timestamp(), nullable=True

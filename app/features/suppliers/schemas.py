@@ -700,17 +700,7 @@ class SupplierSiteRelationCreate(BaseModel):
     evaluation_comments: Optional[str] = Field(None, description="Initial evaluation comments")
     evaluation_suggestion: Optional[str] = Field(None, max_length=255, description="Initial evaluation suggestion")
     # Supplier Panel (SB1) fields
-    transport_mode: Optional[str] = Field(None, max_length=100, description="Transport mode (e.g., Sea, Air, Road)")
-    transit_days: Optional[int] = Field(None, description="Transit time in days")
-    incoterm_place: Optional[str] = Field(None, max_length=200, description="Incoterm and delivery place")
-    real_ap_days: Optional[int] = Field(None, description="Real accounts payable days")
-    real_ap_days_validated: Optional[int] = Field(None, description="Validated AP days")
-    consignment: Optional[bool] = Field(None, description="Consignment stock agreement")
     preferred_dev_supplier: Optional[bool] = Field(None, description="Preferred development supplier flag")
-    data_validity: Optional[str] = Field(None, max_length=50, description="Data validity status from SB1")
-    quality_cert_required: Optional[str] = Field(None, max_length=200, description="Required quality certification")
-    delivery_status: Optional[str] = Field(None, max_length=50, description="Delivery status")
-    req_ap_date: Optional[date] = Field(None, description="Required accounts payable date")
 
 
 class SupplierSiteRelationResponse(BaseModel):
@@ -743,17 +733,7 @@ class SupplierSiteRelationResponse(BaseModel):
     evaluation_suggestion: Optional[str] = None
     # Supplier Panel (SB1) fields
     last_eval_score: Optional[Decimal] = None
-    transport_mode: Optional[str] = None
-    transit_days: Optional[int] = None
-    incoterm_place: Optional[str] = None
-    real_ap_days: Optional[int] = None
-    real_ap_days_validated: Optional[int] = None
-    consignment: Optional[bool] = None
     preferred_dev_supplier: Optional[bool] = None
-    data_validity: Optional[str] = None
-    quality_cert_required: Optional[str] = None
-    delivery_status: Optional[str] = None
-    req_ap_date: Optional[date] = None
 
     class Config:
         from_attributes = True
