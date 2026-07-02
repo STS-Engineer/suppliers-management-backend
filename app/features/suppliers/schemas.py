@@ -69,6 +69,55 @@ OPERATIONAL_CLASS_VALUES = {"A", "B", "C", "D"}
 
 
 # ============================================================================
+# Contact Schemas
+# ============================================================================
+
+class ContactBase(BaseModel):
+    """Base contact schema."""
+    role_label: Optional[str] = Field(None, max_length=100, description="Contact role label (e.g., 'Quality Manager')")
+    role_name: Optional[str] = Field(None, max_length=150, description="Detailed role name")
+    full_name: Optional[str] = Field(None, max_length=200, description="Full name of contact")
+    phone: Optional[str] = Field(None, max_length=50, description="Phone number")
+    email: Optional[str] = Field(None, max_length=200, description="Email address")
+    is_primary_contact: Optional[bool] = Field(False, description="Is this the primary contact?")
+
+    @field_validator("email")
+    @classmethod
+    def validate_contact_email(cls, value: Optional[str]) -> Optional[str]:
+        return _normalize_optional_email(value, "email")
+
+
+class ContactCreate(ContactBase):
+    """Schema for creating a contact."""
+    full_name: str = Field(..., max_length=200, description="Full name (required)")
+    email: Optional[str] = Field(None, max_length=200)
+
+
+class ContactResponse(BaseModel):
+    """Response schema for contact.
+
+    Deliberately does NOT extend ContactBase: that class's email validator
+    enforces create/update input rules, and re-running it here would make
+    reads of already-persisted (possibly legacy/malformed) contact rows
+    raise a 500 instead of just returning the stored value as-is.
+    """
+    id_contact: int
+    id_supplier_group: Optional[int]
+    id_supplier_unit: Optional[int]
+    role_label: Optional[str] = None
+    role_name: Optional[str] = None
+    full_name: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    is_primary_contact: Optional[bool] = False
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+# ============================================================================
 # SupplierGroup Schemas
 # ============================================================================
 
@@ -81,9 +130,6 @@ class SupplierGroupBase(BaseModel):
     monopolistique: Optional[bool] = Field(None, description="Legacy compatibility flag now applied at unit level")
     multi_site: Optional[bool] = Field(None, description="Does this supplier operate multiple sites?")
     directed: Optional[bool] = Field(False, description="Legacy compatibility flag now applied at unit level")
-    exit_supplier: Optional[bool] = Field(False, description="Is this supplier in exit status?")
-    strategic_reason: Optional[str] = Field(None, description="Reason for strategic classification")
-    supplier_type: Optional[str | List[str]] = Field(None, description="Supplier category or categories")
 
     @field_validator("supplier_owner")
     @classmethod
@@ -107,6 +153,14 @@ class SupplierGroupResponse(SupplierGroupBase):
     id_group: int
     group_code: Optional[str] = None
     validation_status: str = "approved"
+    commodities: List[str] = Field(
+        default_factory=list,
+        description="Read-only commodities aggregated from this group's supplier units",
+    )
+    contacts: List[ContactResponse] = Field(
+        default_factory=list,
+        description="Contacts associated with this supplier group",
+    )
 
     class Config:
         from_attributes = True
@@ -151,14 +205,12 @@ def _coerce_decimal(value: object) -> Optional[Decimal]:
 
 class SupplierUnitBase(BaseModel):
     """Base supplier unit schema."""
-    supplier_code: Optional[str] = Field(None, max_length=50, description="Unique supplier code")
+    supplier_name: Optional[str] = Field(None, max_length=50, description="Unique supplier name")
     address_line: Optional[str] = Field(None, max_length=255, description="Street address")
     city: Optional[str] = Field(None, max_length=100, description="City")
     country: Optional[str] = Field(None, max_length=100, description="Country")
     continent: Optional[str] = Field(None, max_length=100, description="Continent of supplier location")
     area: Optional[str] = Field(None, max_length=100, description="Geographic area / region")
-    product_type: Optional[str] = Field(None, max_length=255, description="Type of products supplied (legacy)")
-    product_category: Optional[str] = Field(None, max_length=255, description="Product category (legacy)")
     # Product classification — stored comma-separated, accept list or string
     commodity: Optional[str] = Field(None, max_length=500, description="Commodity / purchasing category (comma-separated)")
     family: Optional[str] = Field(None, max_length=500, description="Product family (comma-separated)")
@@ -168,16 +220,9 @@ class SupplierUnitBase(BaseModel):
     # Environmental / GHG data (from SB6 board)
     carbon_footprint: Optional[str] = Field(None, max_length=100, description="Annual carbon footprint (tCO2e)")
     green_electricity_pct: Optional[str] = Field(None, max_length=10, description="Green electricity share (%)")
-    amount_value: Optional[Decimal] = Field(None, description="Annual spend value")
-    amount_currency: Optional[str] = Field(None, max_length=10, description="Currency code (USD, EUR, etc.)")
     strategique: Optional[bool] = Field(False, description="Is this unit strategic?")
     monopolistique: Optional[bool] = Field(False, description="Is this unit monopolistic?")
     directed: Optional[bool] = Field(False, description="Is this unit directed?")
-
-    @field_validator("amount_value", mode="before")
-    @classmethod
-    def coerce_unit_decimals(cls, v: object) -> Optional[Decimal]:
-        return _coerce_decimal(v)
 
     @field_validator("commodity", "family", "sub_family", "product_line", mode="before")
     @classmethod
@@ -191,18 +236,15 @@ class SupplierUnitBase(BaseModel):
         return str(v) if v != "" else None
 
     @field_validator(
-        "supplier_code",
+        "supplier_name",
         "address_line",
         "city",
         "country",
         "continent",
         "area",
-        "product_type",
-        "product_category",
         "website",
         "carbon_footprint",
         "green_electricity_pct",
-        "amount_currency",
         mode="before",
     )
     @classmethod
@@ -213,12 +255,12 @@ class SupplierUnitBase(BaseModel):
 class SupplierUnitCreate(SupplierUnitBase):
     """Schema for creating a new supplier unit."""
     id_group: Optional[int] = Field(None, description="Parent supplier group ID")
-    supplier_code: str = Field(..., max_length=50, description="Unique supplier code (required)")
+    supplier_name: str = Field(..., max_length=50, description="Unique supplier name (required)")
 
 
 class SupplierUnitUpdate(SupplierUnitBase):
     """Schema for updating a supplier unit."""
-    supplier_code: Optional[str] = Field(None, max_length=50)
+    supplier_name: Optional[str] = Field(None, max_length=50)
     is_active: Optional[bool] = Field(None, description="Active status of the unit")
 
 
@@ -277,6 +319,7 @@ class SupplierCertificationCreate(SupplierCertificationBase):
 
 class SupplierCertificationUpdate(BaseModel):
     """Partial update for a supplier certification — only provided fields are changed."""
+    standard_type: Optional[str] = Field(None, max_length=50)
     certification_type: Optional[str] = Field(None, max_length=100)
     certificate_name: Optional[str] = Field(None, max_length=150)
     start_date: Optional[date] = Field(None)
@@ -302,50 +345,12 @@ class SupplierCertificationResponse(SupplierCertificationBase):
 
 
 # ============================================================================
-# Contact Schemas
-# ============================================================================
-
-class ContactBase(BaseModel):
-    """Base contact schema."""
-    role_label: Optional[str] = Field(None, max_length=100, description="Contact role label (e.g., 'Quality Manager')")
-    role_name: Optional[str] = Field(None, max_length=150, description="Detailed role name")
-    full_name: Optional[str] = Field(None, max_length=200, description="Full name of contact")
-    phone: Optional[str] = Field(None, max_length=50, description="Phone number")
-    email: Optional[str] = Field(None, max_length=200, description="Email address")
-    is_primary_contact: Optional[bool] = Field(False, description="Is this the primary contact?")
-
-    @field_validator("email")
-    @classmethod
-    def validate_contact_email(cls, value: Optional[str]) -> Optional[str]:
-        return _normalize_optional_email(value, "email")
-
-
-class ContactCreate(ContactBase):
-    """Schema for creating a contact."""
-    full_name: str = Field(..., max_length=200, description="Full name (required)")
-    email: Optional[str] = Field(None, max_length=200)
-
-
-class ContactResponse(ContactBase):
-    """Response schema for contact."""
-    id_contact: int
-    id_supplier_group: Optional[int]
-    id_supplier_unit: Optional[int]
-    created_at: Optional[datetime] = None
-    updated_at: Optional[datetime] = None
-    
-    class Config:
-        from_attributes = True
-
-
-# ============================================================================
 # Combined Response Schemas
 # ============================================================================
 
 class SupplierDetailResponse(SupplierGroupResponse):
-    """Detailed supplier response including units."""
+    """Detailed supplier response including units. `contacts` is inherited from SupplierGroupResponse."""
     units: List[SupplierUnitResponse] = Field(default_factory=list, description="Associated supplier units")
-    contacts: List[ContactResponse] = Field(default_factory=list, description="Associated contacts")
 
 
 class CreateSupplierRequest(BaseModel):
@@ -667,7 +672,6 @@ class CompleteSupplierOnboardingRequest(BaseModel):
     supplier_scope: str = Field(..., description="Classification: 'global', 'strategic', or 'local' (required)")
     supplier_owner: str = Field(..., max_length=200, description="Relation-level supplier owner (overrides group default if provided)")
     annual_spend_value: Optional[Decimal] = Field(None, description="Annual spend for this unit-plant relation")
-    annual_spend_currency: Optional[str] = Field(None, max_length=10, description="Currency for annual spend")
     template_id: Optional[int] = Field(None, description="Optional assessment template ID (defaults to first active template)")
 
 
@@ -683,7 +687,6 @@ class SupplierSiteRelationCreate(BaseModel):
     supplier_scope: Optional[str] = Field(None, description="Classification: 'global', 'strategic', or 'local'")
     supplier_owner: Optional[str] = Field(None, max_length=200, description="Relation-level supplier owner override (email). Falls back to group owner if not set.")
     annual_spend_value: Optional[Decimal] = Field(None, description="Annual spend for this unit-plant relation")
-    annual_spend_currency: Optional[str] = Field(None, max_length=10, description="Currency for annual spend")
 
     @field_validator("annual_spend_value", mode="before")
     @classmethod
@@ -699,8 +702,6 @@ class SupplierSiteRelationCreate(BaseModel):
     alias_1: Optional[str] = Field(None, max_length=200, description="Alias for this relation")
     evaluation_comments: Optional[str] = Field(None, description="Initial evaluation comments")
     evaluation_suggestion: Optional[str] = Field(None, max_length=255, description="Initial evaluation suggestion")
-    # Supplier Panel (SB1) fields
-    preferred_dev_supplier: Optional[bool] = Field(None, description="Preferred development supplier flag")
 
 
 class SupplierSiteRelationResponse(BaseModel):
@@ -710,11 +711,9 @@ class SupplierSiteRelationResponse(BaseModel):
     id_supplier_unit: int
     relation_code: Optional[str] = None
     unit_code: Optional[str] = None
-    sb1_item_name: Optional[str] = None
     supplier_scope: Optional[str] = None
     supplier_owner: Optional[str] = None
     annual_spend_value: Optional[Decimal] = None
-    annual_spend_currency: Optional[str] = None
     operational_grade: Optional[str] = None
     class_value: Optional[int] = None
     evaluation_frequency: Optional[str] = None
@@ -733,7 +732,6 @@ class SupplierSiteRelationResponse(BaseModel):
     evaluation_suggestion: Optional[str] = None
     # Supplier Panel (SB1) fields
     last_eval_score: Optional[Decimal] = None
-    preferred_dev_supplier: Optional[bool] = None
 
     class Config:
         from_attributes = True

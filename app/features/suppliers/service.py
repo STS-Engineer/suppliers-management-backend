@@ -3,7 +3,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import List, Optional, Dict, Any
 
-from sqlalchemy import func, or_, select, text, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import selectinload
 from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -83,15 +83,11 @@ class SupplierService:
         if existing:
             raise AppException(f"Supplier group with name '{data.nom}' already exists", status_code=409)
 
+        self._validate_global_owner(data.supplier_scope, data.supplier_owner)
+
         group_data = self._prepare_group_payload(data.model_dump(exclude_unset=True))
-        categories = self._extract_categories(group_data.pop("supplier_type", None))
 
         group = await self.repo.create_group(group_data)
-
-        await self.repo.replace_group_categories(
-            group,
-            categories,
-        )
 
         await self.db.commit()
 
@@ -114,16 +110,13 @@ class SupplierService:
             if existing:
                 raise AppException(f"Supplier group with name '{update_data['nom']}' already exists", status_code=409)
 
+        effective_scope = update_data.get("supplier_scope", group.supplier_scope)
+        effective_owner = update_data.get("supplier_owner", group.supplier_owner)
+        self._validate_global_owner(effective_scope, effective_owner)
+
         prepared_update_data = self._prepare_group_payload(update_data)
-        categories = None
-        if "supplier_type" in prepared_update_data:
-            categories = self._extract_categories(
-                prepared_update_data.pop("supplier_type", None)
-            )
 
         updated_group = await self.repo.update_group(group_id, prepared_update_data)
-        if updated_group and categories is not None:
-            await self.repo.replace_group_categories(updated_group, categories)
         await self.db.commit()
         return updated_group
     
@@ -245,22 +238,20 @@ class SupplierService:
         changed_by: Optional[str] = None,
     ) -> SupplierUnit:
         """Create a new supplier unit."""
-        # Check if supplier code already exists in the same group
-        existing = await self.repo.find_unit_by_code(data.supplier_code, data.id_group)
+        # Check if supplier name already exists in the same group
+        existing = await self.repo.find_unit_by_code(data.supplier_name, data.id_group)
         if existing:
-            raise AppException(f"Supplier unit with code '{data.supplier_code}' already exists in this group", status_code=409)
-        
+            raise AppException(f"Supplier unit with name '{data.supplier_name}' already exists in this group", status_code=409)
+
         # Check if group exists (if provided)
         if data.id_group:
             group = await self.repo.find_group_by_id(data.id_group)
             if not group:
                 raise AppException(f"Supplier group with ID {data.id_group} not found", status_code=404)
-        
+
         unit = await self.repo.create_unit(
             self._prepare_unit_payload(data.model_dump(exclude_unset=True))
         )
-        if unit.commodity and unit.id_group:
-            await self._sync_group_categories_from_units(unit.id_group)
         await self._record_audit_event(
             table_name="supplier_unit",
             record_pk=unit.id_supplier_unit,
@@ -286,18 +277,16 @@ class SupplierService:
         if not update_data:
             return unit
         
-        # Check if new code conflicts with another unit in the same group
-        if "supplier_code" in update_data and update_data["supplier_code"] != unit.supplier_code:
-            existing = await self.repo.find_unit_by_code(update_data["supplier_code"], unit.id_group)
+        # Check if new name conflicts with another unit in the same group
+        if "supplier_name" in update_data and update_data["supplier_name"] != unit.supplier_name:
+            existing = await self.repo.find_unit_by_code(update_data["supplier_name"], unit.id_group)
             if existing:
-                raise AppException(f"Supplier unit with code '{update_data['supplier_code']}' already exists in this group", status_code=409)
-        
+                raise AppException(f"Supplier unit with name '{update_data['supplier_name']}' already exists in this group", status_code=409)
+
         previous_snapshot = self._unit_audit_snapshot(unit)
         updated_unit = await self.repo.update_unit(
             unit_id, self._prepare_unit_payload(update_data)
         )
-        if "commodity" in update_data and updated_unit.id_group:
-            await self._sync_group_categories_from_units(updated_unit.id_group)
         await self._record_audit_event(
             table_name="supplier_unit",
             record_pk=unit_id,
@@ -369,25 +358,22 @@ class SupplierService:
                         status_code=409,
                     )
 
-            supplier_code = str((unit_data or {}).get("supplier_code") or "").strip()
+            supplier_name = str((unit_data or {}).get("supplier_name") or "").strip()
             unit_group_id = (unit_data or {}).get("id_group")
-            if supplier_code and unit_group_id is not None:
-                existing_unit = await self.repo.find_unit_by_code(supplier_code, unit_group_id)
+            if supplier_name and unit_group_id is not None:
+                existing_unit = await self.repo.find_unit_by_code(supplier_name, unit_group_id)
                 if existing_unit:
                     raise AppException(
-                        f"Supplier unit with code '{supplier_code}' already exists in this group",
+                        f"Supplier unit with name '{supplier_name}' already exists in this group",
                         status_code=409,
                     )
 
             group_data = self._prepare_group_payload(group_data or {})
             unit_data = self._prepare_unit_payload(unit_data or {}, group_data)
-            unit_data = await self._apply_legacy_unit_schema_compatibility(unit_data)
-            categories = self._extract_categories(group_data.pop("supplier_type", None))
 
             # Create supplier group
             group = await self.repo.create_group(group_data)
-            await self.repo.replace_group_categories(group, categories)
-            
+
             # Create supplier unit linked to the group
             unit_data["id_group"] = group.id_group
             unit = await self.repo.create_unit(unit_data)
@@ -956,25 +942,13 @@ class SupplierService:
         result = await self.db.execute(stmt)
         return [self._audit_event_to_dict(event) for event in result.scalars().all()]
 
-    async def _sync_group_categories_from_units(self, group_id: int) -> None:
-        """Rebuild group's supplier_type categories as the union of all its units' commodities."""
-        group = await self.repo.find_group_by_id(group_id)
-        if not group:
-            return
-        stmt = select(SupplierUnit).where(SupplierUnit.id_group == group_id, SupplierUnit.is_deleted.is_(False))
-        result = await self.db.execute(stmt)
-        units = result.scalars().all()
-        all_commodities: list[str] = []
-        seen: set[str] = set()
-        for unit in units:
-            if unit.commodity:
-                for c in unit.commodity.split(","):
-                    c = c.strip()
-                    if c and c not in seen:
-                        seen.add(c)
-                        all_commodities.append(c)
-        categories = self._extract_categories(all_commodities)
-        await self.repo.replace_group_categories(group, categories)
+    @staticmethod
+    def _validate_global_owner(scope: Optional[str], owner: Optional[str]) -> None:
+        if (scope or "").strip().lower() == "global" and not (owner or "").strip():
+            raise AppException(
+                "A global supplier owner is required when scope is set to Global.",
+                status_code=422,
+            )
 
     @staticmethod
     def _prepare_group_payload(data: dict) -> dict:
@@ -995,67 +969,6 @@ class SupplierService:
             if prepared.get(field_name) is None and group_data.get(field_name) is not None:
                 prepared[field_name] = bool(group_data.get(field_name))
         return prepared
-
-    async def _get_column_max_length(
-        self, table_name: str, column_name: str
-    ) -> Optional[int]:
-        result = await self.db.execute(
-            text(
-                """
-                SELECT character_maximum_length
-                FROM information_schema.columns
-                WHERE table_name = :table_name
-                  AND column_name = :column_name
-                """
-            ),
-            {"table_name": table_name, "column_name": column_name},
-        )
-        value = result.scalar_one_or_none()
-        return int(value) if value is not None else None
-
-    async def _apply_legacy_unit_schema_compatibility(self, unit_data: dict) -> dict:
-        prepared = dict(unit_data)
-        category = prepared.get("category")
-        if not category:
-            return prepared
-
-        max_length = await self._get_column_max_length("supplier_unit", "category")
-        if max_length is not None and len(str(category)) > max_length:
-            # Some local databases still expose the legacy short category column.
-            # Preserve the submitted value in the older product_category field and
-            # omit category so supplier creation can still succeed.
-            prepared.setdefault("product_category", str(category)[:255])
-            prepared.pop("category", None)
-
-        return prepared
-
-    @staticmethod
-    def _extract_categories(raw_value: Any) -> list[tuple[str, str]]:
-        if raw_value in (None, ""):
-            return []
-
-        if isinstance(raw_value, str):
-            raw_items = [item.strip() for item in raw_value.split(",")]
-        elif isinstance(raw_value, list):
-            raw_items = [str(item).strip() for item in raw_value]
-        else:
-            raw_items = [str(raw_value).strip()]
-
-        categories: list[tuple[str, str]] = []
-        seen: set[str] = set()
-        for item in raw_items:
-            if not item:
-                continue
-            category_key = item.lower().replace("&", "and")
-            category_key = "".join(
-                character if character.isalnum() else "_"
-                for character in category_key
-            ).strip("_")
-            if not category_key or category_key in seen:
-                continue
-            seen.add(category_key)
-            categories.append((category_key, item))
-        return categories
 
     @staticmethod
     def _to_decimal(value: Any) -> Optional[Decimal]:
@@ -1128,14 +1041,10 @@ class SupplierService:
         return {
             "id_supplier_unit": unit.id_supplier_unit,
             "id_group": unit.id_group,
-            "supplier_code": unit.supplier_code,
+            "supplier_name": unit.supplier_name,
             "address_line": unit.address_line,
             "city": unit.city,
             "country": unit.country,
-            "product_type": unit.product_type,
-            "product_category": unit.product_category,
-            "amount_value": self._json_safe(unit.amount_value),
-            "amount_currency": unit.amount_currency,
             "strategique": unit.strategique,
             "monopolistique": unit.monopolistique,
             "directed": unit.directed,
@@ -1200,7 +1109,7 @@ class SupplierService:
             stmt = stmt.where(SupplierCarbonFootprint.site_location.ilike(f"%{site_location}%"))
         if supplier_unit_code:
             stmt = stmt.join(_SupplierUnit, SupplierCarbonFootprint.id_supplier_unit == _SupplierUnit.id_supplier_unit).where(
-                _SupplierUnit.supplier_code.ilike(f"%{supplier_unit_code}%")
+                _SupplierUnit.supplier_name.ilike(f"%{supplier_unit_code}%")
             )
 
         count_stmt = select(func.count()).select_from(stmt.subquery())
@@ -1278,7 +1187,7 @@ class SupplierService:
             .distinct()
         )
         base = (
-            select(SupplierCertification, SupplierUnitModel.supplier_code, SupplierGroupModel.nom)
+            select(SupplierCertification, SupplierUnitModel.supplier_name, SupplierGroupModel.nom)
             .join(
                 SupplierUnitModel,
                 SupplierCertification.id_supplier_unit == SupplierUnitModel.id_supplier_unit,
@@ -1300,7 +1209,7 @@ class SupplierService:
                 or_(
                     SupplierCertification.certification_type.ilike(pattern),
                     SupplierCertification.certificate_name.ilike(pattern),
-                    SupplierUnitModel.supplier_code.ilike(pattern),
+                    SupplierUnitModel.supplier_name.ilike(pattern),
                     SupplierGroupModel.nom.ilike(pattern),
                 )
             )
@@ -1386,17 +1295,17 @@ class SupplierService:
             await self.db.execute(
                 base.order_by(
                     SupplierGroupModel.nom.asc().nullslast(),
-                    SupplierUnitModel.supplier_code.asc().nullslast(),
+                    SupplierUnitModel.supplier_name.asc().nullslast(),
                     SupplierCertification.end_date.asc().nullslast(),
                 ).offset(skip).limit(limit)
             )
         ).all()
 
         items = []
-        for cert, supplier_code, group_nom in rows:
+        for cert, supplier_name, group_nom in rows:
             d = schemas.SupplierCertificationResponse.model_validate(cert).model_dump()
             d["file_url"] = self._resolve_certification_file_url(cert)
-            d["supplier_code"] = supplier_code
+            d["supplier_name"] = supplier_name
             d["group_nom"] = group_nom
             items.append(d)
         return {"items": items, "total": total, "skip": skip, "limit": limit}

@@ -47,7 +47,6 @@ class SitePanelRelationResponse(BaseModel):
     relation: SupplierRelationSummaryResponse
     unit: SupplierUnitResponse
     group: SupplierGroupResponse
-    group_categories: list[str] = Field(default_factory=list)
     has_development_plan: bool = False
     development_plan_status: Optional[str] = None
     committee_review_status: Optional[str] = None

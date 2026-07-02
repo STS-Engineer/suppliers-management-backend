@@ -13,7 +13,6 @@ from app.db.models import (
     Contact,
     ContactSiteRelation,
     SupplierGroup,
-    SupplierGroupCategory,
     SupplierSiteRelation,
     SupplierUnit,
 )
@@ -61,7 +60,6 @@ class SiteService:
         class_grade: Optional[str] = None,
         status: Optional[str] = None,
         panel_decision: Optional[str] = None,
-        category: Optional[str] = None,
         evaluation_start: Optional[date] = None,
         evaluation_end: Optional[date] = None,
         purchase_manager: Optional[str] = None,
@@ -79,8 +77,11 @@ class SiteService:
             selectinload(AvocarbonSite.supplier_relations)
             .selectinload(SupplierSiteRelation.supplier_unit)
             .selectinload(SupplierUnit.group)
-            .selectinload(SupplierGroup.category_links)
-            .selectinload(SupplierGroupCategory.category),
+            .selectinload(SupplierGroup.contacts),
+            selectinload(AvocarbonSite.supplier_relations)
+            .selectinload(SupplierSiteRelation.supplier_unit)
+            .selectinload(SupplierUnit.group)
+            .selectinload(SupplierGroup.units),
             selectinload(AvocarbonSite.supplier_relations).selectinload(
                 SupplierSiteRelation.development_plans
             ),
@@ -178,13 +179,7 @@ class SiteService:
                     continue
                 if supplier_name and not (
                     matches_text(group.nom, supplier_name)
-                    or matches_text(unit.supplier_code, supplier_name)
-                ):
-                    continue
-
-                categories = list(group.supplier_categories)
-                if category and not any(
-                    matches_text(cat, category) for cat in categories
+                    or matches_text(unit.supplier_name, supplier_name)
                 ):
                     continue
 
@@ -217,7 +212,6 @@ class SiteService:
                         group=supplier_schemas.SupplierGroupResponse.model_validate(
                             group
                         ),
-                        group_categories=categories,
                         has_development_plan=len(relation.development_plans) > 0,
                         development_plan_status=(
                             relation.development_plans[0].plan_status

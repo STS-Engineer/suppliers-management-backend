@@ -7,10 +7,8 @@ from sqlalchemy.orm import selectinload
 
 from app.features.suppliers.models import (
     Contact,
-    SupplierCategory,
     SupplierCertification,
     SupplierGroup,
-    SupplierGroupCategory,
     SupplierUnit,
 )
 
@@ -31,9 +29,8 @@ class SupplierRepository:
             select(SupplierGroup)
             .where(SupplierGroup.is_deleted.is_(False))
             .options(
-                selectinload(SupplierGroup.category_links).selectinload(
-                    SupplierGroupCategory.category
-                )
+                selectinload(SupplierGroup.units),
+                selectinload(SupplierGroup.contacts),
             )
             .offset(skip)
             .limit(limit)
@@ -56,14 +53,11 @@ class SupplierRepository:
             .options(
                 selectinload(SupplierGroup.units),
                 selectinload(SupplierGroup.contacts),
-                selectinload(SupplierGroup.category_links).selectinload(
-                    SupplierGroupCategory.category
-                ),
             )
         )
         result = await self.db.execute(stmt)
         return result.scalar_one_or_none()
-   
+
     async def find_group_with_documents(self, group_id: int) -> Optional[SupplierGroup]:
         """Find supplier group by ID with document relationships."""
         stmt = (
@@ -73,23 +67,20 @@ class SupplierRepository:
             .options(
                 selectinload(SupplierGroup.units),
                 selectinload(SupplierGroup.contacts),
-                selectinload(SupplierGroup.category_links).selectinload(
-                    SupplierGroupCategory.category
-                ),
                 selectinload(SupplierGroup.documents),
             )
         )
         result = await self.db.execute(stmt)
         return result.scalar_one_or_none()
-   
+
     async def find_group_for_response(self, group_id: int) -> Optional[SupplierGroup]:
         stmt = (
             select(SupplierGroup)
             .where(SupplierGroup.id_group == group_id)
             .where(SupplierGroup.is_deleted.is_(False))
             .options(
-                selectinload(SupplierGroup.category_links)
-                .selectinload(SupplierGroupCategory.category)
+                selectinload(SupplierGroup.units),
+                selectinload(SupplierGroup.contacts),
             )
         )
         result = await self.db.execute(stmt)
@@ -118,53 +109,6 @@ class SupplierRepository:
             await self.db.flush()
         return group
 
-    async def find_category_by_key(self, category_key: str) -> Optional[SupplierCategory]:
-        stmt = select(SupplierCategory).where(SupplierCategory.category_key == category_key)
-        result = await self.db.execute(stmt)
-        return result.scalar_one_or_none()
-
-    async def ensure_category(self, category_key: str, category_label: str) -> SupplierCategory:
-        category = await self.find_category_by_key(category_key)
-        if category:
-            if category.category_label != category_label:
-                category.category_label = category_label
-                await self.db.flush()
-            return category
-
-        category = SupplierCategory(
-            category_key=category_key,
-            category_label=category_label,
-        )
-        self.db.add(category)
-        await self.db.flush()
-        return category
-
-    async def replace_group_categories(
-    self,
-    group: SupplierGroup,
-    categories: list[tuple[str, str]],
-) -> None:
-        stmt = select(SupplierGroupCategory).where(
-            SupplierGroupCategory.id_group == group.id_group
-        )
-        result = await self.db.execute(stmt)
-        existing_links = result.scalars().all()
-
-        for link in existing_links:
-            await self.db.delete(link)
-
-        await self.db.flush()
-
-        for category_key, category_label in categories:
-            category = await self.ensure_category(category_key, category_label)
-            self.db.add(
-                SupplierGroupCategory(
-                    id_group=group.id_group,
-                    id_category=category.id_category,
-                )
-            )
-
-        await self.db.flush()
     async def delete_group(self, group_id: int, deleted_by: str = "SYSTEM") -> bool:
         """Soft-delete a supplier group. Hard deletes are prohibited — audit trail must be preserved."""
         group = await self.find_group_by_id(group_id)
@@ -206,7 +150,7 @@ class SupplierRepository:
     
     async def find_unit_by_code(self, code: str, group_id: Optional[int] = None) -> Optional[SupplierUnit]:
         """Find supplier unit by supplier code, optionally scoped to one group."""
-        stmt = select(SupplierUnit).where(SupplierUnit.supplier_code == code, SupplierUnit.is_deleted.is_(False))
+        stmt = select(SupplierUnit).where(SupplierUnit.supplier_name == code, SupplierUnit.is_deleted.is_(False))
         if group_id is None:
             stmt = stmt.where(SupplierUnit.id_group.is_(None))
         else:

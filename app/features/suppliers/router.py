@@ -108,17 +108,13 @@ async def complete_supplier_onboarding(
       "group": {
         "nom": "Acme Manufacturing Ltd",
         "supplier_scope": "global",
-        "strategique": true,
-        "supplier_type": "manufacturer"
+        "strategique": true
       },
       "unit": {
-        "supplier_code": "ACME-CN-001",
+        "supplier_name": "ACME-CN-001",
         "address_line": "123 Industrial Park",
         "city": "Shanghai",
-        "country": "China",
-        "product_type": "Electronics",
-        "product_category": "Semiconductors",
-        "amount_currency": "USD"
+        "country": "China"
       },
       "contacts": [
         {
@@ -171,7 +167,6 @@ async def complete_supplier_onboarding(
                 c.model_dump(exclude_unset=True) for c in data.unit_contacts
             ],
             annual_spend_value=data.annual_spend_value,
-            annual_spend_currency=data.annual_spend_currency,
         )
 
         # Notify all purchasing managers that a new supplier awaits validation
@@ -262,7 +257,7 @@ async def list_pending_validation(
                 "group_code": f"GRP-{group.id_group:06d}",
                 "validation_status": group.validation_status,
                 "unit_id": unit.id_supplier_unit,
-                "unit_code": unit.supplier_code,
+                "unit_code": unit.supplier_name,
                 "unit_country": unit.country,
                 "relation_id": relation.id_relation if relation else None,
                 "site_id": site.id_site if site else None,
@@ -464,9 +459,6 @@ async def create_supplier_group(
     - **monopolistique**: Is this monopolistic?
     - **multi_site**: Multiple sites?
     - **directed**: Is directed/approved?
-    - **exit_supplier**: In exit status?
-    - **strategic_reason**: Why strategic?
-    - **supplier_type**: Type of supplier
     """
     _block_viewer(current_user)
     try:
@@ -634,16 +626,16 @@ async def create_unit_complete(
     if not group:
         raise AppException(f"Supplier group {group_id} not found", status_code=404)
 
-    # Enforce unique supplier_code within the same supplier group (active units only)
+    # Enforce unique supplier_name within the same supplier group (active units only)
     existing_unit_stmt = select(SupplierUnit).where(
         SupplierUnit.id_group == group_id,
-        SupplierUnit.supplier_code == data.unit.supplier_code,
+        SupplierUnit.supplier_name == data.unit.supplier_name,
         SupplierUnit.is_deleted.is_(False),
     )
     existing_unit = (await db.execute(existing_unit_stmt)).scalar_one_or_none()
     if existing_unit:
         raise AppException(
-            f"A supplier unit with name '{data.unit.supplier_code}' already exists in this supplier group. "
+            f"A supplier unit with name '{data.unit.supplier_name}' already exists in this supplier group. "
             "Each unit name must be unique within the same group.",
             status_code=409,
         )
@@ -682,7 +674,7 @@ async def create_unit_complete(
                 "contacts_count": len(created_contacts),
                 "certifications_count": len(created_certs),
             },
-            "message": f"Unit '{unit.supplier_code}' created with {len(created_contacts)} contact(s) and {len(created_certs)} certification(s)",
+            "message": f"Unit '{unit.supplier_name}' created with {len(created_contacts)} contact(s) and {len(created_certs)} certification(s)",
         }
     except Exception as exc:
         await db.rollback()
@@ -700,17 +692,13 @@ async def create_supplier_unit(
     Create a new supplier unit (manufacturing/operating location).
 
     **Required fields:**
-    - **supplier_code**: Unique identifier (max 50 chars)
+    - **supplier_name**: Unique identifier (max 50 chars)
 
     **Optional fields:**
     - **id_group**: Parent supplier group ID
     - **address_line**: Street address
     - **city**: City
     - **country**: Country
-    - **product_type**: Type of products
-    - **product_category**: Product category
-    - **amount_value**: Annual spend
-    - **amount_currency**: Currency code
     """
     _block_viewer(current_user)
     try:
@@ -721,7 +709,7 @@ async def create_supplier_unit(
         return {
             "status": "success",
             "data": schemas.SupplierUnitResponse.model_validate(unit),
-            "message": f"Supplier unit '{data.supplier_code}' created successfully",
+            "message": f"Supplier unit '{data.supplier_name}' created successfully",
             "id": unit.id_supplier_unit,
         }
     except AppException:
@@ -1007,16 +995,13 @@ async def create_complete_supplier(
       "group": {
         "nom": "Acme Manufacturing",
         "supplier_scope": "global",
-        "strategique": true,
-        "supplier_type": "manufacturer"
+        "strategique": true
       },
       "unit": {
-        "supplier_code": "ACME001",
+        "supplier_name": "ACME001",
         "address_line": "123 Industrial Way",
         "city": "Shanghai",
-        "country": "China",
-        "product_type": "Electronics",
-        "product_category": "Semiconductors"
+        "country": "China"
       },
       "contacts": [
         {
@@ -1054,12 +1039,12 @@ async def create_complete_supplier(
                 "group_code": group.group_code,
                 "group_name": group.nom,
                 "unit_id": unit.id_supplier_unit,
-                "unit_code": unit.supplier_code,
+                "unit_code": unit.supplier_name,
                 "unit_reference_code": unit.unit_code,
                 "contacts_count": len(result["contacts"]),
                 "certifications_count": len(result["certifications"]),
             },
-            "message": f"Supplier '{data.group.nom}' created successfully with unit '{data.unit.supplier_code}'",
+            "message": f"Supplier '{data.group.nom}' created successfully with unit '{data.unit.supplier_name}'",
             "details": {
                 "group": schemas.SupplierGroupResponse.model_validate(group),
                 "unit": schemas.SupplierUnitResponse.model_validate(unit),
@@ -1440,7 +1425,7 @@ async def list_carbon_footprints(
                         **schemas.SupplierCarbonFootprintResponse.model_validate(
                             fp
                         ).model_dump(),
-                        "supplier_unit_code": fp.supplier_unit.supplier_code
+                        "supplier_unit_code": fp.supplier_unit.supplier_name
                         if fp.supplier_unit
                         else None,
                     }
@@ -1481,7 +1466,7 @@ async def update_carbon_footprint(
                 **schemas.SupplierCarbonFootprintResponse.model_validate(
                     fp
                 ).model_dump(),
-                "supplier_unit_code": fp.supplier_unit.supplier_code
+                "supplier_unit_code": fp.supplier_unit.supplier_name
                 if fp.supplier_unit
                 else None,
             },

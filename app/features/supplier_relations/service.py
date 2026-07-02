@@ -311,10 +311,9 @@ class SupplierRelationService:
         status_history = await self._get_status_history(relation_id)
         criteria_details = await self._get_latest_criteria_details(relation_id)
         development_plans = await self.list_development_plans(relation_id)
-        quality_certification = self._normalize_criteria_value(
-            "quality_certification",
-            self._pluck(class_input, "quality_certification")
-            or await self._get_relation_quality_certification(relation),
+        quality_certification = await self._revalidate_quality_certification(
+            relation,
+            self._pluck(class_input, "quality_certification"),
         )
 
         # Unit certifications for quality cert pre-fill hint
@@ -346,7 +345,7 @@ class SupplierRelationService:
         }
         criteria_scores = await self.get_criteria_scores_breakdown(class_values_for_scores)
 
-        # Load the unit to get its supplier_code (readable name)
+        # Load the unit to get its supplier_name (readable name)
         unit = await self.db.get(SupplierUnit, relation.id_supplier_unit)
 
         # Determine if inactivity requires an initial or preliminary re-evaluation
@@ -364,7 +363,7 @@ class SupplierRelationService:
 
         return {
             "relation": relation,
-            "unit_supplier_code": unit.supplier_code if unit else None,
+            "unit_supplier_name": unit.supplier_name if unit else None,
             "unit_is_active": unit.is_active if unit else True,
             "unit_inactivated_at": unit.inactivated_at.isoformat() if unit and unit.inactivated_at else None,
             "reevaluation_type": reevaluation_type,
@@ -829,7 +828,7 @@ class SupplierRelationService:
             group = (await self.db.execute(group_stmt)).scalars().first()
             if group:
                 group_name = group.nom
-        supplier_display = group_name or (unit.supplier_code if unit else None) or f"Unit #{relation.id_supplier_unit}"
+        supplier_display = group_name or (unit.supplier_name if unit else None) or f"Unit #{relation.id_supplier_unit}"
 
         relation_code = relation.relation_code or f"REL-{relation.id_relation:06d}"
         plan_title = plan.plan_title or f"Development Plan #{plan_id}"
@@ -1101,7 +1100,7 @@ class SupplierRelationService:
                     "site_name": site.site_name,
                     "site_city": site.city,
                     "site_country": site.country,
-                    "unit_supplier_code": unit.supplier_code,
+                    "unit_supplier_name": unit.supplier_name,
                     "unit_code": unit.unit_code,
                     "group_id": group.id_group if group else None,
                     "group_name": group.nom if group else None,
@@ -1188,7 +1187,7 @@ class SupplierRelationService:
                 group_name = group.nom
         supplier_display = (
             group_name
-            or (unit.supplier_code if unit else None)
+            or (unit.supplier_name if unit else None)
             or f"Unit #{relation.id_supplier_unit}"
         )
 
@@ -1536,7 +1535,7 @@ class SupplierRelationService:
                 group_name = group.nom
         supplier_display = (
             group_name
-            or (unit.supplier_code if unit else None)
+            or (unit.supplier_name if unit else None)
             or f"Unit #{relation.id_supplier_unit}"
         )
 
@@ -1773,7 +1772,7 @@ class SupplierRelationService:
                 group_name = group.nom
         supplier_display = (
             group_name
-            or (unit.supplier_code if unit else None)
+            or (unit.supplier_name if unit else None)
             or f"Unit #{relation.id_supplier_unit}"
         )
 
@@ -2049,7 +2048,7 @@ class SupplierRelationService:
                 group_name = group.nom
         supplier_display = (
             group_name
-            or (unit.supplier_code if unit else None)
+            or (unit.supplier_name if unit else None)
             or f"Unit #{relation.id_supplier_unit}"
         )
 
@@ -2320,7 +2319,7 @@ class SupplierRelationService:
                 group_name = group.nom
         supplier_display = (
             group_name
-            or (unit.supplier_code if unit else None)
+            or (unit.supplier_name if unit else None)
             or f"Unit #{relation.id_supplier_unit}"
         )
 
@@ -4017,6 +4016,54 @@ class SupplierRelationService:
         value, _ = await self._get_best_quality_cert_for_unit(relation.id_supplier_unit)
         return value
 
+    async def _quality_certification_is_currently_valid(
+        self,
+        unit_id: int,
+        value: str,
+    ) -> bool:
+        """True if `value` matches a currently VALID (non-expired) certification's
+        normalized type on the unit. "None" (explicitly "no applicable cert") is
+        always considered valid since it never inflates the score either way.
+        """
+        if value == "None":
+            return True
+        stmt = (
+            select(SupplierCertification)
+            .where(SupplierCertification.id_supplier_unit == unit_id)
+            .where(SupplierCertification.is_deleted.is_(False))
+        )
+        certifications = (await self.db.execute(stmt)).scalars().all()
+        today = date.today()
+        for cert in certifications:
+            if cert.end_date and cert.end_date < today:
+                continue  # expired -- doesn't keep a value "valid"
+            if self._normalize_criteria_value("quality_certification", cert.certification_type) == value:
+                return True
+        return False
+
+    async def _revalidate_quality_certification(
+        self,
+        relation: SupplierSiteRelation,
+        stored_value: Optional[str],
+    ) -> Optional[str]:
+        """Re-derive the effective quality_certification value from current cert validity.
+
+        A previously stored value is only trusted if it still matches a currently
+        valid (non-expired) certification on the unit. Otherwise -- the backing cert
+        expired, was deleted, or nothing was ever stored -- fall back to the unit's
+        current best valid certification, which is None when none exists. This keeps
+        an expired cert from silently continuing to inflate the score/class simply
+        because nobody has touched this specific field since it lapsed.
+        """
+        normalized_stored = self._normalize_criteria_value("quality_certification", stored_value)
+        if not normalized_stored:
+            return await self._get_relation_quality_certification(relation)
+        if await self._quality_certification_is_currently_valid(
+            relation.id_supplier_unit, normalized_stored
+        ):
+            return normalized_stored
+        return await self._get_relation_quality_certification(relation)
+
     async def _sync_quality_cert_detail(
         self,
         relation_id: int,
@@ -4166,18 +4213,21 @@ class SupplierRelationService:
         previous_input: Optional[PldClassEvaluationInput],
         explicitly_sent: bool = False,
     ) -> Optional[str]:
-        # If the field was explicitly provided in the request (even as null), respect it.
-        if explicitly_sent:
-            return self._normalize_criteria_value("quality_certification", selected_value)
-        if selected_value is not None:
-            return self._normalize_criteria_value("quality_certification", selected_value)
+        # An explicit null means "no certification" was deliberately chosen (e.g. the
+        # Criteria Validity Tracker's bulk reset) -- respect it exactly, never
+        # auto-restore it from a stale/expired cert.
+        if explicitly_sent and selected_value is None:
+            return None
+        # Any other provided value -- whether freshly submitted, or simply echoed
+        # back by a UI that no longer lets evaluators edit this field directly --
+        # is only trusted if it still matches a currently valid certification on
+        # the unit. This is what keeps a value from staying "stuck" at whatever
+        # was true when the page was first loaded, e.g. a long-open tab spanning
+        # a certification's expiry date.
+        if explicitly_sent or selected_value is not None:
+            return await self._revalidate_quality_certification(relation, selected_value)
         previous_value = self._pluck(previous_input, "quality_certification")
-        if previous_value:
-            return self._normalize_criteria_value("quality_certification", previous_value)
-        return self._normalize_criteria_value(
-            "quality_certification",
-            await self._get_relation_quality_certification(relation),
-        )
+        return await self._revalidate_quality_certification(relation, previous_value)
 
     async def sync_quality_certification_for_unit(
         self,

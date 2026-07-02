@@ -472,7 +472,6 @@ def generate_stp_pdf(opp, phase: int = 0) -> bytes:
 
     gate_rows = [
         ("Type of change",  opp.change_mode or "—"),
-        ("Conditions / Actions requested", opp.gate_conditions or "—"),
         ("Participants",    participants),
     ]
     if phase == 1 and opp.projects:

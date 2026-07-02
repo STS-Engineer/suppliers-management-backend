@@ -191,7 +191,7 @@ async def get_evaluations_due(db: AsyncSession) -> List[Dict[str, Any]]:
             {
                 "relation_id": rel.id_relation,
                 "relation_code": rel.relation_code,
-                "unit_name": unit.supplier_code,
+                "unit_name": unit.supplier_name,
                 "unit_id": unit.id_supplier_unit,
                 "plant_name": site.site_name,
                 "plant_city": site.city,
@@ -220,7 +220,7 @@ async def get_evaluations_due(db: AsyncSession) -> List[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 TEMPLATE_COLUMNS = [
-    "supplier_code",
+    "supplier_name",
     "plant_name",
     "evaluation_date",
     "operational_grade",
@@ -229,7 +229,7 @@ TEMPLATE_COLUMNS = [
 
 GRADE_HELP = [
     "# operational_grade: A / B / C / D",
-    "# supplier_code and plant_name must match exactly — use the pre-filled template",
+    "# supplier_name and plant_name must match exactly — use the pre-filled template",
     "# class_value is managed by the PLD evaluation and is NOT updated here",
 ]
 
@@ -290,7 +290,7 @@ def generate_xlsx_template() -> bytes:
     ws2 = wb.create_sheet("Instructions")
     instructions = [
         ("Column", "Description", "Allowed values"),
-        ("supplier_code", "Unit identifier — copy from pre-filled template", "Text"),
+        ("supplier_name", "Unit identifier — copy from pre-filled template", "Text"),
         ("plant_name", "Avocarbon plant name — copy from pre-filled template", "Text"),
         ("evaluation_date", "Date of evaluation", "YYYY-MM-DD"),
         ("operational_grade", "Operational scorecard result", "A / B / C / D"),
@@ -333,7 +333,7 @@ async def generate_prefilled_template(db: AsyncSession, due_only: bool = False) 
         .where(SupplierSiteRelation.is_deleted.is_(False))
         .where(SupplierSiteRelation.inactivated_at.is_(None))
         .where(SupplierSiteRelation.validation_status == "approved")
-        .order_by(AvocarbonSite.site_name, SupplierUnit.supplier_code)
+        .order_by(AvocarbonSite.site_name, SupplierUnit.supplier_name)
     )
     result = await db.execute(stmt)
     all_rows = result.all()
@@ -391,7 +391,7 @@ async def generate_prefilled_template(db: AsyncSession, due_only: bool = False) 
 
     if due_only:
         columns = [
-            ("supplier_code",       30, "",              True),
+            ("supplier_name",       30, "",              True),
             ("plant_name",          28, "",              True),
             ("evaluation_date",     18, "YYYY-MM-DD",    False),
             ("operational_grade",   18, "A / B / C / D", False),
@@ -405,7 +405,7 @@ async def generate_prefilled_template(db: AsyncSession, due_only: bool = False) 
         ]
     else:
         columns = [
-            ("supplier_code",   30, "",              True),
+            ("supplier_name",   30, "",              True),
             ("plant_name",      28, "",              True),
             ("evaluation_date", 18, "YYYY-MM-DD",    False),
             ("operational_grade", 20, "A / B / C / D", False),
@@ -436,7 +436,7 @@ async def generate_prefilled_template(db: AsyncSession, due_only: bool = False) 
 
             status_fill = PatternFill("solid", fgColor=STATUS_COLOR.get(status, "F1F5F9"))
 
-            _write(1, unit.supplier_code, locked=True)
+            _write(1, unit.supplier_name, locked=True)
             _write(2, site.site_name, locked=True)
             # hint cells for user-fill columns
             for col_idx, hint in [(3, "YYYY-MM-DD"), (4, "A / B / C / D"), (5, "Optional notes")]:
@@ -449,7 +449,7 @@ async def generate_prefilled_template(db: AsyncSession, due_only: bool = False) 
             _write(9,  nxt.isoformat() if nxt else "—",   locked=True)
             _write(10, days_overdue if days_overdue else "—", locked=True)
         else:
-            _write(1, unit.supplier_code, locked=True)
+            _write(1, unit.supplier_name, locked=True)
             _write(2, site.site_name, locked=True)
             for col_idx, hint in [(3, "YYYY-MM-DD"), (4, "A / B / C / D"), (5, "Optional notes")]:
                 c = ws.cell(row=row_idx, column=col_idx, value=hint)
@@ -478,17 +478,17 @@ async def generate_prefilled_template(db: AsyncSession, due_only: bool = False) 
 
 
 class EvaluationRow:
-    __slots__ = ("supplier_code", "plant_name", "evaluation_date", "grade", "comments")
+    __slots__ = ("supplier_name", "plant_name", "evaluation_date", "grade", "comments")
 
     def __init__(
         self,
-        supplier_code: str,
+        supplier_name: str,
         plant_name: str,
         evaluation_date: date,
         grade: str,
         comments: str = "",
     ) -> None:
-        self.supplier_code = supplier_code.strip()
+        self.supplier_name = supplier_name.strip()
         self.plant_name = plant_name.strip()
         self.evaluation_date = evaluation_date
         self.grade = grade.upper().strip()
@@ -549,14 +549,14 @@ def parse_rows_from_xlsx(content: bytes) -> tuple[List[EvaluationRow], List[str]
 
 
 def _parse_record(record: Dict[str, Any], row_num: int) -> EvaluationRow:
-    sc = str(record.get("supplier_code") or "").strip()
+    sc = str(record.get("supplier_name") or "").strip()
     pn = str(record.get("plant_name") or "").strip()
     raw_date = record.get("evaluation_date")
     grade = str(record.get("operational_grade") or "").strip().upper()
     comments = str(record.get("comments") or "").strip()
 
     if not sc:
-        raise ValueError("supplier_code is required")
+        raise ValueError("supplier_name is required")
     if not pn:
         raise ValueError("plant_name is required")
     if grade not in ("A", "B", "C", "D"):
@@ -608,15 +608,15 @@ async def ingest_batch(
     processed: List[Dict[str, Any]] = []
     skipped: List[Dict[str, Any]] = []
 
-    # Detect duplicate (supplier_code, plant_name) pairs within the uploaded file itself
+    # Detect duplicate (supplier_name, plant_name) pairs within the uploaded file itself
     seen_keys: set[tuple[str, str]] = set()
     deduplicated: List[EvaluationRow] = []
     for row in rows:
-        key = (row.supplier_code.lower(), row.plant_name.lower())
+        key = (row.supplier_name.lower(), row.plant_name.lower())
         if key in seen_keys:
             skipped.append(
                 {
-                    "supplier_code": row.supplier_code,
+                    "supplier_name": row.supplier_name,
                     "plant_name": row.plant_name,
                     "reason": "Duplicate row in file — only the first occurrence is processed",
                 }
@@ -639,7 +639,7 @@ async def ingest_batch(
             .join(AvocarbonSite, AvocarbonSite.id_site == SupplierSiteRelation.id_site)
             # Case-insensitive match on both sides to be forgiving of capitalisation
             .where(
-                sqlfunc.lower(SupplierUnit.supplier_code) == row.supplier_code.lower()
+                sqlfunc.lower(SupplierUnit.supplier_name) == row.supplier_name.lower()
             )
             .where(sqlfunc.lower(AvocarbonSite.site_name) == row.plant_name.lower())
             .where(SupplierSiteRelation.is_deleted.is_(False))
@@ -651,7 +651,7 @@ async def ingest_batch(
         if match is None:
             skipped.append(
                 {
-                    "supplier_code": row.supplier_code,
+                    "supplier_name": row.supplier_name,
                     "plant_name": row.plant_name,
                     "reason": "No active relation found for this unit–plant combination",
                 }
@@ -823,7 +823,7 @@ async def ingest_batch(
                 # that requires immediate attention; silent plan creation is not enough.
                 buyer_email = relation.buyer_owner
                 if buyer_email:
-                    supplier_display = unit.supplier_code if unit else f"Relation #{relation.id_relation}"
+                    supplier_display = unit.supplier_name if unit else f"Relation #{relation.id_relation}"
                     site_display = site.site_name if site else f"Site #{relation.id_site}"
                     grade_label = "D (Exit within 3 months)" if row.grade == "D" else "C (Exit within 6 months)"
                     try:
@@ -863,7 +863,7 @@ async def ingest_batch(
 
         processed.append(
             {
-                "supplier_code": row.supplier_code,
+                "supplier_name": row.supplier_name,
                 "plant_name": row.plant_name,
                 "evaluation_date": row.evaluation_date.isoformat(),
                 "grade": row.grade,

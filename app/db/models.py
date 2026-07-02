@@ -170,10 +170,6 @@ class SupplierGroup(GovernanceMixin, Base):
         String(200), nullable=True
     )
     multi_site: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
-    exit_supplier: Mapped[bool] = mapped_column(
-        Boolean, server_default="false", nullable=False
-    )
-    strategic_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     validation_status: Mapped[str] = mapped_column(
         String(20), server_default="approved", nullable=False
     )
@@ -185,9 +181,6 @@ class SupplierGroup(GovernanceMixin, Base):
         back_populates="supplier_group",
         cascade="all, delete-orphan",
         passive_deletes=True,
-    )
-    category_links: Mapped[List["SupplierGroupCategory"]] = relationship(
-        back_populates="group", cascade="all, delete-orphan", passive_deletes=True
     )
     documents: Mapped[List["Document"]] = relationship(
         back_populates="group",
@@ -203,76 +196,36 @@ class SupplierGroup(GovernanceMixin, Base):
         self.group_supplier_owner_email = value
 
     @property
-    def supplier_type(self) -> Optional[str]:
-        state = inspect(self)
-        if "category_links" in state.unloaded:
-            return getattr(self, "_supplier_type_display", None)
-        labels = [
-            link.category.category_label
-            for link in self.category_links
-            if link.category and link.category.category_label
-        ]
-        if not labels:
-            return None
-        return ", ".join(labels)
-
-    @property
-    def supplier_categories(self) -> List[str]:
-        state = inspect(self)
-        if "category_links" in state.unloaded:
-            return list(getattr(self, "_supplier_categories_display", []))
-        return [
-            link.category.category_label
-            for link in self.category_links
-            if link.category and link.category.category_label
-        ]
-
-    @property
     def group_code(self) -> Optional[str]:
         return _format_business_code("GRP", self.id_group)
+
+    @property
+    def commodities(self) -> List[str]:
+        """Commodities aggregated (read-only) from this group's supplier units."""
+        state = inspect(self)
+        if "units" in state.unloaded:
+            return []
+        seen: dict[str, str] = {}
+        for unit in self.units:
+            if not unit.commodity:
+                continue
+            for raw in unit.commodity.split(","):
+                value = raw.strip()
+                if not value:
+                    continue
+                key = value.lower()
+                if key not in seen:
+                    seen[key] = value
+        return sorted(seen.values(), key=str.lower)
 
     def __repr__(self) -> str:
         return f"<SupplierGroup id={self.id_group} nom={self.nom!r}>"
 
 
-class SupplierCategory(GovernanceMixin, Base):
-    __tablename__ = "supplier_category"
-
-    id_category: Mapped[int] = mapped_column(
-        Integer, primary_key=True, autoincrement=True
-    )
-    category_key: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
-    category_label: Mapped[str] = mapped_column(String(100), nullable=False)
-
-    group_links: Mapped[List["SupplierGroupCategory"]] = relationship(
-        back_populates="category", cascade="all, delete-orphan", passive_deletes=True
-    )
-
-
-class SupplierGroupCategory(GovernanceMixin, Base):
-    __tablename__ = "supplier_group_category"
-    __table_args__ = (
-        UniqueConstraint("id_group", "id_category", name="uq_supplier_group_category"),
-    )
-
-    id_group_category: Mapped[int] = mapped_column(
-        Integer, primary_key=True, autoincrement=True
-    )
-    id_group: Mapped[int] = mapped_column(
-        ForeignKey("supplier_group.id_group", ondelete="CASCADE"), nullable=False
-    )
-    id_category: Mapped[int] = mapped_column(
-        ForeignKey("supplier_category.id_category", ondelete="CASCADE"), nullable=False
-    )
-
-    group: Mapped["SupplierGroup"] = relationship(back_populates="category_links")
-    category: Mapped["SupplierCategory"] = relationship(back_populates="group_links")
-
-
 class SupplierUnit(TimestampMixin, GovernanceMixin, Base):
     __tablename__ = "supplier_unit"
     __table_args__ = (
-        UniqueConstraint("id_group", "supplier_code", name="uq_supplier_unit_group_code"),
+        UniqueConstraint("id_group", "supplier_name", name="uq_supplier_unit_group_code"),
     )
 
     id_supplier_unit: Mapped[int] = mapped_column(
@@ -281,12 +234,10 @@ class SupplierUnit(TimestampMixin, GovernanceMixin, Base):
     id_group: Mapped[Optional[int]] = mapped_column(
         ForeignKey("supplier_group.id_group", ondelete="CASCADE"), nullable=True
     )
-    supplier_code: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    supplier_name: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     address_line: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     city: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     country: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
-    product_type: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    product_category: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     # Product classification (comma-separated multi-value)
     commodity: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     family: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
@@ -298,10 +249,6 @@ class SupplierUnit(TimestampMixin, GovernanceMixin, Base):
     green_electricity_pct: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
     continent: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     area: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
-    amount_value: Mapped[Optional[Decimal]] = mapped_column(
-        Numeric(18, 2), nullable=True
-    )
-    amount_currency: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
     strategique: Mapped[bool] = mapped_column(
         Boolean, server_default="false", nullable=False
     )
@@ -351,7 +298,7 @@ class SupplierUnit(TimestampMixin, GovernanceMixin, Base):
         return _format_business_code("UNT", self.id_supplier_unit)
 
     def __repr__(self) -> str:
-        return f"<SupplierUnit id={self.id_supplier_unit} code={self.supplier_code!r}>"
+        return f"<SupplierUnit id={self.id_supplier_unit} name={self.supplier_name!r}>"
 
 
 class SupplierSiteRelation(GovernanceMixin, Base):
@@ -378,9 +325,6 @@ class SupplierSiteRelation(GovernanceMixin, Base):
     annual_spend_value: Mapped[Optional[Decimal]] = mapped_column(
         Numeric(18, 2), nullable=True
     )
-    annual_spend_currency: Mapped[Optional[str]] = mapped_column(
-        String(10), nullable=True
-    )
     supplier_status: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     operational_grade: Mapped[Optional[str]] = mapped_column(CHAR(1), nullable=True)
     class_value: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
@@ -398,8 +342,6 @@ class SupplierSiteRelation(GovernanceMixin, Base):
         String(255), nullable=True
     )
     last_eval_score: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
-    preferred_dev_supplier: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
-    sb1_item_name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
     created_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime, server_default=func.current_timestamp(), nullable=True
     )
@@ -1880,7 +1822,6 @@ class Opportunity(GovernanceMixin, Base):
     duration_months: Mapped[Optional[Decimal]] = mapped_column(
         Numeric(6, 2), nullable=True
     )
-    results: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 2), nullable=True)
     budget_year: Mapped[Optional[Decimal]] = mapped_column(Numeric(4, 0), nullable=True)
     phase_status: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     validation_decision: Mapped[Optional[str]] = mapped_column(
@@ -2010,8 +1951,6 @@ class Opportunity(GovernanceMixin, Base):
     reason_other: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     # Excel Phase 0 row 8 — secondary Avocarbon plants impacted (free text, comma-separated)
     secondary_plants: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    # Excel Phase 0 C67 — "Conditions / Actions requested" at the committee gate
-    gate_conditions: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     # STP revision approval — JSONB stores a pending director-approval request while
     # current values remain active.  Cleared on approve or reject.
     pending_stp_revision: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
@@ -2479,8 +2418,6 @@ __all__ = [
     # Domain 1 — Supplier Master
     "AvocarbonSite",
     "SupplierGroup",
-    "SupplierCategory",
-    "SupplierGroupCategory",
     "SupplierUnit",
     "SupplierSiteRelation",
     "SupplierStatusHistory",

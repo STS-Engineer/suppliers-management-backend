@@ -46,6 +46,68 @@ class ContactRelationPayload(BaseModel):
     id_supplier_unit: Optional[int] = None  # unit to associate the new contact with
 
 
+@router.get("/purchasers", response_model=dict)
+async def get_purchasers_for_site(
+    site_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Return purchasers relevant for a given Avocarbon site.
+
+    site_purchasers — local_purchaser accounts explicitly assigned to this site
+                      via the access_identity_site junction table.
+    group_purchasers — global_purchaser / purchasing_director accounts that cover
+                       all sites (no site restriction; always returned).
+    """
+    site_rows = await db.execute(
+        text("""
+            SELECT ai.id_identity, ai.full_name, ai.email, ai.access_profile
+            FROM access_identity ai
+            JOIN access_identity_site ais ON ais.id_identity = ai.id_identity
+            WHERE ais.id_site = :site_id
+              AND ai.is_active = TRUE
+            ORDER BY ai.full_name
+        """),
+        {"site_id": site_id},
+    )
+    site_purchasers = [
+        {
+            "id_identity": r.id_identity,
+            "full_name": r.full_name,
+            "email": r.email,
+            "access_profile": r.access_profile,
+        }
+        for r in site_rows.fetchall()
+    ]
+
+    group_rows = await db.execute(
+        text("""
+            SELECT id_identity, full_name, email, access_profile
+            FROM access_identity
+            WHERE is_active = TRUE
+              AND access_profile IN ('global_purchaser', 'purchasing_director')
+            ORDER BY access_profile DESC, full_name
+        """)
+    )
+    group_purchasers = [
+        {
+            "id_identity": r.id_identity,
+            "full_name": r.full_name,
+            "email": r.email,
+            "access_profile": r.access_profile,
+        }
+        for r in group_rows.fetchall()
+    ]
+
+    return {
+        "status": "success",
+        "data": {
+            "site_purchasers": site_purchasers,
+            "group_purchasers": group_purchasers,
+        },
+    }
+
+
 @router.get("/{relation_id}/contacts", response_model=dict)
 async def list_relation_contacts(
     relation_id: int,
@@ -154,7 +216,7 @@ async def list_pending_relation_reviews(
         {
             "relation_id": rel.id_relation,
             "unit_id": unit.id_supplier_unit,
-            "unit_code": unit.supplier_code,
+            "unit_code": unit.supplier_name,
             "group_id": group.id_group,
             "group_name": group.nom,
             "unit_country": unit.country,
@@ -356,7 +418,7 @@ async def list_development_plan_register(
                             site_name=item["site_name"],
                             site_city=item["site_city"],
                             site_country=item["site_country"],
-                            unit_supplier_code=item["unit_supplier_code"],
+                            unit_supplier_name=item["unit_supplier_name"],
                             unit_code=item["unit_code"],
                             group_id=item["group_id"],
                             group_name=item["group_name"],
@@ -1041,7 +1103,7 @@ async def submit_relation_for_review(
     )).scalars().all()
 
     notif_svc = NotificationService(db)
-    supplier_label = unit.supplier_code if unit else f"Relation #{relation_id}"
+    supplier_label = unit.supplier_name if unit else f"Relation #{relation_id}"
     for vp in vp_users:
         await notif_svc.create_notification(
             recipient_id=vp.id_identity,
@@ -1098,7 +1160,7 @@ async def approve_relation_review(
     service = SupplierRelationService(db)
     rel = await db.get(SupplierSiteRelation, relation_id)
     unit = await db.get(SupplierUnit, rel.id_supplier_unit) if rel else None
-    supplier_label = unit.supplier_code if unit else f"Relation #{relation_id}"
+    supplier_label = unit.supplier_name if unit else f"Relation #{relation_id}"
     await service.approve_relation_review(relation_id)
     await _notify_relation_owner(
         db, relation_id,
@@ -1125,7 +1187,7 @@ async def reject_relation_review(
     service = SupplierRelationService(db)
     rel = await db.get(SupplierSiteRelation, relation_id)
     unit = await db.get(SupplierUnit, rel.id_supplier_unit) if rel else None
-    supplier_label = unit.supplier_code if unit else f"Relation #{relation_id}"
+    supplier_label = unit.supplier_name if unit else f"Relation #{relation_id}"
     await service.reject_relation_review(relation_id, body.comment)
     if rel:
         rel.review_comment = body.comment.strip()
@@ -1249,63 +1311,3 @@ async def delete_spend_by_year(
     return {"status": "success", "message": f"Spend entry for {fiscal_year} deleted."}
 
 
-@router.get("/purchasers", response_model=dict)
-async def get_purchasers_for_site(
-    site_id: int,
-    db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
-):
-    """Return purchasers relevant for a given Avocarbon site.
-
-    site_purchasers — local_purchaser accounts explicitly assigned to this site
-                      via the access_identity_site junction table.
-    group_purchasers — global_purchaser / purchasing_director accounts that cover
-                       all sites (no site restriction; always returned).
-    """
-    site_rows = await db.execute(
-        text("""
-            SELECT ai.id_identity, ai.full_name, ai.email, ai.access_profile
-            FROM access_identity ai
-            JOIN access_identity_site ais ON ais.id_identity = ai.id_identity
-            WHERE ais.id_site = :site_id
-              AND ai.is_active = TRUE
-            ORDER BY ai.full_name
-        """),
-        {"site_id": site_id},
-    )
-    site_purchasers = [
-        {
-            "id_identity": r.id_identity,
-            "full_name": r.full_name,
-            "email": r.email,
-            "access_profile": r.access_profile,
-        }
-        for r in site_rows.fetchall()
-    ]
-
-    group_rows = await db.execute(
-        text("""
-            SELECT id_identity, full_name, email, access_profile
-            FROM access_identity
-            WHERE is_active = TRUE
-              AND access_profile IN ('global_purchaser', 'purchasing_director')
-            ORDER BY access_profile DESC, full_name
-        """)
-    )
-    group_purchasers = [
-        {
-            "id_identity": r.id_identity,
-            "full_name": r.full_name,
-            "email": r.email,
-            "access_profile": r.access_profile,
-        }
-        for r in group_rows.fetchall()
-    ]
-
-    return {
-        "status": "success",
-        "data": {
-            "site_purchasers": site_purchasers,
-            "group_purchasers": group_purchasers,
-        },
-    }

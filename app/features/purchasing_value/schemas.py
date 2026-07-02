@@ -539,7 +539,6 @@ class OpportunityUpdateRequest(BaseModel):
     reason_capacity: Optional[bool] = None
     reason_other: Optional[str] = None
     secondary_plants: Optional[str] = None
-    gate_conditions: Optional[str] = Field(None, description="Conditions / Actions requested at the gate")
     changed_by: Optional[str] = None
 
 
@@ -964,7 +963,6 @@ class OpportunityResponse(BaseModel):
     cash_inventory_gap: Optional[Decimal] = None
     cash_ap_gap: Optional[Decimal] = None
     secondary_plants: Optional[str] = None
-    gate_conditions: Optional[str] = None
     stp_risks: Optional[STPRisks] = None
     stp_benefits: Optional[STPBenefits] = None
     phase1_weeks: Optional[int] = None
@@ -1029,7 +1027,7 @@ class OpportunityDocumentResponse(BaseModel):
 
 class SupplierOption(BaseModel):
     id_supplier_unit: int
-    supplier_code: Optional[str] = None
+    supplier_name: Optional[str] = None
     group_name: Optional[str] = None   # SupplierGroup.nom
     city: Optional[str] = None
     country: Optional[str] = None

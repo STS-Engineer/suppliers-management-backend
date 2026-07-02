@@ -17,10 +17,8 @@ _SCOPE_FREQUENCY: dict[str, str] = {
 from app.db.models import (
     AvocarbonSite,
     Contact,
-    SupplierCategory,
     SupplierCertification,
     SupplierGroup,
-    SupplierGroupCategory,
     SupplierSiteRelation,
     SupplierSpendByYear,
     SupplierUnit,
@@ -47,7 +45,6 @@ class SupplierOnboardingWorkflow:
         evaluation: Optional[Dict[str, Any]] = None,
         unit_contacts: Optional[List[Dict[str, Any]]] = None,
         annual_spend_value: Optional[Decimal] = None,
-        annual_spend_currency: Optional[str] = None,
         fiscal_year: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
@@ -107,7 +104,6 @@ class SupplierOnboardingWorkflow:
                 certifications=certifications,
                 evaluation=evaluation,
                 annual_spend_value=annual_spend_value,
-                annual_spend_currency=annual_spend_currency,
                 fiscal_year=fiscal_year,
             )
 
@@ -134,7 +130,7 @@ class SupplierOnboardingWorkflow:
             # Step 5: Send creation notification email
             # creation_email_sent = await self.email_service.send_supplier_creation_email(
             #     supplier_name=group.nom,
-            #     supplier_code=unit.supplier_code,
+            #     supplier_code=unit.supplier_name,
             #     contact_email=primary_contact.get("email", ""),
             #     contact_name=primary_contact.get("full_name", ""),
             #     supplier_scope=supplier_scope,
@@ -150,7 +146,7 @@ class SupplierOnboardingWorkflow:
             #             owner_email=supplier_owner,
             #             owner_name=supplier_owner.split("@")[0],
             #             site_name=site.site_name or "Unknown Site",
-            #             supplier_code=unit.supplier_code,
+            #             supplier_code=unit.supplier_name,
             #         )
             #     )
 
@@ -205,7 +201,7 @@ class SupplierOnboardingWorkflow:
                     "group_id": group.id_group,
                     "group_name": group.nom,
                     "unit_id": unit.id_supplier_unit,
-                    "unit_code": unit.supplier_code,
+                    "unit_code": unit.supplier_name,
                 },
                 "relation": {
                     "relation_id": relation.id_relation,
@@ -281,12 +277,12 @@ class SupplierOnboardingWorkflow:
                     status_code=409,
                 )
 
-        supplier_code = str(unit_data.get("supplier_code") or "").strip()
+        supplier_name = str(unit_data.get("supplier_name") or "").strip()
         unit_group_id = unit_data.get("id_group")
-        if supplier_code and unit_group_id is not None:
+        if supplier_name and unit_group_id is not None:
             existing_unit_stmt = select(SupplierUnit).where(
                 SupplierUnit.id_group == unit_group_id,
-                SupplierUnit.supplier_code == supplier_code,
+                SupplierUnit.supplier_name == supplier_name,
                 SupplierUnit.is_deleted.is_(False),
             )
             existing_unit = (
@@ -294,20 +290,18 @@ class SupplierOnboardingWorkflow:
             ).scalar_one_or_none()
             if existing_unit:
                 raise AppException(
-                    f"Supplier unit with code '{supplier_code}' already exists in this group",
+                    f"Supplier unit with name '{supplier_name}' already exists in this group",
                     status_code=409,
                 )
 
         prepared_group_data = self._prepare_group_payload(group_data)
         prepared_unit_data = self._prepare_unit_payload(unit_data, group_data)
-        categories = self._extract_categories(group_data.get("supplier_type"))
 
         # Create group — always starts as pending until a purchasing manager approves
         group = SupplierGroup(**prepared_group_data)
         group.validation_status = "pending"
         self.db.add(group)
         await self.db.flush()
-        await self._replace_group_categories(group.id_group, categories)
 
         # Create unit
         prepared_unit_data["id_group"] = group.id_group
@@ -357,7 +351,6 @@ class SupplierOnboardingWorkflow:
         certifications: Optional[List[Dict[str, Any]]] = None,
         evaluation: Optional[Dict[str, Any]] = None,
         annual_spend_value: Optional[Decimal] = None,
-        annual_spend_currency: Optional[str] = None,
         fiscal_year: Optional[int] = None,
     ) -> SupplierSiteRelation:
         """Create supplier-site relation with owner and classification."""
@@ -386,8 +379,6 @@ class SupplierOnboardingWorkflow:
         }
         if annual_spend_value is not None:
             relation_data["annual_spend_value"] = annual_spend_value
-        if annual_spend_currency:
-            relation_data["annual_spend_currency"] = annual_spend_currency
 
         # Add evaluation data if provided (store as-is, no conversion)
         if evaluation:
@@ -431,7 +422,7 @@ class SupplierOnboardingWorkflow:
                 id_relation=relation.id_relation,
                 fiscal_year=fiscal_year,
                 spend_value=annual_spend_value,
-                spend_currency=annual_spend_currency or "EUR",
+                spend_currency="EUR",
                 created_by=buyer_owner,
             )
             self.db.add(spend_entry)
@@ -545,40 +536,12 @@ class SupplierOnboardingWorkflow:
             return "directed"
         return "none"
 
-    async def _replace_group_categories(
-        self,
-        group_id: int,
-        categories: List[tuple[str, str]],
-    ) -> None:
-        for category_key, category_label in categories:
-            stmt = select(SupplierCategory).where(
-                SupplierCategory.category_key == category_key
-            )
-            result = await self.db.execute(stmt)
-            category = result.scalar_one_or_none()
-            if not category:
-                category = SupplierCategory(
-                    category_key=category_key,
-                    category_label=category_label,
-                )
-                self.db.add(category)
-                await self.db.flush()
-
-            self.db.add(
-                SupplierGroupCategory(
-                    id_group=group_id,
-                    id_category=category.id_category,
-                )
-            )
-        await self.db.flush()
-
     @staticmethod
     def _prepare_group_payload(data: Dict[str, Any]) -> Dict[str, Any]:
         prepared = dict(data)
         supplier_owner = prepared.pop("supplier_owner", None)
         if supplier_owner is not None:
             prepared["group_supplier_owner_email"] = supplier_owner
-        prepared.pop("supplier_type", None)
         prepared.pop("strategique", None)
         prepared.pop("monopolistique", None)
         prepared.pop("directed", None)
@@ -599,28 +562,3 @@ class SupplierOnboardingWorkflow:
                 prepared[field_name] = bool(group_data.get(field_name))
         return prepared
 
-    @staticmethod
-    def _extract_categories(raw_value: Any) -> List[tuple[str, str]]:
-        if raw_value in (None, ""):
-            return []
-        if isinstance(raw_value, str):
-            raw_items = [item.strip() for item in raw_value.split(",")]
-        elif isinstance(raw_value, list):
-            raw_items = [str(item).strip() for item in raw_value]
-        else:
-            raw_items = [str(raw_value).strip()]
-
-        categories: List[tuple[str, str]] = []
-        seen: set[str] = set()
-        for item in raw_items:
-            if not item:
-                continue
-            category_key = "".join(
-                character if character.isalnum() else "_"
-                for character in item.lower().replace("&", "and")
-            ).strip("_")
-            if not category_key or category_key in seen:
-                continue
-            seen.add(category_key)
-            categories.append((category_key, item))
-        return categories

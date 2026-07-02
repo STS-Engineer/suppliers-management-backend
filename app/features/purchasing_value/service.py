@@ -446,7 +446,6 @@ class PurchasingValueService:
             opp.reason_capacity = payload.reason_capacity
         _set_if(opp, "reason_other", payload.reason_other)
         _set_if(opp, "secondary_plants", payload.secondary_plants)
-        _set_if(opp, "gate_conditions", payload.gate_conditions)
         # Auto-compute investment total (all 4 cost lines)
         costs = [
             float(opp.tooling_cost or 0),
@@ -2741,7 +2740,7 @@ class PurchasingValueService:
         return [
             {
                 "id_supplier_unit": u.id_supplier_unit,
-                "supplier_code": u.supplier_code,
+                "supplier_name": u.supplier_name,
                 "group_name": u.group.nom if u.group else None,
                 "city": u.city,
                 "country": u.country,

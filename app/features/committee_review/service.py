@@ -434,8 +434,7 @@ class CommitteeReviewService:
         site = relation.site
         return {
             "relation_id": relation.id_relation,
-            "supplier_name": unit.supplier_code if unit else None,
-            "supplier_code": unit.supplier_code if unit else None,
+            "supplier_name": unit.supplier_name if unit else None,
             "site_name": site.site_name if site else None,
             "family": unit.family if unit else None,
             "sub_family": unit.sub_family if unit else None,
@@ -487,7 +486,6 @@ class CommitteeReviewService:
         doc_url: Optional[str],
     ) -> None:
         supplier_name = snapshot.get("supplier_name") or "N/A"
-        supplier_code = snapshot.get("supplier_code") or "N/A"
         site_name = snapshot.get("site_name") or "N/A"
         family = snapshot.get("family") or "N/A"
         grade = snapshot.get("final_grade") or "N/A"
@@ -511,11 +509,10 @@ class CommitteeReviewService:
 
             <table style="width:100%;border-collapse:collapse;margin-bottom:20px">
               <tr style="background:#e8f0f8"><td style="padding:8px 12px;font-weight:bold;width:40%">Supplier</td><td style="padding:8px 12px">{supplier_name}</td></tr>
-              <tr><td style="padding:8px 12px;font-weight:bold">Code</td><td style="padding:8px 12px">{supplier_code}</td></tr>
-              <tr style="background:#e8f0f8"><td style="padding:8px 12px;font-weight:bold">Plant</td><td style="padding:8px 12px">{site_name}</td></tr>
-              <tr><td style="padding:8px 12px;font-weight:bold">Family</td><td style="padding:8px 12px">{family}</td></tr>
-              <tr style="background:#e8f0f8"><td style="padding:8px 12px;font-weight:bold">Grade</td><td style="padding:8px 12px">{grade}</td></tr>
-              <tr><td style="padding:8px 12px;font-weight:bold">Panel Decision</td><td style="padding:8px 12px">{panel}</td></tr>
+              <tr><td style="padding:8px 12px;font-weight:bold">Plant</td><td style="padding:8px 12px">{site_name}</td></tr>
+              <tr style="background:#e8f0f8"><td style="padding:8px 12px;font-weight:bold">Family</td><td style="padding:8px 12px">{family}</td></tr>
+              <tr><td style="padding:8px 12px;font-weight:bold">Grade</td><td style="padding:8px 12px">{grade}</td></tr>
+              <tr style="background:#e8f0f8"><td style="padding:8px 12px;font-weight:bold">Panel Decision</td><td style="padding:8px 12px">{panel}</td></tr>
             </table>
 
             <p style="margin:0 0 8px"><strong>Evaluation File:</strong></p>
@@ -539,7 +536,7 @@ class CommitteeReviewService:
 
         try:
             await _email_svc.send_email(
-                subject=f"[Action Required] Committee Review: {supplier_name} ({supplier_code})",
+                subject=f"[Action Required] Committee Review: {supplier_name}",
                 recipients=[member.email],
                 body_html=body_html,
             )

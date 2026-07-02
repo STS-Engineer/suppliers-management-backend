@@ -77,7 +77,7 @@ async def batch_upload_evaluations(
     """
     Upload an Excel (.xlsx) or CSV file with batch evaluation results.
 
-    Expected columns: supplier_code, plant_name, evaluation_date,
+    Expected columns: supplier_name, plant_name, evaluation_date,
     operational_grade (A/B/C/D), class_value (1-4), comments (optional).
 
     For each row:

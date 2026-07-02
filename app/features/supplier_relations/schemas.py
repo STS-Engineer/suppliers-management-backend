@@ -284,7 +284,7 @@ class DevelopmentPlanRegisterRowResponse(BaseModel):
     site_name: Optional[str] = None
     site_city: Optional[str] = None
     site_country: Optional[str] = None
-    unit_supplier_code: Optional[str] = None
+    unit_supplier_name: Optional[str] = None
     unit_code: Optional[str] = None
     group_id: Optional[int] = None
     group_name: Optional[str] = None
@@ -314,7 +314,7 @@ class RelationEvaluationWorkspaceResponse(EvaluationDetailsBase):
     status_override: Optional[SupplierStatusOverridePayload] = None
     development_plans: list[SupplierDevelopmentPlanResponse] = Field(default_factory=list)
     # Extended workspace fields
-    unit_supplier_code: Optional[str] = None
+    unit_supplier_name: Optional[str] = None
     unit_is_active: bool = True
     unit_inactivated_at: Optional[str] = None
     reevaluation_type: Optional[str] = None  # "initial" | "preliminary" | None
