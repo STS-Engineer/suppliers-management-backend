@@ -1115,7 +1115,7 @@ async def update_action_plan(
     )
     try:
         svc = PurchasingValueService(db)
-        plan = await svc.update_action_plan(action_plan_id, payload, user_email)
+        plan = await svc.update_action_plan(action_plan_id, payload, user_email, opportunity_id)
         await db.commit()
         from app.features.purchasing_value.schemas import ActionPlanResponse
         return {"status": "success", "data": ActionPlanResponse.model_validate(plan).model_dump()}
@@ -1137,7 +1137,7 @@ async def delete_action_plan(
     _require(current_user, _NON_VIEWER)
     try:
         svc = PurchasingValueService(db)
-        await svc.delete_action_plan(action_plan_id)
+        await svc.delete_action_plan(action_plan_id, opportunity_id)
         await db.commit()
         return {"status": "success", "message": "Action plan deleted"}
     except AppException:
@@ -1164,7 +1164,7 @@ async def sync_action_plan(
     _require(current_user, _NON_VIEWER)
     try:
         svc = PurchasingValueService(db)
-        result = await svc.sync_action_plan(action_plan_id)
+        result = await svc.sync_action_plan(action_plan_id, opportunity_id)
         await db.commit()
         return {"status": "success", "data": result}
     except AppException:
@@ -1218,7 +1218,7 @@ async def upload_action_evidence(
     try:
         svc = PurchasingValueService(db)
         result = await svc.upload_action_evidence(
-            action_plan_id, sujet_idx, action_idx, file, user_email
+            action_plan_id, sujet_idx, action_idx, file, user_email, opportunity_id
         )
         await db.commit()
         return {"status": "success", "data": result}
@@ -1261,3 +1261,26 @@ async def update_action_item_status(
     except Exception:
         await db.rollback()
         raise
+
+
+@router.post("/action-plans/{action_plan_id}/items/remind", response_model=dict)
+async def remind_action_item(
+    action_plan_id: int,
+    sujet_idx: int = Query(..., description="Index of the subject in plan_data.sujets"),
+    action_idx: int = Query(..., description="Index of the action within that subject"),
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Email the responsible person a reminder about one open action item."""
+    _require(current_user, _NON_VIEWER)
+    sent_by = (
+        current_user.get("email")
+        or current_user.get("upn")
+        or current_user.get("sub")
+        or "unknown"
+    )
+    svc = PurchasingValueService(db)
+    result = await svc.send_action_item_reminder(
+        action_plan_id, sujet_idx, action_idx, sent_by
+    )
+    return {"status": "success", "data": result}

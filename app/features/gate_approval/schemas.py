@@ -103,6 +103,21 @@ class VoteFormData(BaseModel):
     project_owner: Optional[str] = None
     change_mode: Optional[str] = None
 
+    # Scope
+    scope_in: Optional[str] = None
+    scope_out: Optional[str] = None
+    customers: Optional[str] = None
+
+    # Supplier before/after (for Sourcing)
+    proposed_supplier_name: Optional[str] = None
+    country_after: Optional[str] = None
+    supplier_asked: Optional[bool] = None
+    supplier_asked_result: Optional[str] = None
+
+    # Risks & benefits — JSONB payloads, shape defined in purchasing_value.schemas
+    stp_risks: Optional[dict] = None
+    stp_benefits: Optional[dict] = None
+
     # STP pricing — current vs proposed per year
     current_price: Optional[float] = None
     proposed_price: Optional[float] = None

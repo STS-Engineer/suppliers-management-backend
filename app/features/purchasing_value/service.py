@@ -652,18 +652,25 @@ class PurchasingValueService:
         "planned_end_date",          # computed: planned_start + duration_months
         "val_date",                  # date of Phase 0 Go
         "duration_months",
+        # Scope
+        "scope_in", "scope_out", "customers",
         # STP price baseline
         "current_price", "proposed_price",
         "current_price_n1", "current_price_n2", "current_price_n3",
         "proposed_price_n1", "proposed_price_n2", "proposed_price_n3",
         # Quantities
         "annual_quantity_n1", "annual_quantity_n2", "annual_quantity_n3", "annual_quantity_n4",
+        # Supplier before/after (for Sourcing)
+        "proposed_supplier_name", "country_after",
+        "supplier_asked", "supplier_asked_result",
         # Logistics
         "incoterms_before", "incoterms_after",
         "top_days_before", "top_days_after",
         "transit_days_before", "transit_days_after",
         "bonus_before", "bonus_after",
         "consignment_before", "consignment_after",
+        # Risks & benefits
+        "stp_risks", "stp_benefits",
         # Costs
         "tooling_cost", "travel_cost", "qualification_cost", "other_cost",
         # Savings & ROI calculations
@@ -790,7 +797,7 @@ class PurchasingValueService:
             if current_phase in ("Phase 1", "Phase 2", "Phase 3") and not _via_gate_approval:
                 raise AppException(
                     422,
-                    f"Phase {current_phase} transitions require a completed gate approval "
+                    f"{current_phase} transitions require a completed gate approval "
                     "workflow. Submit a gate approval request and wait for the panel to vote — "
                     "the phase advances automatically once quorum is reached.",
                     "GATE_APPROVAL_REQUIRED",
@@ -1381,9 +1388,22 @@ class PurchasingValueService:
         line.recovery_updated_by = payload.updated_by
         line.updated_at = now
         line.updated_by = payload.updated_by
-        # If recovery is done, clear escalation
-        if payload.recovery_status == "Done":
+        # If recovery is done, clear escalation — but only when the active
+        # escalation is the one this recovery plan was opened for (the
+        # auto-escalation raised by the monthly review, same convention as
+        # the R9 rebuild's own auto-clear). A manually-set escalation for an
+        # unrelated reason must not be silently cleared as a side effect of
+        # closing a recovery plan — use deescalate_financial_line for that.
+        if (
+            payload.recovery_status == "Done"
+            and line.is_escalated
+            and line.escalation_reason
+            and line.escalation_reason.startswith("Auto-escalated from monthly review")
+        ):
             line.is_escalated = False
+            line.escalated_at = None
+            line.escalated_by = None
+            line.escalation_reason = None
         await self.db.flush()
         await self.db.refresh(line, ["monthly_financials"])
         return line
@@ -1507,13 +1527,21 @@ class PurchasingValueService:
         lazy-load outside the greenlet context (`MissingGreenlet`). Query the rows
         explicitly instead so the recompute path is safe in API, tests and batch
         flows alike."""
+        # Locked (FOR UPDATE) to match assign_budget_year/close_budget_year —
+        # without this, two concurrent syncs for the same opportunity (e.g. a
+        # gate decision and a metadata save landing close together) can both
+        # read "no row for FY X" and both attempt to insert, surfacing as an
+        # unhandled IntegrityError on the unique (opportunity_id, fiscal_year)
+        # constraint instead of serializing cleanly.
         existing_rows = (
             (
                 await self.db.execute(
-                    select(OpportunityBudgetYear).where(
+                    select(OpportunityBudgetYear)
+                    .where(
                         OpportunityBudgetYear.opportunity_id == opp.opportunity_id,
                         OpportunityBudgetYear.is_deleted.is_(False),
                     )
+                    .with_for_update()
                 )
             )
             .scalars()
@@ -1576,13 +1604,13 @@ class PurchasingValueService:
                 )
 
         # Stale rows (duration shrank / dates cleared) — drop only if not locked.
-        # A director-committed row (status_locked_at set) must never be silently deleted.
+        # A director-committed row (status_locked_at set) must never be silently
+        # deleted OR mutated — its applicable_amount is a frozen commitment, so
+        # leave it exactly as-is rather than zeroing it out; a stale locked row
+        # is a signal for Finance to review, not a value the sync should touch.
         for fy, row in existing.items():
-            if fy not in seen:
-                if row.status_locked_at is not None:
-                    row.applicable_amount = Decimal("0")
-                else:
-                    await self.db.delete(row)
+            if fy not in seen and row.status_locked_at is None:
+                await self.db.delete(row)
 
         await self.db.flush()
 
@@ -1908,6 +1936,13 @@ class PurchasingValueService:
             .all()
         )
 
+        # A closed fiscal year's baseline (non-additional) rows are the frozen
+        # historical commitment Finance already reported on — they must not be
+        # re-decided through this endpoint after closure. Additional rows are
+        # explicitly exempt: accepting/rejecting post-closure additions is the
+        # whole point of the "Additional Opportunities" flow.
+        year_is_closed = fiscal_year in await self._closed_fiscal_years()
+
         now = datetime.utcnow()
         counts = {"Empty": 0, "Opportunity": 0, "Budgeted": 0}
         for r in rows:
@@ -1920,6 +1955,14 @@ class PurchasingValueService:
             new_status = by_opp.get(opp.opportunity_id)
             if new_status is None:
                 continue
+            if year_is_closed and not r.is_additional:
+                raise AppException(
+                    409,
+                    f"Fiscal year {fiscal_year} is closed — baseline budget rows "
+                    "are locked and cannot be re-decided. Only additional "
+                    "(post-closure) opportunities can be accepted/rejected.",
+                    "BUDGET_YEAR_CLOSED",
+                )
             r.budget_status = new_status
             r.status_locked_at = now
             r.status_locked_by = decided_by
@@ -2720,7 +2763,7 @@ class PurchasingValueService:
         )
         return list(result.scalars().all())
 
-    async def get_action_plan(self, action_plan_id: int):
+    async def get_action_plan(self, action_plan_id: int, expected_opportunity_id: Optional[int] = None):
         from app.db.models import OpportunityActionPlan
         result = await self.db.execute(
             select(OpportunityActionPlan).where(
@@ -2730,7 +2773,40 @@ class PurchasingValueService:
         plan = result.scalar_one_or_none()
         if plan is None:
             raise AppException("Action plan not found", status_code=404)
+        # Routes are nested under /opportunities/{opportunity_id}/action-plans/{action_plan_id}
+        # but action_plan_id alone is a valid, sufficient lookup key — without this
+        # check a mismatched pair (typo, stale link, or wrong opportunity_id) would
+        # silently operate on a different opportunity's plan.
+        if expected_opportunity_id is not None and plan.opportunity_id != expected_opportunity_id:
+            raise AppException(
+                404,
+                "Action plan not found for this opportunity.",
+                "ACTION_PLAN_OPPORTUNITY_MISMATCH",
+            )
         return plan
+
+    @staticmethod
+    def _validate_closed_actions(sujets: list) -> None:
+        """Enforce the same close-out rule everywhere an action's status can be
+        set to "closed": a closed_date and at least one attachment are required.
+        Mirrors the check in update_action_item_status so the bulk plan
+        create/update path can't bypass it."""
+        for sujet in sujets:
+            for action in sujet.get("actions", []):
+                if action.get("status") != "closed":
+                    continue
+                if not action.get("closed_date"):
+                    raise AppException(
+                        422,
+                        f"Implementation date is required to close action '{action.get('titre', '')}'.",
+                        "IMPLEMENTATION_DATE_REQUIRED",
+                    )
+                if not action.get("attachments"):
+                    raise AppException(
+                        422,
+                        f"At least one attachment is required to close action '{action.get('titre', '')}'.",
+                        "ATTACHMENT_REQUIRED",
+                    )
 
     async def create_action_plan(self, opportunity_id: int, payload, user_email: str):
         from app.db.models import OpportunityActionPlan
@@ -2760,6 +2836,7 @@ class PurchasingValueService:
             "email_demandeur": payload.email_demandeur,
             "sujets": [s.model_dump(mode="json") for s in payload.sujets],
         })
+        self._validate_closed_actions(plan_data["sujets"])
 
         # External push disabled — stored locally, sync via POST .../sync when ready.
         # TODO: re-enable once ACTION_PLAN_DATABASE_URL is configured on Azure.
@@ -2785,8 +2862,8 @@ class PurchasingValueService:
         await self.db.flush()
         return plan
 
-    async def update_action_plan(self, action_plan_id: int, payload, user_email: str):
-        plan = await self.get_action_plan(action_plan_id)
+    async def update_action_plan(self, action_plan_id: int, payload, user_email: str, opportunity_id: Optional[int] = None):
+        plan = await self.get_action_plan(action_plan_id, opportunity_id)
 
         if payload.plan_title is not None:
             plan.plan_title = payload.plan_title
@@ -2812,6 +2889,7 @@ class PurchasingValueService:
             existing["email_demandeur"] = payload.email_demandeur
         if payload.sujets is not None:
             existing["sujets"] = _strip_none([s.model_dump(mode="json") for s in payload.sujets])
+            self._validate_closed_actions(existing["sujets"])
         if payload.plan_title is not None:
             existing["plan_title"] = payload.plan_title
 
@@ -2828,7 +2906,7 @@ class PurchasingValueService:
         await self.db.flush()
         return plan
 
-    async def sync_action_plan(self, action_plan_id: int) -> dict:
+    async def sync_action_plan(self, action_plan_id: int, opportunity_id: Optional[int] = None) -> dict:
         """Push a locally stored action plan to the external sales-feedback API.
         Call POST .../action-plans/{id}/sync once ACTION_PLAN_DATABASE_URL is configured.
         Returns {"status": "ok"} or raises AppException on failure.
@@ -2836,7 +2914,7 @@ class PurchasingValueService:
         import httpx
         from app.core.config import settings
 
-        plan = await self.get_action_plan(action_plan_id)
+        plan = await self.get_action_plan(action_plan_id, opportunity_id)
         if not plan.plan_data:
             raise AppException(400, "Plan has no data to sync.", "NO_PLAN_DATA")
 
@@ -2864,8 +2942,8 @@ class PurchasingValueService:
             await self.db.flush()
             raise AppException(502, f"Could not reach external API: {exc}", "SYNC_UNREACHABLE")
 
-    async def delete_action_plan(self, action_plan_id: int) -> None:
-        plan = await self.get_action_plan(action_plan_id)
+    async def delete_action_plan(self, action_plan_id: int, opportunity_id: Optional[int] = None) -> None:
+        plan = await self.get_action_plan(action_plan_id, opportunity_id)
         await self.db.delete(plan)
         await self.db.flush()
 
@@ -2949,11 +3027,12 @@ class PurchasingValueService:
         action_idx: int,
         file,
         user_email: str,
+        opportunity_id: Optional[int] = None,
     ) -> dict:
         """Upload a file as evidence for a specific action and append it to the JSONB attachments."""
         from app.shared.utils.blob_storage import upload_opportunity_document
 
-        plan = await self.get_action_plan(action_plan_id)
+        plan = await self.get_action_plan(action_plan_id, opportunity_id)
         data = dict(plan.plan_data or {})
         sujets = data.get("sujets", [])
 
@@ -3008,17 +3087,103 @@ class PurchasingValueService:
         if action_idx >= len(actions):
             raise AppException(404, "Action index out of range.", "ACTION_NOT_FOUND")
 
-        actions[action_idx]["status"] = status
         if status == "closed":
-            actions[action_idx]["closed_date"] = implementation_date or datetime.utcnow().date().isoformat()
+            if not implementation_date:
+                raise AppException(
+                    422,
+                    "Implementation date is required to close an action.",
+                    "IMPLEMENTATION_DATE_REQUIRED",
+                )
+            if not actions[action_idx].get("attachments"):
+                raise AppException(
+                    422,
+                    "At least one attachment is required to close an action.",
+                    "ATTACHMENT_REQUIRED",
+                )
+            actions[action_idx]["closed_date"] = implementation_date
         else:
             actions[action_idx].pop("closed_date", None)
+        actions[action_idx]["status"] = status
 
         plan.plan_data = data
         plan.updated_at = datetime.utcnow()
         plan.updated_by = user_email
         await self.db.flush()
         return actions[action_idx]
+
+    async def send_action_item_reminder(
+        self,
+        action_plan_id: int,
+        sujet_idx: int,
+        action_idx: int,
+        sent_by: str,
+    ) -> dict:
+        """Email the responsible person a reminder about one open action item."""
+        plan = await self.get_action_plan(action_plan_id)
+        data = plan.plan_data or {}
+        sujets = data.get("sujets", [])
+
+        if sujet_idx >= len(sujets):
+            raise AppException(404, "Subject index out of range.", "SUJET_NOT_FOUND")
+        sujet = sujets[sujet_idx]
+        actions = sujet.get("actions", [])
+        if action_idx >= len(actions):
+            raise AppException(404, "Action index out of range.", "ACTION_NOT_FOUND")
+        action = actions[action_idx]
+
+        recipient = action.get("email_responsable") or data.get("email_responsable")
+        if not recipient:
+            raise AppException(
+                422,
+                "This action has no responsible person's email to remind.",
+                "NO_RESPONSIBLE_EMAIL",
+            )
+
+        opp_result = await self.db.execute(
+            select(Opportunity).where(Opportunity.opportunity_id == plan.opportunity_id)
+        )
+        opp = opp_result.scalar_one_or_none()
+        opp_name = opp.opportunity_name if opp else f"Opportunity #{plan.opportunity_id}"
+
+        due_date = action.get("due_date")
+        title = action.get("titre") or "Untitled action"
+        responsible_name = action.get("responsable") or data.get("responsable") or ""
+
+        html = f"""
+<div style="font-family:Inter,Arial,sans-serif;max-width:520px;margin:0 auto;padding:24px">
+  <h2 style="color:#b45309;font-size:18px;margin-bottom:4px">Action Plan Reminder</h2>
+  <p style="color:#64748b;font-size:13px;margin-top:0">
+    <strong>{sent_by}</strong> is reminding you about an open action item{f" for {responsible_name}" if responsible_name else ""}.
+  </p>
+  <table style="width:100%;border-collapse:collapse;margin:16px 0">
+    <tr>
+      <td style="padding:4px 12px 4px 0;color:#64748b;font-size:13px">Opportunity</td>
+      <td style="padding:4px 0;font-size:13px;font-weight:600">{opp_name}</td>
+    </tr>
+    <tr>
+      <td style="padding:4px 12px 4px 0;color:#64748b;font-size:13px">Action</td>
+      <td style="padding:4px 0;font-size:13px;font-weight:600">{title}</td>
+    </tr>
+    <tr>
+      <td style="padding:4px 12px 4px 0;color:#64748b;font-size:13px">Status</td>
+      <td style="padding:4px 0;font-size:13px;font-weight:600">{action.get("status", "open")}</td>
+    </tr>
+    <tr>
+      <td style="padding:4px 12px 4px 0;color:#64748b;font-size:13px">Due date</td>
+      <td style="padding:4px 0;font-size:13px;font-weight:600">{due_date or "—"}</td>
+    </tr>
+  </table>
+  <p style="font-size:12px;color:#94a3b8;margin-top:20px">
+    Please update this action's status once completed.
+  </p>
+</div>"""
+
+        await send_email(
+            subject=f"[Reminder] Action Plan — {title} ({opp_name})",
+            recipients=[recipient],
+            body_html=html,
+        )
+        return {"reminded": recipient}
 
     async def _recalculate_ytd(self, financial_line_id: int) -> None:
         """Recalculate monthly cumulated fields AND push totals back to FinancialLine.
@@ -3132,14 +3297,18 @@ def _set_if(obj, attr: str, value) -> None:
 
 
 def _build_escalation_email(opp: Opportunity, line: FinancialLine, reason: str) -> str:
+    # FinancialLine amounts are stored in the opportunity's native currency —
+    # no FX conversion happens before this point — so label with opp.currency
+    # instead of assuming EUR.
+    cur = opp.currency or "EUR"
     actual = (
-        f"€{line.cumulated_real_saving:,.0f}" if line.cumulated_real_saving else "€0"
+        f"{cur}{line.cumulated_real_saving:,.0f}" if line.cumulated_real_saving else f"{cur}0"
     )
     expected = (
-        f"€{line.expected_annual_saving:,.0f}" if line.expected_annual_saving else "N/A"
+        f"{cur}{line.expected_annual_saving:,.0f}" if line.expected_annual_saving else "N/A"
     )
     delta = (
-        f"€{line.delta_vs_expected_ytd:,.0f}" if line.delta_vs_expected_ytd else "N/A"
+        f"{cur}{line.delta_vs_expected_ytd:,.0f}" if line.delta_vs_expected_ytd else "N/A"
     )
     return f"""
     <html><body style="font-family:Arial,sans-serif;color:#111827;max-width:620px;margin:0 auto">

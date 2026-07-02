@@ -5,8 +5,9 @@ Roles assigned based on the activity/responsibility table:
                        (Olivier Grimaud already exists in DB — skipped)
   purchasing_director — (Jiehua Zhang already exists in DB — skipped)
   global_purchaser   — Jenny Li, Sarah Wu  (group-level purchasers, confirmed)
-  local_purchaser    — Hosni Ben Ali, Nicolas Masson, Yassine Chitit,
-                       Lili Dong, Eduardo Rodriguez, Joan Zhao, Hyering Kang
+  local_purchaser    — Hosni Ben Ali, Nicolas Masson, Yassine Chiti,
+                       Lili Dong, Eduardo Rodriguez, Joan Zhao, Hyerin Kang,
+                       Vivekanandan P
 
 Emails are in the format firstname.lastname@avocarbon.com — update any that differ.
 Starter password: Avoc@2026!  (bcrypt rounds=12)
@@ -39,11 +40,12 @@ _USERS = [
     # ── Local Purchaser ──────────────────────────────────────────────────────
     ("Hosni Ben Ali", "hosni.benali@avocarbon.com", "local_purchaser"),
     ("Nicolas Masson", "nicolas.masson@avocarbon.com", "local_purchaser"),
-    ("Yassine Chitit", "yassine.chitit@avocarbon.com", "local_purchaser"),
+    ("Yassine Chiti", "yassine.chiti@avocarbon.com", "local_purchaser"),
     ("Lili Dong", "lili.dong@avocarbon.com", "local_purchaser"),
     ("Eduardo Rodriguez", "eduardo.rodriguez@avocarbon.com", "local_purchaser"),
     ("Joan Zhao", "joan.zhao@avocarbon.com", "local_purchaser"),
-    ("Hyering Kang", "hyering.kang@avocarbon.com", "local_purchaser"),
+    ("Hyerin Kang", "hyerin.kang@avocarbon.com", "local_purchaser"),
+    ("Vivekanandan P", "vivekanandan.p@avocarbon.com", "local_purchaser"),
 ]
 
 

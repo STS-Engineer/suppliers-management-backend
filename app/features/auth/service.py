@@ -1,4 +1,4 @@
-﻿"""Authentication service."""
+"""Authentication service."""
 
 from __future__ import annotations
 
@@ -237,7 +237,7 @@ class AuthService:
         await self._log_audit("otp_verified", identity.email, identity.id_identity)
 
         # Issue a short-lived (10 min) JWT and store its hash so it can only be
-        # used once â€” the JWT alone is not sufficient because it would be replayable
+        # used once — the JWT alone is not sufficient because it would be replayable
         # for its full validity window.
         reset_token = create_access_token(
             {
@@ -364,7 +364,7 @@ class AuthService:
         )
         try:
             await get_email_service().send_email(
-                subject="Your Account Has Been Approved â€“ Activate Now",
+                subject="Your Account Has Been Approved – Activate Now",
                 recipients=[identity.email],
                 body_html=body,
             )

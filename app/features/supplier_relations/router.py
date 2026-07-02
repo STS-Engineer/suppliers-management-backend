@@ -1,7 +1,7 @@
 """Supplier relations router."""
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import AppException
@@ -1247,3 +1247,65 @@ async def delete_spend_by_year(
     await db.delete(entry)
     await db.commit()
     return {"status": "success", "message": f"Spend entry for {fiscal_year} deleted."}
+
+
+@router.get("/purchasers", response_model=dict)
+async def get_purchasers_for_site(
+    site_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Return purchasers relevant for a given Avocarbon site.
+
+    site_purchasers — local_purchaser accounts explicitly assigned to this site
+                      via the access_identity_site junction table.
+    group_purchasers — global_purchaser / purchasing_director accounts that cover
+                       all sites (no site restriction; always returned).
+    """
+    site_rows = await db.execute(
+        text("""
+            SELECT ai.id_identity, ai.full_name, ai.email, ai.access_profile
+            FROM access_identity ai
+            JOIN access_identity_site ais ON ais.id_identity = ai.id_identity
+            WHERE ais.id_site = :site_id
+              AND ai.is_active = TRUE
+            ORDER BY ai.full_name
+        """),
+        {"site_id": site_id},
+    )
+    site_purchasers = [
+        {
+            "id_identity": r.id_identity,
+            "full_name": r.full_name,
+            "email": r.email,
+            "access_profile": r.access_profile,
+        }
+        for r in site_rows.fetchall()
+    ]
+
+    group_rows = await db.execute(
+        text("""
+            SELECT id_identity, full_name, email, access_profile
+            FROM access_identity
+            WHERE is_active = TRUE
+              AND access_profile IN ('global_purchaser', 'purchasing_director')
+            ORDER BY access_profile DESC, full_name
+        """)
+    )
+    group_purchasers = [
+        {
+            "id_identity": r.id_identity,
+            "full_name": r.full_name,
+            "email": r.email,
+            "access_profile": r.access_profile,
+        }
+        for r in group_rows.fetchall()
+    ]
+
+    return {
+        "status": "success",
+        "data": {
+            "site_purchasers": site_purchasers,
+            "group_purchasers": group_purchasers,
+        },
+    }
