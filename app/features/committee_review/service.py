@@ -1,4 +1,4 @@
-"""Committee review workflow service."""
+﻿"""Committee review workflow service."""
 
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ class CommitteeReviewService:
     def __init__(self, db: AsyncSession) -> None:
         self.db = db
 
-    # ── Members ───────────────────────────────────────────────────────────
+    # â”€â”€ Members â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     async def list_members(self, active_only: bool = True) -> list[CommitteeMember]:
         stmt = select(CommitteeMember)
@@ -95,7 +95,7 @@ class CommitteeReviewService:
             raise NotFoundError("CommitteeMember", id_member)
         return m
 
-    # ── Initiate review ───────────────────────────────────────────────────
+    # â”€â”€ Initiate review â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     async def initiate_review(
         self, relation_id: int, initiated_by: str
@@ -109,7 +109,7 @@ class CommitteeReviewService:
                 error_code="NO_COMMITTEE_MEMBERS",
             )
 
-        # Relation must be reviewer-approved before going to committee — otherwise
+        # Relation must be reviewer-approved before going to committee â€” otherwise
         # committee approval would set panel_decision without validation_status ever
         # reaching "approved", leaving the supplier invisible on the active panel.
         if relation.validation_status != "approved":
@@ -119,7 +119,7 @@ class CommitteeReviewService:
                 error_code="RELATION_NOT_APPROVED",
             )
 
-        # Once a relation is committee-approved, the outcome is sealed — no new review
+        # Once a relation is committee-approved, the outcome is sealed â€” no new review
         # cycle is allowed. Rejected relations may retry after improvements.
         if relation.panel_decision == "panel_add_committee_validated":
             raise AppException(
@@ -128,7 +128,7 @@ class CommitteeReviewService:
                 error_code="RELATION_ALREADY_COMMITTEE_APPROVED",
             )
 
-        # Prevent concurrent review cycles on the same relation — multiple active
+        # Prevent concurrent review cycles on the same relation â€” multiple active
         # token sets would create competing outcomes and break the auto-approval logic.
         existing_active = (
             await self.db.execute(
@@ -173,7 +173,7 @@ class CommitteeReviewService:
             self.db.add(decision)
             await self.db.flush()
 
-            vote_url = f"{settings.FRONTEND_BASE_URL}/committee-vote/{token}"
+            vote_url = f"{settings.frontend_base_url}/committee-vote/{token}"
             await self._send_committee_email(
                 member=member,
                 snapshot=snapshot,
@@ -183,7 +183,7 @@ class CommitteeReviewService:
 
         return review
 
-    # ── Get review ────────────────────────────────────────────────────────
+    # â”€â”€ Get review â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     async def get_review(self, review_id: int) -> schemas.CommitteeReviewResponse:
         review = await self._load_review(review_id)
@@ -204,7 +204,7 @@ class CommitteeReviewService:
             return None
         return self._to_response(review)
 
-    # ── Public vote ───────────────────────────────────────────────────────
+    # â”€â”€ Public vote â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     async def get_vote_by_token(self, token: str) -> schemas.VoteFormResponse:
         decision = await self._load_decision_by_token(token)
@@ -286,7 +286,7 @@ class CommitteeReviewService:
             all_rejected = all(d.decision == "rejected" for d in review_fresh.decisions)
 
             if all_approved:
-                # Unanimous approval → auto-apply final decision
+                # Unanimous approval â†’ auto-apply final decision
                 review_fresh.final_decision = "approved"
                 review_fresh.final_decision_by = "auto"
                 review_fresh.final_decision_at = _now()
@@ -306,7 +306,7 @@ class CommitteeReviewService:
                     review_id=review.id_review,
                 )
             elif all_rejected:
-                # Unanimous rejection → auto-apply final decision (symmetric with approval)
+                # Unanimous rejection â†’ auto-apply final decision (symmetric with approval)
                 review_fresh.final_decision = "rejected"
                 review_fresh.final_decision_by = "auto"
                 review_fresh.final_decision_at = _now()
@@ -326,7 +326,7 @@ class CommitteeReviewService:
                     review_id=review.id_review,
                 )
             else:
-                # Mixed result → VP must decide manually
+                # Mixed result â†’ VP must decide manually
                 approved_count = sum(
                     1 for d in review_fresh.decisions if d.decision == "approved"
                 )
@@ -345,7 +345,7 @@ class CommitteeReviewService:
 
         return await self.get_vote_by_token(token)
 
-    # ── Final decision ────────────────────────────────────────────────────
+    # â”€â”€ Final decision â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     async def submit_final_decision(
         self,
@@ -385,7 +385,7 @@ class CommitteeReviewService:
 
         return self._to_response(review)
 
-    # ── Helpers ───────────────────────────────────────────────────────────
+    # â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     async def _load_relation(self, relation_id: int) -> SupplierSiteRelation:
         stmt = (
@@ -503,7 +503,7 @@ class CommitteeReviewService:
         <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
           <div style="background:#062B49;padding:20px 28px;border-radius:8px 8px 0 0">
             <h1 style="color:#fff;margin:0;font-size:18px">Committee Validation Request</h1>
-            <p style="color:#a8c4d4;margin:4px 0 0;font-size:13px">Supplier Panel Decision — AvoCarbon Purchasing</p>
+            <p style="color:#a8c4d4;margin:4px 0 0;font-size:13px">Supplier Panel Decision â€” AvoCarbon Purchasing</p>
           </div>
           <div style="background:#f8fafc;padding:24px 28px;border:1px solid #e2e8f0;border-top:none">
             <p style="margin:0 0 16px">Dear <strong>{member.name}</strong> ({member.position}),</p>
@@ -523,7 +523,7 @@ class CommitteeReviewService:
 
             <div style="margin:24px 0;text-align:center">
               <a href="{vote_url}" style="background:#062B49;color:#fff;padding:12px 28px;border-radius:6px;text-decoration:none;font-weight:bold;font-size:14px">
-                Submit My Decision →
+                Submit My Decision â†’
               </a>
             </div>
 

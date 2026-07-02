@@ -1,4 +1,4 @@
-"""Gate approval service."""
+﻿"""Gate approval service."""
 from __future__ import annotations
 
 import uuid
@@ -17,7 +17,6 @@ from app.features.purchasing_value.service import PurchasingValueService
 from app.features.purchasing_value.schemas import GateDecisionRequest
 from app.shared.utils.email.email_service import get_email_service
 
-FRONTEND_BASE_URL = getattr(settings, "FRONTEND_BASE_URL", "http://localhost:5173")
 TOKEN_TTL_HOURS = 72
 
 
@@ -59,7 +58,7 @@ class GateApprovalService:
                 "INVALID_PHASE_FOR_APPROVAL",
             )
 
-        # STP completeness check — non-Negotiation/Cash types must have all key sections filled
+        # STP completeness check â€” non-Negotiation/Cash types must have all key sections filled
         NO_STP_TYPES = {"Negotiation", "Cash"}
         if opp.phase_status == "Phase 0" and opp.opportunity_type not in NO_STP_TYPES:
             stp_risks = opp.stp_risks or {}
@@ -160,16 +159,16 @@ class GateApprovalService:
             )
             self.db.add(vote)
 
-            link = f"{FRONTEND_BASE_URL}/approve/{token}"
+            link = f"{settings.frontend_base_url}/approve/{token}"
             html = self._build_email_html(opp, req, link, payload.message, is_plant_manager=is_pm)
             try:
                 email_svc.send_sync(
-                    subject=f"[Action Required] Gate Approval — {opp.opportunity_name} ({opp.phase_status})",
+                    subject=f"[Action Required] Gate Approval â€” {opp.opportunity_name} ({opp.phase_status})",
                     recipients=[email],
                     body_html=html,
                 )
             except Exception:
-                pass  # Non-blocking — vote still created
+                pass  # Non-blocking â€” vote still created
 
         await self.db.flush()
         # Re-query with selectinload so votes (including access_token) are available
@@ -330,13 +329,13 @@ class GateApprovalService:
         vote.ip_address = ip_address
         vote.updated_at = now
 
-        # Save the PM designation — do NOT notify yet; wait for full consensus
+        # Save the PM designation â€” do NOT notify yet; wait for full consensus
         if payload.project_manager_email and vote.is_plant_manager:
             vote.project_manager_email = payload.project_manager_email
 
         await self.db.flush()
 
-        # Check consensus — PM notification fires only if all approve (Go)
+        # Check consensus â€” PM notification fires only if all approve (Go)
         await self._check_consensus(vote.request_id)
 
         return await self.get_vote_by_token(token)
@@ -392,7 +391,7 @@ class GateApprovalService:
             opp_type = snap.get("opportunity_type", "")
             pm_email = plant_vote.project_manager_email if plant_vote else None
             if opp_type not in ("Negotiation", "Cash") and not pm_email:
-                # Cannot complete Go without PM — leave request Pending until
+                # Cannot complete Go without PM â€” leave request Pending until
                 # plant manager re-votes or re-request is made with PM assigned
                 return
             consensus = "Go"
@@ -417,13 +416,13 @@ class GateApprovalService:
                 comments="Gate panel requested rework before re-submission.",
             )
 
-        # Apply the phase transition first — if it fails, let the exception propagate
+        # Apply the phase transition first â€” if it fails, let the exception propagate
         # so the request is NOT marked Completed and stays correctable.
         # _via_gate_approval=True bypasses the direct-call guard for Phase 1-3.
         pv_svc = PurchasingValueService(self.db)
         await pv_svc.apply_gate_decision(req.opportunity_id, gate_payload, _via_gate_approval=True)
 
-        # Phase transition succeeded — now seal the approval request.
+        # Phase transition succeeded â€” now seal the approval request.
         req.consensus_result = consensus
         req.status = "Completed"
         req.applied_at = now
@@ -460,7 +459,7 @@ class GateApprovalService:
 
         def fmt(v, suffix="", decimals: int = 0) -> str:
             if v is None:
-                return "—"
+                return "â€”"
             try:
                 fv = float(v)
                 return f"{fv:,.{decimals}f}{suffix}"
@@ -468,17 +467,17 @@ class GateApprovalService:
                 return str(v)
 
         rows = [
-            ("Opportunity", opp.opportunity_name or "—"),
-            ("Type", opp.opportunity_type or "—"),
-            ("Phase", f"{req.phase_from} → next"),
-            ("Owner (Idea)", snap.get("idea_owner") or "—"),
-            ("Project Manager", snap.get("project_owner") or "—"),
-            ("Change type", snap.get("change_mode") or "—"),
-            ("Current price", fmt(snap.get("current_price"), " €", 4)),
-            ("Proposed price", fmt(snap.get("proposed_price"), " €", 4)),
-            ("Saving / year", fmt(snap.get("saving_year_n"), " €")),
-            ("Period saving", fmt(snap.get("period_saving"), " €")),
-            ("Planned start", snap.get("planned_start_date") or "—"),
+            ("Opportunity", opp.opportunity_name or "â€”"),
+            ("Type", opp.opportunity_type or "â€”"),
+            ("Phase", f"{req.phase_from} â†’ next"),
+            ("Owner (Idea)", snap.get("idea_owner") or "â€”"),
+            ("Project Manager", snap.get("project_owner") or "â€”"),
+            ("Change type", snap.get("change_mode") or "â€”"),
+            ("Current price", fmt(snap.get("current_price"), " â‚¬", 4)),
+            ("Proposed price", fmt(snap.get("proposed_price"), " â‚¬", 4)),
+            ("Saving / year", fmt(snap.get("saving_year_n"), " â‚¬")),
+            ("Period saving", fmt(snap.get("period_saving"), " â‚¬")),
+            ("Planned start", snap.get("planned_start_date") or "â€”"),
             ("Duration", fmt(snap.get("duration_months"), " months")),
         ]
         table_rows = "".join(
@@ -513,7 +512,7 @@ class GateApprovalService:
   </p>
   <a href="{link}" style="display:inline-block;background:#2563eb;color:#fff;
      text-decoration:none;padding:12px 28px;border-radius:10px;font-size:14px;
-     font-weight:600;margin-top:8px">Open Approval Form →</a>
+     font-weight:600;margin-top:8px">Open Approval Form â†’</a>
   <p style="font-size:11px;color:#94a3b8;margin-top:20px">
     This link expires in 72 hours and can be used only once.
   </p>
@@ -557,20 +556,20 @@ class GateApprovalService:
     </tr>
     <tr>
       <td style="padding:4px 12px 4px 0;color:#64748b;font-size:13px">Gate</td>
-      <td style="padding:4px 0;font-size:13px;font-weight:600">{phase} — approved by all reviewers, advancing to Phase 1</td>
+      <td style="padding:4px 0;font-size:13px;font-weight:600">{phase} â€” approved by all reviewers, advancing to Phase 1</td>
     </tr>
   </table>
   <p style="color:#64748b;font-size:12px;margin-top:4px">
     Please connect with the idea owner and the purchasing team to start the Phase 1 feasibility study.
   </p>
   <p style="font-size:11px;color:#94a3b8;margin-top:20px">
-    Avocarbon · Suppliers Management · Purchasing Value
+    Avocarbon Â· Suppliers Management Â· Purchasing Value
   </p>
 </div>"""
         try:
             email_svc = get_email_service()
             email_svc.send_sync(
-                subject=f"[Action Required] You are assigned as Project Manager — {opp_name}",
+                subject=f"[Action Required] You are assigned as Project Manager â€” {opp_name}",
                 recipients=[pm_email],
                 body_html=html,
             )

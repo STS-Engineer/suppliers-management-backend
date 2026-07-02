@@ -1,4 +1,4 @@
-"""Application settings."""
+﻿"""Application settings."""
 
 import json
 
@@ -139,6 +139,12 @@ class Settings(BaseSettings):
             return []
 
         return [origin.strip() for origin in raw_value.split(",") if origin.strip()]
+
+    @property
+    def frontend_base_url(self) -> str:
+        """Return the frontend base URL without a trailing slash."""
+
+        return self.FRONTEND_BASE_URL.rstrip("/")
 
 
 settings = Settings()
