@@ -12,7 +12,7 @@ from pydantic_settings import (
 class Settings(BaseSettings):
     """Application configuration."""
 
-    APP_NAME: str = "Supplier Management Backend"
+    APP_NAME: str = "Supplier Management & Evaluation Platform"
 
     ALLOWED_ORIGINS: str = (
         "http://localhost:3000,"

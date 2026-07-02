@@ -67,7 +67,7 @@ def build_activation_email(
     extra = f"<p><em>{personal_message}</em></p>" if personal_message else ""
     body = f"""
 <p>Hello {full_name},</p>
-<p>Your account request has been <strong>approved</strong>. Welcome to {settings.APP_NAME}!</p>
+<p>Your account request has been <strong>approved</strong>. Welcome to Suppliers and purchasing management system !</p>
 {extra}
 <p>Click the button below to set your password and activate your account.
 This link expires in <strong>{expire_hours} hours</strong>.</p>
@@ -82,9 +82,7 @@ This link expires in <strong>{expire_hours} hours</strong>.</p>
 
 
 def build_rejection_email(full_name: str, reason: str | None) -> str:
-    reason_block = (
-        f"<p>Reason provided: <em>{reason}</em></p>" if reason else ""
-    )
+    reason_block = f"<p>Reason provided: <em>{reason}</em></p>" if reason else ""
     body = f"""
 <p>Hello {full_name},</p>
 <p>Thank you for your interest in {settings.APP_NAME}.</p>
