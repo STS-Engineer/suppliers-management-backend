@@ -70,6 +70,10 @@ OPERATIONAL_SCORE_FIELDS = (
     "environment_ethic_rules",
 )
 
+# cycle_type values representing an ad-hoc correction rather than a genuine
+# periodic scorecard review -- these must not advance next_evaluation_date.
+AD_HOC_CYCLE_TYPES = {"Criteria Change Review", "Expired Criteria Reset"}
+
 STATUS_CAN_QUOTE_AND_BE_AWARDED = "Can Quote and Be Awarded"
 STATUS_CAN_QUOTE_NOT_BE_AWARDED = "Can Quote but Not be Awarded"
 STATUS_NEW_BUSINESS_ON_HOLD = "New business on Hold"
@@ -276,16 +280,39 @@ class SupplierRelationService:
         # Build response — only relations that have at least one eval input.
         # Relations with no eval yet (no PldClassEvaluationInput) are excluded.
         all_rel_ids = sorted(inputs_by_rel.keys())
+
+        # quality_certification is the one criterion backed by an independent,
+        # separately-editable record (SupplierCertification). Never trust a stored/
+        # copied value for it here -- always derive live from the relation's unit,
+        # batched in one query, so a unit with N relations reports its cert's
+        # expiry consistently instead of via N stale copies (the original bug).
+        unit_by_rel: dict[int, int] = {}
+        if all_rel_ids:
+            unit_rows = await self.db.execute(
+                select(SupplierSiteRelation.id_relation, SupplierSiteRelation.id_supplier_unit)
+                .where(SupplierSiteRelation.id_relation.in_(all_rel_ids))
+            )
+            unit_by_rel = {rel_id: unit_id for rel_id, unit_id in unit_rows.all()}
+        certs_by_unit = await self._get_best_certs_for_units(list(set(unit_by_rel.values())))
+
         result: list[dict[str, Any]] = []
         for rel_id in all_rel_ids:
             inp = inputs_by_rel.get(rel_id)
+            unit_id = unit_by_rel.get(rel_id)
+            scoring_cert, display_cert = certs_by_unit.get(unit_id, (None, None))
+            quality_certification_detail = dict(details_by_rel.get(rel_id, {}))
+            quality_certification_detail["quality_certification"] = {
+                **quality_certification_detail.get("quality_certification", {}),
+                "validity_start_date": display_cert.start_date.isoformat() if display_cert and display_cert.start_date else None,
+                "validity_end_date": display_cert.end_date.isoformat() if display_cert and display_cert.end_date else None,
+            }
             result.append({
                 "rel_id": rel_id,
                 "criteria_values": {
                     "top":                   self._pluck(inp, "top"),
                     "lta":                   self._pluck(inp, "lta"),
                     "productivity":          self._pluck(inp, "productivity"),
-                    "quality_certification": self._normalize_criteria_value("quality_certification", self._pluck(inp, "quality_certification")),
+                    "quality_certification": self._certification_label(scoring_cert),
                     "prod_lia_ins":          self._normalize_criteria_value("prod_lia_ins",          self._pluck(inp, "prod_lia_ins")),
                     "competitiveness":       self._normalize_criteria_value("competitiveness",       self._pluck(inp, "competitiveness")),
                     "sqma":                  self._normalize_criteria_value("sqma",                  self._pluck(inp, "sqma")),
@@ -294,7 +321,7 @@ class SupplierRelationService:
                     "cons_or_wd":            self._normalize_criteria_value("cons_or_wd",            self._pluck(inp, "cons_or_wd")),
                     "financial_health":      self._pluck(inp, "financial_health"),
                 },
-                "class_criteria_details": details_by_rel.get(rel_id, {}),
+                "class_criteria_details": quality_certification_detail,
             })
         return result
 
@@ -311,10 +338,7 @@ class SupplierRelationService:
         status_history = await self._get_status_history(relation_id)
         criteria_details = await self._get_latest_criteria_details(relation_id)
         development_plans = await self.list_development_plans(relation_id)
-        quality_certification = await self._revalidate_quality_certification(
-            relation,
-            self._pluck(class_input, "quality_certification"),
-        )
+        quality_certification = await self._get_relation_quality_certification(relation)
 
         # Unit certifications for quality cert pre-fill hint
         unit_certs_stmt = (
@@ -483,9 +507,13 @@ class SupplierRelationService:
 
     async def approve_relation_review(self, relation_id: int) -> None:
         relation = await self.get_relation(relation_id)
-        if relation.validation_status != "pending_review":
+        # "draft" is allowed too: this endpoint is already restricted to vp_conversion
+        # callers at the router level (see router.py's access_profile check), so a VP
+        # Conversion approval is a direct, self-contained decision that doesn't need
+        # to pass through the ordinary pending_review submission step first.
+        if relation.validation_status not in ("draft", "pending_review"):
             raise AppException(
-                f"Relation cannot be approved from '{relation.validation_status}' status. Submit for review first.",
+                f"Relation cannot be approved from '{relation.validation_status}' status.",
                 status_code=400,
             )
         relation.validation_status = "approved"
@@ -540,6 +568,7 @@ class SupplierRelationService:
             .where(PldClassEvaluationInput.id_cycle.in_(cycle_ids))
             .where(PldClassEvaluationInput.is_deleted.is_(False))
             .order_by(PldClassEvaluationInput.entered_at.desc())
+            .options(selectinload(PldClassEvaluationInput.certification))
         )).scalars().all())
         pld_by_cycle: dict = {}
         for p in all_pld:
@@ -568,7 +597,9 @@ class SupplierRelationService:
 
             class_criteria = {
                 "top": pld.top, "lta": pld.lta, "productivity": pld.productivity,
-                "quality_certification": pld.quality_certification, "prod_lia_ins": pld.prod_lia_ins,
+                # Historical label as recorded at this cycle -- frozen, unlike the
+                # "current status" views which always re-derive live from the unit.
+                "quality_certification": self._certification_label(pld.certification), "prod_lia_ins": pld.prod_lia_ins,
                 "competitiveness": pld.competitiveness, "sqma": pld.sqma,
                 "family_coverage": pld.family_coverage, "geo_coverage": pld.geo_coverage,
                 "cons_or_wd": pld.cons_or_wd, "financial_health": pld.financial_health,
@@ -706,14 +737,11 @@ class SupplierRelationService:
             document_type="supplier_development_plan",
             document_name=plan.plan_title or f"Development Plan {plan_id}",
             original_file_name=upload["filename"],
-            file_path=upload["blob_name"],
             file_url=upload["file_url"],
             mime_type=upload["mimetype"],
             file_size=Decimal(str(upload["size"])),
             uploaded_by=uploaded_by or "SYSTEM",
             comments=comments or "Development plan document uploaded.",
-            document_owner=uploaded_by or "SYSTEM",
-            controlled_document=False,
             storage_provider="azure_blob",
             storage_object_key=upload["blob_name"],
         )
@@ -2847,14 +2875,11 @@ class SupplierRelationService:
             document_type="evaluation_criterion_evidence",
             document_name=f"{normalized_criteria_type.replace('_', ' ').title()} Evidence",
             original_file_name=upload["filename"],
-            file_path=upload["blob_name"],
             file_url=upload["file_url"],
             mime_type=upload["mimetype"],
             file_size=Decimal(str(upload["size"])),
             uploaded_by=uploaded_by or "SYSTEM",
             comments=comments or f"Evidence uploaded for {normalized_criteria_type}.",
-            document_owner=uploaded_by or "SYSTEM",
-            controlled_document=False,
             storage_provider="azure_blob",
             storage_object_key=upload["blob_name"],
         )
@@ -3011,12 +3036,12 @@ class SupplierRelationService:
         previous_impact_input = await self._get_latest_impact_input(relation_id)
         evaluation_date = data.evaluation_date or datetime.now().date()
 
-        quality_certification = await self._resolve_quality_certification(
-            relation=relation,
-            selected_value=data.quality_certification,
-            previous_input=previous_input,
-            explicitly_sent="quality_certification" in data.model_fields_set,
-        )
+        # quality_certification is server-derived only (locked in the UI) -- always
+        # store whatever the unit's current best valid certification is, ignoring
+        # any submitted value. There's no manual-override concept for it anymore.
+        scoring_cert, _ = await self._get_best_quality_cert_for_unit(relation.id_supplier_unit)
+        quality_certification = self._certification_label(scoring_cert)
+        quality_certification_id = scoring_cert.id_certification if scoring_cert else None
 
         # model_fields_set contains every field explicitly provided in the request body,
         # including those explicitly set to null.  Omitted fields are NOT in the set.
@@ -3064,6 +3089,7 @@ class SupplierRelationService:
             panel_decision=panel_decision,
             previous_impact_input=previous_impact_input,
             data=data,
+            quality_certification_id=quality_certification_id,
         )
         cycle = None
         if evaluation_changed:
@@ -3105,7 +3131,7 @@ class SupplierRelationService:
             top=merged_values["top"],
             lta=merged_values["lta"],
             productivity=merged_values["productivity"],
-            quality_certification=merged_values["quality_certification"],
+            id_certification=quality_certification_id,
             prod_lia_ins=merged_values["prod_lia_ins"],
             competitiveness=merged_values["competitiveness"],
             sqma=merged_values["sqma"],
@@ -3135,7 +3161,6 @@ class SupplierRelationService:
             submitted_details=data.class_criteria_details,
             changed_by=data.changed_by or "SYSTEM",
         )
-        latest_criteria_details = await self._get_latest_criteria_details(relation_id)
         impact_input = ImpactEvaluationInput(
             id_relation=relation_id,
             id_cycle=cycle.id_cycle
@@ -3215,9 +3240,19 @@ class SupplierRelationService:
             relation.last_status_change = history.changed_at
         if evaluation_changed:
             relation.last_evaluation_date = evaluation_date
-        relation.next_evaluation_date = self._extract_next_evaluation_date(
-            latest_criteria_details,
-        )
+            # next_evaluation_date only advances on a genuine re-evaluation of the
+            # scorecard -- not on an ad-hoc correction to one or two criteria (see
+            # AD_HOC_CYCLE_TYPES) that isn't a full periodic review. Computed from
+            # the relation's evaluation_frequency (or scope-based default), not from
+            # an unrelated per-criterion field.
+            if data.cycle_type not in AD_HOC_CYCLE_TYPES:
+                from app.features.evaluations.service import (
+                    compute_next_evaluation_date,
+                    infer_frequency,
+                )
+                relation.next_evaluation_date = compute_next_evaluation_date(
+                    evaluation_date, infer_frequency(relation)
+                )
         if data.comments:
             relation.evaluation_comments = data.comments
 
@@ -3411,18 +3446,11 @@ class SupplierRelationService:
         relation = await self.get_relation(relation_id)
         evaluation_date = data.evaluation_date or datetime.now().date()
 
-        certification_stmt = (
-            select(SupplierCertification)
-            .where(SupplierCertification.id_supplier_unit == relation.id_supplier_unit)
-            .order_by(SupplierCertification.id_certification.asc())
-        )
-        certification_result = await self.db.execute(certification_stmt)
-        certifications = certification_result.scalars().all()
-        certification_type = self._normalize_criteria_value(
-            "quality_certification",
-            data.quality_certification
-            or (certifications[0].certification_type if certifications else None),
-        )
+        # quality_certification is server-derived only -- always the unit's current
+        # best valid certification, same as update_class_evaluation.
+        scoring_cert, _ = await self._get_best_quality_cert_for_unit(relation.id_supplier_unit)
+        certification_type = self._certification_label(scoring_cert)
+        certification_id = scoring_cert.id_certification if scoring_cert else None
 
         cycle = await self._create_cycle(
             relation_id=relation_id,
@@ -3495,7 +3523,7 @@ class SupplierRelationService:
             top=merged_values["top"],
             lta=merged_values["lta"],
             productivity=merged_values["productivity"],
-            quality_certification=certification_type,
+            id_certification=certification_id,
             prod_lia_ins=merged_values["prod_lia_ins"],
             competitiveness=merged_values["competitiveness"],
             sqma=merged_values["sqma"],
@@ -3519,7 +3547,6 @@ class SupplierRelationService:
             submitted_details=data.class_criteria_details,
             changed_by=data.changed_by or "SYSTEM",
         )
-        latest_criteria_details = await self._get_latest_criteria_details(relation_id)
 
         operational_input = OperationalEvaluationInput(
             id_relation=relation_id,
@@ -3621,8 +3648,15 @@ class SupplierRelationService:
         if history and history.old_status != history.new_status:
             relation.last_status_change = history.changed_at
         relation.last_evaluation_date = evaluation_date
-        relation.next_evaluation_date = self._extract_next_evaluation_date(
-            latest_criteria_details,
+        # The initial evaluation always establishes the first re-evaluation date --
+        # computed from evaluation_frequency (or a scope-based default), not from an
+        # unrelated per-criterion field.
+        from app.features.evaluations.service import (
+            compute_next_evaluation_date,
+            infer_frequency,
+        )
+        relation.next_evaluation_date = compute_next_evaluation_date(
+            evaluation_date, infer_frequency(relation)
         )
         if data.comments:
             relation.evaluation_comments = data.comments
@@ -3952,46 +3986,39 @@ class SupplierRelationService:
             }
         return latest_by_criteria
 
-    async def _get_best_quality_cert_for_unit(
-        self,
-        unit_id: int,
-    ) -> tuple[Optional[str], Optional[SupplierCertification]]:
-        """Return (scored_value, display_cert) for the best quality cert on the unit.
+    @classmethod
+    def _rank_certifications(
+        cls,
+        certifications: list[SupplierCertification],
+    ) -> tuple[Optional[SupplierCertification], Optional[SupplierCertification]]:
+        """Given ALL of a unit's certifications, return (scoring_cert, display_cert).
 
-        - scored_value: derived from VALID (non-expired) certs only. None when the unit
-          has no valid quality cert — so an expired cert never inflates the class score,
-          and an evaluator's manual "reset to None" is not auto-restored from a stale cert.
-        - display_cert: best cert for the validity-tracker view — a valid cert if one
-          exists, otherwise the best expired cert so the evaluator can see what lapsed.
-        Returns (None, None) when the unit has no quality certifications at all.
+        - scoring_cert: the best currently VALID (non-expired) certification, live —
+          never a stored snapshot. None when the unit has no valid quality cert, so
+          an expired cert can never keep inflating the class score.
+        - display_cert: best cert for the validity-tracker view — the valid one if
+          one exists, otherwise the best expired cert so evaluators can see what lapsed.
+        Returns (None, None) when given no certifications at all.
         """
-        stmt = (
-            select(SupplierCertification)
-            .where(SupplierCertification.id_supplier_unit == unit_id)
-            .where(SupplierCertification.is_deleted.is_(False))
-        )
-        certifications = (await self.db.execute(stmt)).scalars().all()
         if not certifications:
             return None, None
 
         SCORE_ORDER = ["IATF / ISO9001 (cat BCD)", "ISO9001", "None"]
         today = date.today()
 
-        def pick_best(certs: list[SupplierCertification]) -> tuple[Optional[str], Optional[SupplierCertification]]:
+        def pick_best(certs: list[SupplierCertification]) -> Optional[SupplierCertification]:
             best_cert: Optional[SupplierCertification] = None
-            best_value: Optional[str] = None
             best_rank = len(SCORE_ORDER)
             for cert in certs:
-                normalized = self._normalize_criteria_value("quality_certification", cert.certification_type)
+                normalized = cls._normalize_criteria_value("quality_certification", cert.certification_type)
                 rank = SCORE_ORDER.index(normalized) if normalized in SCORE_ORDER else best_rank
                 if rank < best_rank:
                     best_rank = rank
-                    best_value = normalized
                     best_cert = cert
-            return best_value, best_cert
+            return best_cert
 
         valid_certs = [c for c in certifications if not c.end_date or c.end_date >= today]
-        scored_value, valid_cert = pick_best(valid_certs)
+        valid_cert = pick_best(valid_certs)
         if valid_cert is not None:
             # A valid cert exists and drives the score.
             # For the tracker display: if the best valid cert has no end_date (no expiry
@@ -3999,70 +4026,58 @@ class SupplierRelationService:
             # reflects actual expiry dates and doesn't hide lapsed certs.
             if not valid_cert.end_date:
                 expired_certs = [c for c in certifications if c.end_date and c.end_date < today]
-                _, expired_display = pick_best(expired_certs)
-                display_cert = expired_display if expired_display else valid_cert
+                display_cert = pick_best(expired_certs) or valid_cert
             else:
                 display_cert = valid_cert
-            return scored_value, display_cert
+            return valid_cert, display_cert
         # No valid cert: score is None (expired certs don't count), but still surface
         # the best expired cert in the validity tracker so the evaluator sees it lapsed.
-        _, display_cert = pick_best(list(certifications))
-        return None, display_cert
+        return None, pick_best(list(certifications))
 
-    async def _get_relation_quality_certification(
-        self,
-        relation: SupplierSiteRelation,
-    ) -> Optional[str]:
-        value, _ = await self._get_best_quality_cert_for_unit(relation.id_supplier_unit)
-        return value
-
-    async def _quality_certification_is_currently_valid(
+    async def _get_best_quality_cert_for_unit(
         self,
         unit_id: int,
-        value: str,
-    ) -> bool:
-        """True if `value` matches a currently VALID (non-expired) certification's
-        normalized type on the unit. "None" (explicitly "no applicable cert") is
-        always considered valid since it never inflates the score either way.
-        """
-        if value == "None":
-            return True
+    ) -> tuple[Optional[SupplierCertification], Optional[SupplierCertification]]:
+        """Single-unit convenience wrapper around _rank_certifications. See its
+        docstring for the meaning of the returned (scoring_cert, display_cert)."""
         stmt = (
             select(SupplierCertification)
             .where(SupplierCertification.id_supplier_unit == unit_id)
             .where(SupplierCertification.is_deleted.is_(False))
         )
         certifications = (await self.db.execute(stmt)).scalars().all()
-        today = date.today()
-        for cert in certifications:
-            if cert.end_date and cert.end_date < today:
-                continue  # expired -- doesn't keep a value "valid"
-            if self._normalize_criteria_value("quality_certification", cert.certification_type) == value:
-                return True
-        return False
+        return self._rank_certifications(list(certifications))
 
-    async def _revalidate_quality_certification(
+    async def _get_best_certs_for_units(
+        self,
+        unit_ids: list[int],
+    ) -> dict[int, tuple[Optional[SupplierCertification], Optional[SupplierCertification]]]:
+        """Batch version of _get_best_quality_cert_for_unit — one query for many units,
+        used by the Criteria Validity Tracker to avoid an N+1 query per relation."""
+        if not unit_ids:
+            return {}
+        stmt = (
+            select(SupplierCertification)
+            .where(SupplierCertification.id_supplier_unit.in_(unit_ids))
+            .where(SupplierCertification.is_deleted.is_(False))
+        )
+        certs = (await self.db.execute(stmt)).scalars().all()
+        by_unit: dict[int, list[SupplierCertification]] = {}
+        for cert in certs:
+            by_unit.setdefault(cert.id_supplier_unit, []).append(cert)
+        return {uid: self._rank_certifications(cs) for uid, cs in by_unit.items()}
+
+    def _certification_label(self, cert: Optional[SupplierCertification]) -> Optional[str]:
+        if cert is None:
+            return None
+        return self._normalize_criteria_value("quality_certification", cert.certification_type)
+
+    async def _get_relation_quality_certification(
         self,
         relation: SupplierSiteRelation,
-        stored_value: Optional[str],
     ) -> Optional[str]:
-        """Re-derive the effective quality_certification value from current cert validity.
-
-        A previously stored value is only trusted if it still matches a currently
-        valid (non-expired) certification on the unit. Otherwise -- the backing cert
-        expired, was deleted, or nothing was ever stored -- fall back to the unit's
-        current best valid certification, which is None when none exists. This keeps
-        an expired cert from silently continuing to inflate the score/class simply
-        because nobody has touched this specific field since it lapsed.
-        """
-        normalized_stored = self._normalize_criteria_value("quality_certification", stored_value)
-        if not normalized_stored:
-            return await self._get_relation_quality_certification(relation)
-        if await self._quality_certification_is_currently_valid(
-            relation.id_supplier_unit, normalized_stored
-        ):
-            return normalized_stored
-        return await self._get_relation_quality_certification(relation)
+        scoring_cert, _ = await self._get_best_quality_cert_for_unit(relation.id_supplier_unit)
+        return self._certification_label(scoring_cert)
 
     async def _sync_quality_cert_detail(
         self,
@@ -4206,29 +4221,6 @@ class SupplierRelationService:
         await self.db.flush()
         return history
 
-    async def _resolve_quality_certification(
-        self,
-        relation: SupplierSiteRelation,
-        selected_value: Optional[str],
-        previous_input: Optional[PldClassEvaluationInput],
-        explicitly_sent: bool = False,
-    ) -> Optional[str]:
-        # An explicit null means "no certification" was deliberately chosen (e.g. the
-        # Criteria Validity Tracker's bulk reset) -- respect it exactly, never
-        # auto-restore it from a stale/expired cert.
-        if explicitly_sent and selected_value is None:
-            return None
-        # Any other provided value -- whether freshly submitted, or simply echoed
-        # back by a UI that no longer lets evaluators edit this field directly --
-        # is only trusted if it still matches a currently valid certification on
-        # the unit. This is what keeps a value from staying "stuck" at whatever
-        # was true when the page was first loaded, e.g. a long-open tab spanning
-        # a certification's expiry date.
-        if explicitly_sent or selected_value is not None:
-            return await self._revalidate_quality_certification(relation, selected_value)
-        previous_value = self._pluck(previous_input, "quality_certification")
-        return await self._revalidate_quality_certification(relation, previous_value)
-
     async def sync_quality_certification_for_unit(
         self,
         unit_id: int,
@@ -4263,22 +4255,28 @@ class SupplierRelationService:
         relations = (await self.db.execute(stmt)).scalars().all()
 
         # Resolve best cert once — same unit_id for all relations
-        new_cert_value, best_cert = await self._get_best_quality_cert_for_unit(unit_id)
+        scoring_cert, display_cert = await self._get_best_quality_cert_for_unit(unit_id)
+        new_cert_id = scoring_cert.id_certification if scoring_cert else None
+        new_cert_value = self._certification_label(scoring_cert)
 
         affected: list[dict] = []
         for relation in relations:
             # Always keep criteria detail in sync with the cert's actual dates
-            await self._sync_quality_cert_detail(relation.id_relation, new_cert_value, best_cert)
+            await self._sync_quality_cert_detail(relation.id_relation, new_cert_value, display_cert)
 
             previous_input = await self._get_latest_class_input(relation.id_relation)
             if not previous_input:
                 continue
 
-            current_value = self._normalize_criteria_value(
-                "quality_certification", self._pluck(previous_input, "quality_certification")
-            )
-            if new_cert_value == current_value:
+            current_id = self._pluck(previous_input, "id_certification")
+            if new_cert_id == current_id:
                 continue
+            previous_cert = (
+                await self.db.get(SupplierCertification, current_id)
+                if current_id is not None
+                else None
+            )
+            current_value = self._certification_label(previous_cert)
 
             merged = {
                 "top":                   self._pluck(previous_input, "top"),
@@ -4299,14 +4297,28 @@ class SupplierRelationService:
                 if class_score is not None
                 else self._pluck(previous_input, "class_value")
             )
+            strategic_mention = self._pluck(previous_input, "strategic_mention")
+            panel_decision = self._pluck(previous_input, "panel_decision")
+            evaluation_date = date.today()
+
+            # A new EvaluationCycle is what makes this show up as its own entry in
+            # History & Documents with a "changed from X to Y" diff -- reusing the
+            # previous cycle id (as before) silently overwrote that cycle's snapshot
+            # instead, leaving no visible trace of the transition.
+            cycle = await self._create_cycle(
+                relation_id=relation.id_relation,
+                cycle_type="Certification Update",
+                comments=provenance,
+                evaluation_date=evaluation_date,
+            )
 
             new_input = PldClassEvaluationInput(
                 id_relation=relation.id_relation,
-                id_cycle=self._pluck(previous_input, "id_cycle"),
+                id_cycle=cycle.id_cycle,
                 top=merged["top"],
                 lta=merged["lta"],
                 productivity=merged["productivity"],
-                quality_certification=merged["quality_certification"],
+                id_certification=new_cert_id,
                 prod_lia_ins=merged["prod_lia_ins"],
                 competitiveness=merged["competitiveness"],
                 sqma=merged["sqma"],
@@ -4317,13 +4329,63 @@ class SupplierRelationService:
                 class_score=class_score,
                 class_value=class_value,
                 impact_score=self._pluck(previous_input, "impact_score"),
-                strategic_mention=self._pluck(previous_input, "strategic_mention"),
-                panel_decision=self._pluck(previous_input, "panel_decision"),
+                strategic_mention=strategic_mention,
+                panel_decision=panel_decision,
                 comments=provenance,
                 entered_by="SYSTEM",
             )
             self.db.add(new_input)
+
+            # Bring this up to parity with update_class_evaluation: recompute the
+            # final grade/status from the new class_value and record the transition,
+            # so a certification-driven class change is fully auditable, not just
+            # a silently updated relation.class_value.
+            current_classification = await self._get_latest_classification(relation.id_relation)
+            operational_grade = relation.operational_grade
+            operational_score = self._pluck(current_classification, "operational_score")
+            final_grade = self._compose_final_grade(operational_grade, class_value)
+            computed_status = self._derive_supplier_status(final_grade)
+            effective_status = self._resolve_effective_supplier_status(
+                relation=relation, computed_status=computed_status,
+            )
+
+            classification = Classification(
+                id_relation=relation.id_relation,
+                id_cycle=cycle.id_cycle,
+                classification_date=evaluation_date,
+                classification_score=class_score,
+                class_value=class_value,
+                operational_score=operational_score,
+                operational_grade=operational_grade,
+                final_grade=final_grade,
+                impact_score=self._pluck(previous_input, "impact_score"),
+                strategic_mention=strategic_mention,
+                panel_decision=panel_decision,
+                comments=provenance,
+                entered_by="SYSTEM",
+            )
+            self.db.add(classification)
+            await self.db.flush()
+
+            history = await self._record_transition(
+                relation=relation,
+                changed_by=actor,
+                reason=provenance,
+                changed_at=datetime.now(),
+                new_status=effective_status,
+                new_class=class_value,
+                new_grade=operational_grade,
+                new_final_grade=final_grade,
+                new_strategic_mention=strategic_mention,
+                new_panel_decision=panel_decision,
+            )
+            if history and history.old_status != history.new_status:
+                relation.last_status_change = history.changed_at
+
             relation.class_value = class_value
+            relation.final_grade = final_grade
+            relation.supplier_status = effective_status
+            relation.last_evaluation_date = evaluation_date
 
             affected.append({
                 "relation_id": relation.id_relation,
@@ -4551,7 +4613,6 @@ class SupplierRelationService:
             document_type="evaluation_reference",
             document_name=upload["filename"],
             original_file_name=upload["filename"],
-            file_path=upload["blob_name"],
             file_url=upload["file_url"],
             mime_type=upload["mimetype"],
             file_size=Decimal(str(upload["size"])),
@@ -4580,7 +4641,6 @@ class SupplierRelationService:
             document_type="lta_agreement",
             document_name=upload["filename"],
             original_file_name=upload["filename"],
-            file_path=upload["blob_name"],
             file_url=upload["file_url"],
             mime_type=upload["mimetype"],
             file_size=Decimal(str(upload["size"])),
@@ -4775,13 +4835,6 @@ class SupplierRelationService:
             "At Risk": Decimal("0"),
         }
         return score_map.get(str(normalized_value))
-
-    @staticmethod
-    def _extract_next_evaluation_date(
-        criteria_details: dict[str, dict[str, Any]],
-    ) -> Optional[date]:
-        financial_health = criteria_details.get("financial_health") or {}
-        return financial_health.get("validity_end_date")
 
     @staticmethod
     def _prefer_decimal(*values: Any) -> Optional[Decimal]:
@@ -5011,10 +5064,16 @@ class SupplierRelationService:
         panel_decision: Optional[str],
         previous_impact_input: Optional[ImpactEvaluationInput],
         data: schemas.ClassEvaluationUpdateRequest,
+        quality_certification_id: Optional[int] = None,
     ) -> bool:
         for field_name, value in merged_values.items():
+            if field_name == "quality_certification":
+                # Stored as id_certification now, not the label -- compared separately.
+                continue
             if self._pluck(previous_input, field_name) != value:
                 return True
+        if self._pluck(previous_input, "id_certification") != quality_certification_id:
+            return True
         if self._pluck(current_classification, "impact_score") != impact_score:
             return True
         if (

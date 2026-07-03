@@ -57,6 +57,9 @@ async def list_site_panel(
     sub_family: str | None = Query(default=None),
     product_line: str | None = Query(default=None),
     supplier_name: str | None = Query(default=None),
+    alias: str | None = Query(default=None),
+    group_name: str | None = Query(default=None),
+    unit_name: str | None = Query(default=None),
     include_inactive: bool = Query(default=False),
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
@@ -80,6 +83,9 @@ async def list_site_panel(
             sub_family=sub_family,
             product_line=product_line,
             supplier_name=supplier_name,
+            alias=alias,
+            group_name=group_name,
+            unit_name=unit_name,
             include_inactive=include_inactive,
         )
 

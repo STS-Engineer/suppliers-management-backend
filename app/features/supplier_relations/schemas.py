@@ -15,6 +15,7 @@ class SupplierRelationSummaryResponse(BaseModel):
     id_supplier_unit: int
     relation_code: Optional[str] = None
     unit_code: Optional[str] = None
+    alias_1: Optional[str] = None
     supplier_owner: Optional[str] = None
     supplier_status: Optional[str] = None
     class_value: Optional[int] = None
@@ -187,7 +188,8 @@ class ClassEvaluationUpdateRequest(BaseModel):
     top: Optional[str] = None
     lta: Optional[str] = None
     productivity: Optional[str] = None
-    quality_certification: Optional[str] = None
+    # quality_certification is server-derived only (always the unit's current best
+    # valid certification) -- not accepted here even if a client sends it.
     prod_lia_ins: Optional[str] = None
     competitiveness: Optional[str] = None
     sqma: Optional[str] = None

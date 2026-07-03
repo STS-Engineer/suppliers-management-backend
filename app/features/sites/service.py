@@ -69,6 +69,9 @@ class SiteService:
         sub_family: Optional[str] = None,
         product_line: Optional[str] = None,
         supplier_name: Optional[str] = None,
+        alias: Optional[str] = None,
+        group_name: Optional[str] = None,
+        unit_name: Optional[str] = None,
         include_inactive: bool = False,
     ) -> Dict[str, Any]:
         has_contact_relation = await self._has_contact_site_relation_table()
@@ -181,6 +184,12 @@ class SiteService:
                     matches_text(group.nom, supplier_name)
                     or matches_text(unit.supplier_name, supplier_name)
                 ):
+                    continue
+                if alias and not matches_text(relation.alias_1, alias):
+                    continue
+                if group_name and not matches_text(group.nom, group_name):
+                    continue
+                if unit_name and not matches_text(unit.supplier_name, unit_name):
                     continue
 
                 relation_contacts = (

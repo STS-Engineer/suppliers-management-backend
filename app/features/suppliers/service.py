@@ -718,17 +718,14 @@ class SupplierService:
                 status_code=400,
             )
 
-        certification_stmt = (
-            select(SupplierCertification)
-            .where(SupplierCertification.id_supplier_unit == unit_id)
-            .order_by(SupplierCertification.id_certification.asc())
-        )
-        certification_result = await self.db.execute(certification_stmt)
-        certifications = certification_result.scalars().all()
-        certification_type = (
-            certifications[0].certification_type if certifications else None
-        )
-        quality_certification = data.quality_certification or certification_type
+        # quality_certification is server-derived only -- always the unit's current
+        # best valid certification, resolved via the canonical helper shared with
+        # the relation-evaluation flows (avoids re-implementing cert ranking here).
+        from app.features.supplier_relations.service import SupplierRelationService
+
+        rel_service = SupplierRelationService(self.db)
+        scoring_cert, _ = await rel_service._get_best_quality_cert_for_unit(unit_id)
+        quality_certification_id = scoring_cert.id_certification if scoring_cert else None
 
         operational_grade = self._extract_operational_grade(data)
         class_value = self._extract_class_value(data)
@@ -764,7 +761,7 @@ class SupplierService:
             top=data.top,
             lta=data.lta,
             productivity=data.prod,
-            quality_certification=quality_certification,
+            id_certification=quality_certification_id,
             prod_lia_ins=data.prod_lia_ins,
             competitiveness=data.competitiveness,
             sqma=data.sqma,

@@ -1065,8 +1065,14 @@ class PldClassEvaluationInput(AuditMixin, GovernanceMixin, Base):
     top: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     lta: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     productivity: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    quality_certification: Mapped[Optional[str]] = mapped_column(
-        String(255), nullable=True
+    # Historical pointer to the certification considered current when this evaluation
+    # snapshot was recorded. NOT the source of truth for "current status" displays --
+    # those always re-derive live from SupplierCertification (see
+    # SupplierRelationService._get_best_quality_cert_for_unit) so an expired cert can
+    # never keep inflating a score just because nobody re-saved the evaluation.
+    id_certification: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("supplier_certification.id_certification", ondelete="SET NULL"),
+        nullable=True,
     )
     prod_lia_ins: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     competitiveness: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
@@ -1084,6 +1090,7 @@ class PldClassEvaluationInput(AuditMixin, GovernanceMixin, Base):
     relation: Mapped["SupplierSiteRelation"] = relationship(
         back_populates="pld_class_inputs"
     )
+    certification: Mapped[Optional["SupplierCertification"]] = relationship()
     cycle: Mapped[Optional["EvaluationCycle"]] = relationship(
         back_populates="pld_class_inputs"
     )
