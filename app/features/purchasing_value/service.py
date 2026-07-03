@@ -1885,6 +1885,15 @@ class PurchasingValueService:
                     "execution_start_date": opp.execution_start_date.isoformat()
                     if opp.execution_start_date
                     else None,
+                    "planned_start_date": opp.planned_start_date.isoformat()
+                    if opp.planned_start_date
+                    else None,
+                    # Opportunity has no created_at column — study_start_date (set
+                    # when the buyer clicks "Start Study", Phase 0 kickoff) is the
+                    # closest proxy for "when this opportunity began".
+                    "created_at": opp.study_start_date.isoformat()
+                    if opp.study_start_date
+                    else None,
                     "duration_months": int(opp.duration_months)
                     if opp.duration_months is not None
                     else None,
