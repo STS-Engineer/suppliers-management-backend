@@ -1498,6 +1498,23 @@ class PurchasingValueService:
     # Phases where savings are confirmed and real_start_date is expected to be set.
     _BUDGET_ELIGIBLE_PHASES = {"Phase 3", "Phase 4", "Closed"}
 
+    def _is_budget_eligible(self, opp: Opportunity) -> bool:
+        """Option A eligibility, extended:
+        - Phase 3 / Phase 4 / Closed with a confirmed real_start_date (savings
+          timing is known), OR
+        - Phase 2 with execution_start_date entered — execution has started so
+          the opportunity is firm enough to budget, even though savings haven't
+          begun yet. compute_savings_start_date()'s existing fallback chain
+          (real_start_date -> planned_start_date -> study+weeks estimate) will
+          pro-rate these using planned_start_date since real_start_date is None;
+          once Phase 3 sets real_start_date, the anchor switches automatically
+          on the next _sync_budget_years run."""
+        if opp.phase_status in self._BUDGET_ELIGIBLE_PHASES and opp.real_start_date is not None:
+            return True
+        if opp.phase_status == "Phase 2" and opp.execution_start_date is not None:
+            return True
+        return False
+
     async def _closed_fiscal_years(self) -> set[int]:
         """Return the set of fiscal years that have been officially closed."""
         from app.db.models import BudgetYearClosure
@@ -1511,9 +1528,9 @@ class PurchasingValueService:
         the flat expected_annual_saving repeated across the duration. Status is fully
         derived from validation (_validation_status) — no manual override.
 
-        Budget eligibility rule (Option A):
-        - opp.real_start_date must be confirmed (not None)
-        - opp.phase_status must be Phase 3, Phase 4 or Completed
+        Budget eligibility rule (Option A, extended) — see _is_budget_eligible:
+        - opp.real_start_date confirmed AND phase_status in Phase 3/Phase 4/Closed, OR
+        - opp.execution_start_date entered AND phase_status == Phase 2
         Opps that don't meet this are not eligible for budget rows. Any unlocked
         rows previously created are cleaned up.
 
@@ -1548,10 +1565,7 @@ class PurchasingValueService:
         )
 
         # If opp is not budget-eligible, clean up any unlocked rows and stop.
-        if (
-            opp.real_start_date is None
-            or opp.phase_status not in self._BUDGET_ELIGIBLE_PHASES
-        ):
+        if not self._is_budget_eligible(opp):
             for row in existing_rows:
                 if row.status_locked_at is None:
                     await self.db.delete(row)
@@ -1758,8 +1772,9 @@ class PurchasingValueService:
         """Flattened opportunity+budget-year rows for a given fiscal year, for the
         budgeting page.
 
-        Budget eligibility filter (Option A): only Phase 3 / Phase 4 / Completed
-        opportunities with a confirmed real_start_date appear in the official budget.
+        Budget eligibility filter (Option A, extended) — see _is_budget_eligible:
+        Phase 3 / Phase 4 / Completed opportunities with a confirmed real_start_date,
+        plus Phase 2 opportunities with execution_start_date already entered.
         """
         result = await self.db.execute(
             select(OpportunityBudgetYear)
@@ -1786,15 +1801,19 @@ class PurchasingValueService:
             # phantom budget commitments on dead projects.
             if opp.status == "Cancelled":
                 continue
-            # Budget eligibility: only confirmed Phase 3+ opps with real_start_date.
-            if (
-                opp.real_start_date is None
-                or opp.phase_status not in self._BUDGET_ELIGIBLE_PHASES
-            ):
+            # Budget eligibility — see _is_budget_eligible.
+            if not self._is_budget_eligible(opp):
                 continue
             # Enrich with financial line data — sum ALL active+completed lines
             # (an opp may have multiple component lines; first-only would under-count)
-            fx = float(opp.fx_rate_to_eur or 1)
+            # EUR is always 1:1; a non-EUR opp with no valid rate gets 0.0 (excluded
+            # from EUR totals) rather than a silent 1:1 fallback — matches
+            # kpi_service.py's _rate()/_opp_rate() and the FX_RATE_REQUIRED guards
+            # in this file, which all avoid distorting EUR-consolidated figures.
+            if (opp.currency or "EUR") == "EUR":
+                fx = 1.0
+            else:
+                fx = float(opp.fx_rate_to_eur) if opp.fx_rate_to_eur and opp.fx_rate_to_eur > 0 else 0.0
             contributing_lines = [
                 fl for fl in (opp.financial_lines or [])
                 if fl.status in ("Active", "Completed") and not fl.is_deleted
@@ -1842,9 +1861,7 @@ class PurchasingValueService:
                     else None,
                     "currency": opp.currency or "EUR",
                     "fx_rate_to_eur": float(opp.fx_rate_to_eur) if opp.fx_rate_to_eur is not None else 1.0,
-                    "applicable_amount_eur": round(
-                        float(r.applicable_amount) * float(opp.fx_rate_to_eur or 1), 2
-                    )
+                    "applicable_amount_eur": round(float(r.applicable_amount) * fx, 2)
                     if r.applicable_amount is not None
                     else None,
                     "portion_kind": r.portion_kind,
@@ -1864,6 +1881,9 @@ class PurchasingValueService:
                     "delta_eoy_budget": delta_eoy_budget,
                     "real_start_date": opp.real_start_date.isoformat()
                     if opp.real_start_date
+                    else None,
+                    "execution_start_date": opp.execution_start_date.isoformat()
+                    if opp.execution_start_date
                     else None,
                     "duration_months": int(opp.duration_months)
                     if opp.duration_months is not None

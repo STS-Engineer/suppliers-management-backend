@@ -441,7 +441,7 @@ def generate_stp_pdf(opp, phase: int = 0) -> bytes:
     story.append(saving_tbl)
     story.append(sp(0.2))
 
-    # Estimated saving by budget year (01 Dec -> 30 Nov, start-date prorated)
+    # Estimated saving by budget year (01 Jan -> 31 Dec calendar year, start-date prorated)
     by_year = opp.saving_by_year or {}
     if by_year:
         year_rows = [[_hdr_cell("Budget Year"), _hdr_cell("Est. Saving")]]
@@ -476,7 +476,7 @@ def generate_stp_pdf(opp, phase: int = 0) -> bytes:
         phase_starts[i] = cursor
         if cursor and w:
             import datetime as _dt
-            end = cursor + _dt.timedelta(weeks=w)
+            end = cursor + _dt.timedelta(weeks=float(w))
             phase_ends[i] = end
             cursor = end
         else:

@@ -269,7 +269,7 @@ def generate_full_report_pdf(opp) -> bytes:
         phase_starts[i] = cursor
         if cursor and w:
             import datetime as _dt
-            end = cursor + _dt.timedelta(weeks=w)
+            end = cursor + _dt.timedelta(weeks=float(w))
             phase_ends[i] = end
             cursor = end
         else:

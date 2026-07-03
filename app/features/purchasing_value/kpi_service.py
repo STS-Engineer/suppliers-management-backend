@@ -322,8 +322,11 @@ class PurchasingKpiService:
             for line in over_budget_lines
         )
 
-        # EOY vs Budget: budgeted EOY forecast vs total committed budget (applicable_amount sum).
-        eoy_vs_budget_pct = _pct(budgeted_eoy_forecast, total_budget)
+        # EOY vs Budget: both figures must be full-year annuals to be comparable —
+        # total_budget is FY pro-rata (applicable_amount) and must NOT be the
+        # denominator here (same reasoning as the Forecast Outperformance check
+        # above, and service.py's delta_eoy_budget for the Budgeting page).
+        eoy_vs_budget_pct = _pct(budgeted_eoy_forecast, budgeted_expected_annual)
         eoy_vs_expected_pct = _pct(total_eoy_forecast, total_expected)
 
         # Forecast drift: latest forecast_eoy_saving vs previous month's
