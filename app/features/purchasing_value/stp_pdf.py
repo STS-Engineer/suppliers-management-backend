@@ -10,6 +10,7 @@ Returns raw PDF bytes; callers write them to a temp file or stream them directly
 from __future__ import annotations
 
 import io
+import os
 from datetime import date, datetime
 from typing import Optional
 
@@ -20,6 +21,7 @@ from reportlab.lib.units import cm
 from reportlab.platypus import (
     BaseDocTemplate,
     Frame,
+    Image,
     PageTemplate,
     Paragraph,
     Spacer,
@@ -32,11 +34,26 @@ from reportlab.platypus import (
 # ---------------------------------------------------------------------------
 HDR_BG = colors.HexColor("#1F3864")   # dark navy — section titles
 HDR_FG = colors.white
-SUB_BG = colors.HexColor("#D6E4F0")   # light blue — row labels
-ROW_ALT = colors.HexColor("#F7FBFF")  # very light blue — alternating rows
-BORDER = colors.HexColor("#BDD7EE")
+SUB_BG = colors.HexColor("#DCE9F7")   # light blue — row labels
+SUB_FG = colors.HexColor("#1F3864")   # dark navy text on light-blue labels
+ROW_ALT = colors.HexColor("#F3F8FD")  # very light blue — alternating rows
+BORDER = colors.HexColor("#9DC3E6")   # more defined grid lines
+ACCENT = colors.HexColor("#2F6FB0")   # accent — totals / highlighted values
 
 W = A4[0] - 2 * cm   # usable page width
+
+# Logo has a colored mark (blue/grey/orange) on a transparent background — only
+# safe to place on light backgrounds, not the dark navy header bar.
+LOGO_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "..", "shared", "assets", "logo-avocarbon.png"
+)
+LOGO_ASPECT = 132 / 718  # native px height / width
+
+
+def _logo_flowable(width_cm: float = 4.2) -> Optional[Image]:
+    if not os.path.isfile(LOGO_PATH):
+        return None
+    return Image(LOGO_PATH, width=width_cm * cm, height=width_cm * cm * LOGO_ASPECT)
 
 
 # ---------------------------------------------------------------------------
@@ -64,14 +81,25 @@ def _header_row(text: str, cols: int = 3) -> list:
 def _styles():
     ss = getSampleStyleSheet()
     return {
-        "normal": ParagraphStyle("N", parent=ss["Normal"], fontSize=7.5, leading=10),
+        "normal": ParagraphStyle("N", parent=ss["Normal"], fontSize=7.5, leading=10.5),
         "small":  ParagraphStyle("S", parent=ss["Normal"], fontSize=6.5, leading=9),
-        "bold":   ParagraphStyle("B", parent=ss["Normal"], fontSize=7.5, leading=10,
+        "bold":   ParagraphStyle("B", parent=ss["Normal"], fontSize=7.5, leading=10.5,
                                  fontName="Helvetica-Bold"),
-        "hdr":    ParagraphStyle("H", parent=ss["Normal"], fontSize=8, leading=10,
+        # Label-column text (light-blue background) — navy, not plain black, for a
+        # more deliberate look and to match the section-header navy branding.
+        "label":  ParagraphStyle("L", parent=ss["Normal"], fontSize=7.5, leading=10.5,
+                                 fontName="Helvetica-Bold", textColor=SUB_FG),
+        # Table/section header text — MUST be used (not "bold") for any cell that
+        # sits on the dark navy HDR_BG background. TableStyle's TEXTCOLOR command
+        # has no effect on Paragraph-flowable cells (only on plain strings), so the
+        # cell's own Paragraph style is what actually controls contrast here.
+        "hdr":    ParagraphStyle("H", parent=ss["Normal"], fontSize=8, leading=11,
                                  textColor=HDR_FG, fontName="Helvetica-Bold"),
-        "title":  ParagraphStyle("T", parent=ss["Normal"], fontSize=13, leading=16,
-                                 fontName="Helvetica-Bold"),
+        # Highlighted numeric values (key savings/ROI figures) — accent blue, bold.
+        "accent": ParagraphStyle("A", parent=ss["Normal"], fontSize=8, leading=11,
+                                 textColor=ACCENT, fontName="Helvetica-Bold"),
+        "title":  ParagraphStyle("T", parent=ss["Normal"], fontSize=14, leading=17,
+                                 fontName="Helvetica-Bold", textColor=HDR_BG),
         "sub":    ParagraphStyle("Su", parent=ss["Normal"], fontSize=9, leading=12,
                                  fontName="Helvetica-Bold", textColor=colors.HexColor("#1F3864")),
     }
@@ -99,10 +127,11 @@ def _tbl_style(header_rows: int = 1, has_alt: bool = True, num_rows: int = 0) ->
 
 
 def _label_col_style() -> TableStyle:
-    """Make the first column light-blue label style."""
+    """Light-blue background for the first (label) column — bold/navy text comes
+    from the Paragraph's own "label" style (see _label_cell), not from here:
+    TableStyle FONTNAME/TEXTCOLOR commands have no effect on Paragraph cells."""
     return TableStyle([
         ("BACKGROUND", (0, 1), (0, -1), SUB_BG),
-        ("FONTNAME",   (0, 1), (0, -1), "Helvetica-Bold"),
     ])
 
 
@@ -113,6 +142,21 @@ def _p(text: str, style="normal") -> Paragraph:
 
 def _cell(text, bold=False) -> Paragraph:
     return _p(str(text) if text is not None else "—", "bold" if bold else "normal")
+
+
+def _hdr_cell(text) -> Paragraph:
+    """A table-header cell — white text, safe to place on the dark navy HDR_BG."""
+    return _p(str(text) if text is not None else "—", "hdr")
+
+
+def _label_cell(text) -> Paragraph:
+    """A label-column cell — navy text, meant for the light-blue SUB_BG background."""
+    return _p(str(text) if text is not None else "—", "label")
+
+
+def _accent_cell(text) -> Paragraph:
+    """A highlighted value cell — bold accent blue, for key savings/ROI figures."""
+    return _p(str(text) if text is not None else "—", "accent")
 
 
 # ---------------------------------------------------------------------------
@@ -134,7 +178,7 @@ def _section_header(title: str, col_widths: list[float]) -> Table:
 def _kv_table(rows: list[tuple[str, str]], col_widths=None) -> Table:
     """Two-column key→value table."""
     cw = col_widths or [5 * cm, W - 5 * cm]
-    data = [[_cell(k, bold=True), _cell(v)] for k, v in rows]
+    data = [[_label_cell(k), _cell(v)] for k, v in rows]
     t = Table(data, colWidths=cw)
     t.setStyle(TableStyle([
         ("BACKGROUND",  (0, 0), (0, -1), SUB_BG),
@@ -157,8 +201,8 @@ def _before_after_table(
 ) -> Table:
     """Three-column label | before | after table."""
     cw = col_widths or [5 * cm, (W - 5 * cm) / 2, (W - 5 * cm) / 2]
-    header = [_cell("Field", bold=True), _cell("Before", bold=True), _cell("After", bold=True)]
-    data = [header] + [[_cell(lbl, bold=True), _cell(b), _cell(a)] for lbl, b, a in rows]
+    header = [_hdr_cell("Field"), _hdr_cell("Before"), _hdr_cell("After")]
+    data = [header] + [[_label_cell(lbl), _cell(b), _cell(a)] for lbl, b, a in rows]
     t = Table(data, colWidths=cw)
     t.setStyle(_tbl_style(header_rows=1, num_rows=len(data)))
     t.setStyle(_label_col_style())
@@ -228,7 +272,11 @@ def generate_stp_pdf(opp, phase: int = 0) -> bytes:
     risks: dict    = opp.stp_risks    or {}
     benefits: dict = opp.stp_benefits or {}
 
-    # ── Title ────────────────────────────────────────────────────────────────
+    # ── Logo + Title ─────────────────────────────────────────────────────────
+    logo = _logo_flowable()
+    if logo is not None:
+        story.append(logo)
+        story.append(sp(0.2))
     story.append(Paragraph(
         f"STP — Sourcing and Technical Productivity &nbsp;&nbsp;|&nbsp;&nbsp; Phase {phase}",
         st["title"],
@@ -272,8 +320,7 @@ def generate_stp_pdf(opp, phase: int = 0) -> bytes:
     story.append(_section_header("Annual Quantities", [W]))
     cw4 = [W / 4] * 4
     qty_data = [
-        [_cell("N1", bold=True), _cell("N2", bold=True),
-         _cell("N3", bold=True), _cell("N4", bold=True)],
+        [_hdr_cell("N1"), _hdr_cell("N2"), _hdr_cell("N3"), _hdr_cell("N4")],
         [_cell(_fmt(opp.annual_quantity_n1, decimals=0)),
          _cell(_fmt(opp.annual_quantity_n2, decimals=0)),
          _cell(_fmt(opp.annual_quantity_n3, decimals=0)),
@@ -334,7 +381,7 @@ def generate_stp_pdf(opp, phase: int = 0) -> bytes:
     story.append(sp(0.2))
     # Spec questions
     spec_data = [
-        [_cell("Specification question", bold=True), _cell("Answer", bold=True)],
+        [_hdr_cell("Specification question"), _hdr_cell("Answer")],
         [_cell("Will material spec & appearance be strictly the same?"),
          _cell(_yn(risks.get("material_same_spec")))],
         [_cell("Is the same tooling used?"),
@@ -358,18 +405,17 @@ def generate_stp_pdf(opp, phase: int = 0) -> bytes:
     # ── Investment costs ─────────────────────────────────────────────────────
     story.append(_section_header("Investment Costs", [W]))
     cost_data = [
-        [_cell("Item", bold=True), _cell("Amount (€)", bold=True)],
+        [_hdr_cell("Item"), _hdr_cell("Amount (€)")],
         [_cell("Tooling"),       _cell(_fmt(opp.tooling_cost))],
         [_cell("Travel"),        _cell(_fmt(opp.travel_cost))],
         [_cell("Qualification"), _cell(_fmt(opp.qualification_cost))],
         [_cell("Other"),         _cell(_fmt(opp.other_cost))],
-        [_cell("Total", bold=True), _cell(_fmt(opp.total_investment), )],
+        [_label_cell("Total"), _label_cell(_fmt(opp.total_investment))],
     ]
     cost_tbl = Table(cost_data, colWidths=[W * 0.6, W * 0.4])
     cost_tbl.setStyle(_tbl_style(header_rows=1, num_rows=len(cost_data)))
-    # Bold total row
+    # Highlight total row
     cost_tbl.setStyle(TableStyle([
-        ("FONTNAME",    (0, 5), (-1, 5), "Helvetica-Bold"),
         ("BACKGROUND",  (0, 5), (-1, 5), SUB_BG),
     ]))
     story.append(cost_tbl)
@@ -380,13 +426,13 @@ def generate_stp_pdf(opp, phase: int = 0) -> bytes:
     roi_full_str = _fmt(opp.roi_percent, suffix="%") if opp.roi_percent is not None else "—"
     roi_period_str = _fmt(opp.roi_period_percent, suffix="%") if opp.roi_period_percent is not None else "—"
     saving_data = [
-        [_cell("Metric", bold=True), _cell("Value", bold=True), _cell("ROI", bold=True)],
+        [_hdr_cell("Metric"), _hdr_cell("Value"), _hdr_cell("ROI")],
         [_cell("Full year (1st)"),
-         _cell(_fmt(opp.expected_annual_saving, prefix="€")),
-         _cell(roi_full_str)],
+         _accent_cell(_fmt(opp.expected_annual_saving, prefix="€")),
+         _accent_cell(roi_full_str)],
         [_cell("Period (N1–N4)"),
-         _cell(_fmt(opp.period_saving, prefix="€")),
-         _cell(roi_period_str)],
+         _accent_cell(_fmt(opp.period_saving, prefix="€")),
+         _accent_cell(roi_period_str)],
         [_cell("Duration"),
          _cell(f"{opp.duration_months or '—'} months"), _cell("")],
     ]
@@ -398,7 +444,7 @@ def generate_stp_pdf(opp, phase: int = 0) -> bytes:
     # Estimated saving by budget year (01 Dec -> 30 Nov, start-date prorated)
     by_year = opp.saving_by_year or {}
     if by_year:
-        year_rows = [[_cell("Budget Year", bold=True), _cell("Est. Saving", bold=True)]]
+        year_rows = [[_hdr_cell("Budget Year"), _hdr_cell("Est. Saving")]]
         for yr in sorted(by_year.keys()):
             year_rows.append([_cell(str(yr)), _cell(_fmt(by_year[yr], prefix="€"))])
         year_tbl = Table(year_rows, colWidths=[W * 0.45, W * 0.55])
@@ -409,7 +455,7 @@ def generate_stp_pdf(opp, phase: int = 0) -> bytes:
     # ── Cash savings ─────────────────────────────────────────────────────────
     story.append(_section_header("Cash Savings", [W]))
     cash_data = [
-        [_cell("Metric", bold=True), _cell("Value (€)", bold=True)],
+        [_hdr_cell("Metric"), _hdr_cell("Value (€)")],
         [_cell("Est. Inventory gap"), _cell(_fmt(opp.cash_inventory_gap))],
         [_cell("Est. AP gap"),        _cell(_fmt(opp.cash_ap_gap))],
     ]
@@ -445,8 +491,7 @@ def generate_stp_pdf(opp, phase: int = 0) -> bytes:
             return str(d)
 
     plan_data = [
-        [_cell("Phase", bold=True), _cell("Weeks", bold=True),
-         _cell("Start", bold=True), _cell("End", bold=True)],
+        [_hdr_cell("Phase"), _hdr_cell("Weeks"), _hdr_cell("Start"), _hdr_cell("End")],
         *[
             [_cell(f"Phase {i+1}"),
              _cell(str(weeks[i]) if weeks[i] else "—"),
@@ -454,7 +499,7 @@ def generate_stp_pdf(opp, phase: int = 0) -> bytes:
              _cell(_fdate(phase_ends[i]))]
             for i in range(4)
         ],
-        [_cell("Savings start", bold=True),
+        [_label_cell("Savings start"),
          _cell(""),
          _cell(_fdate(opp.planned_start_date)),
          _cell("")],
@@ -467,24 +512,49 @@ def generate_stp_pdf(opp, phase: int = 0) -> bytes:
     # ── Gate / committee section ─────────────────────────────────────────────
     gate_title = "Phase 0 Gate — Committee Decision" if phase == 0 else "Phase 1 Gate — Committee Review"
     story.append(_section_header(gate_title, [W]))
-    participants = "CEO · Purchasing · COO/Plant Manager · Sales" if phase == 1 \
-        else "Plant Manager · Purchasing"
+
+    # Real approvers/roles/decisions for this phase's gate, pulled from the
+    # sourcing-committee gate-approval workflow — not a hardcoded generic list.
+    # gate_approval_requests is ordered most-recent-first (see Opportunity model),
+    # so the first match is the current/latest request for this phase.
+    phase_label = f"Phase {phase}"
+    gate_requests = [
+        r for r in (opp.gate_approval_requests or []) if r.phase_from == phase_label
+    ]
+    req = gate_requests[0] if gate_requests else None
+
+    if req and req.votes:
+        role_order: list[str] = []
+        for v in req.votes:
+            role = v.approver_role or ("Plant Manager" if v.is_plant_manager else "Approver")
+            if role not in role_order:
+                role_order.append(role)
+        participants = " · ".join(role_order)
+        members = "; ".join(
+            f"{v.approver_role or ('Plant Manager' if v.is_plant_manager else 'Approver')}: "
+            f"{v.approver_email or '—'} ({v.decision or 'Pending'})"
+            for v in req.votes
+        )
+        review_date = _fdate(req.requested_at.date() if req.requested_at else None)
+        outcome = req.consensus_result or req.status or "Pending"
+    else:
+        participants = "—"
+        members = "—"
+        review_date = "—"
+        outcome = "—"
 
     gate_rows = [
         ("Type of change",  opp.change_mode or "—"),
-        ("Participants",    participants),
     ]
-    if phase == 1 and opp.projects:
-        proj = opp.projects[0]
-        gate_rows += [
-            ("Committee review date",  _fdate(proj.committee_review_date)),
-            ("Committee members",      proj.committee_members or "—"),
-            ("PM",                     opp.project_owner or "—"),
-        ]
-    else:
-        gate_rows += [
-            ("Selected PM for Phase 1", opp.project_owner or "—"),
-        ]
+    if req and req.committee_level:
+        gate_rows.append(("Committee level", req.committee_level))
+    gate_rows += [
+        ("Participants (roles)", participants),
+        ("Committee members",    members),
+        ("Request date",         review_date),
+        ("Outcome",              outcome),
+        ("PM" if phase == 1 else "Selected PM for Phase 1", opp.project_owner or "—"),
+    ]
     story.append(_kv_table(gate_rows))
 
     # ── Build PDF ────────────────────────────────────────────────────────────

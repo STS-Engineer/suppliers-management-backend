@@ -1815,6 +1815,8 @@ class Opportunity(GovernanceMixin, Base):
     purchasing_owner: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     project_owner: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     conversion_owner: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    committee_level: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    # Light | Intermediate | Full — chosen at the Phase 1 gate, locked for Phase 2-4
     plant_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("avocarbon_site.id_site", ondelete="CASCADE"), nullable=True
     )
@@ -2050,6 +2052,8 @@ class GateApprovalRequest(GovernanceMixin, Base):
     # Pending | Completed | Expired
     consensus_result: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     # Go | No Go | Review — set when all votes in
+    committee_level: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    # Light | Intermediate | Full — null for Phase 0 requests
     applied_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     opportunity_snapshot: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
@@ -2080,6 +2084,8 @@ class GateApprovalVote(GovernanceMixin, Base):
     token_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     accessed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     is_plant_manager: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True, default=False)
+    approver_role: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    # Business role for Phase 1-4 committee votes (e.g. "Purchasing Director") — null for Phase 0 votes
     decision: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     # Approved | Rejected | Needs Review
     comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

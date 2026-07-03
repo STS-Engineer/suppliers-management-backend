@@ -16,6 +16,7 @@ from app.features.purchasing_value.schemas import opportunity_to_response
 from app.features.purchasing_value.service import PurchasingValueService
 from app.features.purchasing_value.kpi_service import KpiFilters, PurchasingKpiService
 from app.features.purchasing_value.stp_pdf import generate_stp_pdf
+from app.features.purchasing_value.full_report_pdf import generate_full_report_pdf
 from app.shared.dependencies.auth import get_current_user
 from app.shared.dependencies.db import get_db
 
@@ -620,13 +621,21 @@ async def get_current_supplier_evaluation(
     if not evaluation:
         return {"status": "success", "data": None}
 
+    # quality_certification is never trusted from the frozen snapshot -- it's the
+    # one criterion backed by an independent, separately-editable record
+    # (SupplierCertification) that can expire without the evaluation being re-saved.
+    from app.features.supplier_relations.service import SupplierRelationService
+
+    rel_service = SupplierRelationService(db)
+    live_quality_certification = await rel_service._get_relation_quality_certification(relation)
+
     return {
         "status": "success",
         "data": {
             "top": evaluation.top,
             "lta": evaluation.lta,
             "productivity": evaluation.productivity,
-            "quality_certification": evaluation.quality_certification,
+            "quality_certification": live_quality_certification,
             "competitiveness": evaluation.competitiveness,
             "sqma": evaluation.sqma,
             "family_coverage": evaluation.family_coverage,
@@ -674,6 +683,36 @@ async def export_stp_pdf(
         :60
     ]
     filename = f"STP_Phase{phase}_{safe_name}.pdf"
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/opportunities/{opportunity_id}/export-full-report")
+async def export_full_report_pdf(
+    opportunity_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Generate and return the Full Opportunity Report as a downloadable PDF —
+    a live snapshot across all phases, available for any opportunity type."""
+    import unicodedata
+
+    svc = PurchasingValueService(db)
+    opp = await svc.get_opportunity(opportunity_id)
+    pdf_bytes = generate_full_report_pdf(opp)
+    raw_name = opp.opportunity_name or f"opp_{opportunity_id}"
+    ascii_name = (
+        unicodedata.normalize("NFKD", raw_name)
+        .encode("ascii", "ignore")
+        .decode("ascii")
+    )
+    safe_name = "".join(c if c.isalnum() or c in "-_." else "_" for c in ascii_name)[
+        :60
+    ]
+    filename = f"FullReport_{safe_name}.pdf"
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",

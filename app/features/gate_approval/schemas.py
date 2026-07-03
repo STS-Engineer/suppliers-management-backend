@@ -5,6 +5,8 @@ from datetime import datetime
 from typing import Optional, List
 from pydantic import BaseModel, Field, ConfigDict, field_validator
 
+from app.features.gate_approval.constants import ALL_ROLES, COMMITTEE_LEVELS
+
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
@@ -30,6 +32,40 @@ class GateApprovalCreateRequest(BaseModel):
         return [_validate_email(e) for e in v if e and e.strip()]
 
 
+class CommitteeApprover(BaseModel):
+    """One named approver for a Phase 1-4 sourcing committee gate."""
+    role: str
+    email: str
+
+    @field_validator("role")
+    @classmethod
+    def validate_role(cls, v: str) -> str:
+        if v not in ALL_ROLES:
+            raise ValueError(f"Unknown business role: {v!r}")
+        return v
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, v: str) -> str:
+        return _validate_email(v)
+
+
+class CommitteeGateApprovalCreateRequest(BaseModel):
+    """Phase 1-4 sourcing committee gate approval request."""
+    committee_level: Optional[str] = Field(
+        None, description="Light | Intermediate | Full — required on the opportunity's first (Phase 1) request"
+    )
+    approvers: List[CommitteeApprover]
+    message: Optional[str] = None
+
+    @field_validator("committee_level")
+    @classmethod
+    def validate_committee_level(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v not in COMMITTEE_LEVELS:
+            raise ValueError(f"Invalid committee level: {v!r}")
+        return v
+
+
 class VoteSubmitRequest(BaseModel):
     decision: str = Field(..., description="Approved | Rejected | Needs Review")
     comment: Optional[str] = None
@@ -48,6 +84,7 @@ class VoteResponse(BaseModel):
     approver_email: Optional[str] = None
     access_token: Optional[str] = None
     is_plant_manager: Optional[bool] = None
+    approver_role: Optional[str] = None
     decision: Optional[str] = None
     comment: Optional[str] = None
     project_manager_email: Optional[str] = None
@@ -67,6 +104,7 @@ class GateApprovalRequestResponse(BaseModel):
     message: Optional[str] = None
     status: Optional[str] = None
     consensus_result: Optional[str] = None
+    committee_level: Optional[str] = None
     applied_at: Optional[datetime] = None
     votes: List[VoteResponse] = []
 
@@ -77,6 +115,7 @@ class PeerVote(BaseModel):
     """Minimal vote info shown to other approvers (mutual visibility)."""
     approver_email: Optional[str] = None
     is_plant_manager: Optional[bool] = None
+    approver_role: Optional[str] = None
     decision: Optional[str] = None
     decided_at: Optional[datetime] = None
 
@@ -85,6 +124,8 @@ class VoteFormData(BaseModel):
     """Public-facing data shown on the approval form page."""
     vote_id: int
     approver_email: Optional[str] = None
+    approver_role: Optional[str] = None
+    committee_level: Optional[str] = None
     already_decided: bool = False
     decision: Optional[str] = None
     token_expires_at: Optional[datetime] = None
@@ -132,6 +173,7 @@ class VoteFormData(BaseModel):
     annual_quantity_n1: Optional[float] = None
     annual_quantity_n2: Optional[float] = None
     annual_quantity_n3: Optional[float] = None
+    annual_quantity_n4: Optional[float] = None
 
     # Savings
     saving_year_n: Optional[float] = None

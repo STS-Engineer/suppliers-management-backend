@@ -789,11 +789,11 @@ class PurchasingValueService:
         else:
             current_phase = opp.phase_status or "Phase 0"
 
-            # Phases 1-3 are material: financial lines, deployment, and close-out.
+            # Phases 1-4 are material: financial lines, deployment, and close-out.
             # A single privileged user must NOT advance them without a quorum vote.
             # The _via_gate_approval flag is set only by GateApprovalService._check_consensus,
             # so direct API calls (e.g. from the UI gate-decision endpoint) are blocked.
-            if current_phase in ("Phase 1", "Phase 2", "Phase 3") and not _via_gate_approval:
+            if current_phase in ("Phase 1", "Phase 2", "Phase 3", "Phase 4") and not _via_gate_approval:
                 raise AppException(
                     422,
                     f"{current_phase} transitions require a completed gate approval "

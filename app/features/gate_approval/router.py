@@ -32,6 +32,24 @@ async def create_approval_request(
     return {"status": "success", "data": schemas.GateApprovalRequestResponse.model_validate(req)}
 
 
+@router.post("/opportunities/{opportunity_id}/committee-request", response_model=dict)
+async def create_committee_approval_request(
+    opportunity_id: int,
+    payload: schemas.CommitteeGateApprovalCreateRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Submit a Phase 1-4 sourcing committee gate approval request."""
+    svc = svc_module.GateApprovalService(db)
+    req = await svc.create_committee_approval_request(
+        opportunity_id=opportunity_id,
+        payload=payload,
+        requested_by=current_user.get("email", current_user.get("sub", "")),
+    )
+    await db.commit()
+    return {"status": "success", "data": schemas.GateApprovalRequestResponse.model_validate(req)}
+
+
 @router.get("/opportunities/{opportunity_id}", response_model=dict)
 async def get_approval_status(
     opportunity_id: int,

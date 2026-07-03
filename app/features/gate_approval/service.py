@@ -1,7 +1,10 @@
 """Gate approval service."""
 from __future__ import annotations
 
+import os
+import tempfile
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -12,18 +15,81 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.exceptions import AppException
 from app.db.models import GateApprovalRequest, GateApprovalVote, Opportunity
+from app.features.auth.models import AccessIdentity
 from app.features.gate_approval import schemas
+from app.features.gate_approval.constants import (
+    COMMITTEE_ELIGIBLE_PHASES,
+    ROLE_PLANT_MANAGER,
+    mandatory_roles_for_phase,
+)
+from app.features.notifications.service import NotificationService
 from app.features.purchasing_value.service import PurchasingValueService
 from app.features.purchasing_value.schemas import GateDecisionRequest
+from app.features.purchasing_value.stp_pdf import generate_stp_pdf
+from app.features.purchasing_value.full_report_pdf import generate_full_report_pdf
 from app.shared.utils.email.email_service import get_email_service
 
 TOKEN_TTL_HOURS = 72
+
+# STP dossier only exists for these opportunity types (Negotiation/Cash have no STP format)
+STP_ELIGIBLE_TYPES = {"Sourcing", "Technical Productivity"}
+
+
+@contextmanager
+def _pdf_attachment(pdf_bytes: Optional[bytes], filename_prefix: str, opp_name: str):
+    """Write pdf_bytes to a temp file for the duration of the block; yields
+    (path, filename) or (None, None) if pdf_bytes is None. Cleans up on exit."""
+    if pdf_bytes is None:
+        yield None, None
+        return
+    safe = (opp_name or "opportunity").replace(" ", "_")[:50]
+    filename = f"{filename_prefix}_{safe}.pdf"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf", prefix=f"{filename_prefix}_") as tmp:
+        tmp.write(pdf_bytes)
+        tmp_path = tmp.name
+    try:
+        yield tmp_path, filename
+    finally:
+        os.unlink(tmp_path)
 
 
 class GateApprovalService:
 
     def __init__(self, db: AsyncSession):
         self.db = db
+
+    # ------------------------------------------------------------------
+    # In-app notification — best-effort, mirrors committee_review's per-vote
+    # and outcome notifications. Silently no-ops if the email has no matching
+    # AccessIdentity (e.g. an external/non-app approver) since notifications
+    # can only target logged-in accounts, unlike email which reaches anyone.
+    # ------------------------------------------------------------------
+    async def _notify_by_email(
+        self,
+        email: Optional[str],
+        notification_type: str,
+        title: str,
+        body: str,
+        action_url: str,
+    ) -> None:
+        if not email:
+            return
+        try:
+            result = await self.db.execute(
+                select(AccessIdentity).where(AccessIdentity.email.ilike(email))
+            )
+            identity = result.scalar_one_or_none()
+            if not identity:
+                return
+            await NotificationService(self.db).create_notification(
+                recipient_id=identity.id_identity,
+                notification_type=notification_type,
+                title=title,
+                body=body,
+                action_url=action_url,
+            )
+        except Exception:
+            pass  # Non-blocking — email notification already covers delivery
 
     # ------------------------------------------------------------------
     # Create approval request + send emails
@@ -40,12 +106,13 @@ class GateApprovalService:
         if opp.status == "Cancelled":
             raise AppException(400, "Cannot request approval for a cancelled opportunity.", "OPP_CANCELLED")
 
-        _GATE_ELIGIBLE_PHASES = ("Phase 0", "Phase 1", "Phase 2", "Phase 3")
+        _GATE_ELIGIBLE_PHASES = ("Phase 0",)
         if opp.phase_status not in _GATE_ELIGIBLE_PHASES:
             raise AppException(
                 400,
                 f"Gate approval is not applicable in phase '{opp.phase_status}'. "
-                "Only Phase 0-3 opportunities can go through gate approval.",
+                "Only Phase 0 opportunities can go through this approval flow — "
+                "use the sourcing committee gate for Phase 1-4.",
                 "INVALID_PHASE_FOR_APPROVAL",
             )
 
@@ -149,36 +216,219 @@ class GateApprovalService:
                 "INSUFFICIENT_APPROVERS",
             )
 
-        for email, is_pm in all_approvers:
-            token = str(uuid.uuid4())
-            vote = GateApprovalVote(
-                request_id=req.request_id,
-                approver_email=email,
-                access_token=token,
-                token_expires_at=expires_at,
-                is_plant_manager=is_pm,
-                created_at=now,
-                created_by=requested_by,
-            )
-            self.db.add(vote)
+        # Phase 0 gate: attach the STP dossier (phase 0) for Sourcing / Technical
+        # Productivity opportunities — Negotiation/Cash have no STP format.
+        stp_pdf_bytes = (
+            generate_stp_pdf(opp, phase=0)
+            if opp.phase_status == "Phase 0" and opp.opportunity_type in STP_ELIGIBLE_TYPES
+            else None
+        )
 
-            link = f"{settings.frontend_base_url}/approve/{token}"
-            # PM designation only happens once, at the Phase 0 gate — the plant
-            # manager who approves later phases (1-3) is not asked to redesignate
-            # a PM that opp.project_owner already holds.
-            pm_note_applies = is_pm and opp.phase_status in ("Assigned", "Phase 0")
-            html = self._build_email_html(opp, req, link, payload.message, is_plant_manager=pm_note_applies)
-            try:
-                email_svc.send_sync(
-                    subject=f"[Action Required] Gate Approval — {opp.opportunity_name} ({opp.phase_status})",
-                    recipients=[email],
-                    body_html=html,
+        with _pdf_attachment(stp_pdf_bytes, "STP_Phase0", opp.opportunity_name) as (attach_path, attach_filename):
+            for email, is_pm in all_approvers:
+                token = str(uuid.uuid4())
+                vote = GateApprovalVote(
+                    request_id=req.request_id,
+                    approver_email=email,
+                    access_token=token,
+                    token_expires_at=expires_at,
+                    is_plant_manager=is_pm,
+                    created_at=now,
+                    created_by=requested_by,
                 )
-            except Exception:
-                pass  # Non-blocking — vote still created
+                self.db.add(vote)
+
+                link = f"{settings.frontend_base_url}/approve/{token}"
+                # PM designation only happens once, at the Phase 0 gate — the plant
+                # manager who approves later phases (1-3) is not asked to redesignate
+                # a PM that opp.project_owner already holds.
+                pm_note_applies = is_pm and opp.phase_status in ("Assigned", "Phase 0")
+                html = self._build_email_html(opp, req, link, payload.message, is_plant_manager=pm_note_applies)
+                try:
+                    email_svc.send_sync(
+                        subject=f"[Action Required] Gate Approval — {opp.opportunity_name} ({opp.phase_status})",
+                        recipients=[email],
+                        body_html=html,
+                        attachment_path=attach_path,
+                        attachment_filename=attach_filename,
+                    )
+                except Exception:
+                    pass  # Non-blocking — vote still created
+                await self._notify_by_email(
+                    email,
+                    "gate_approval_requested",
+                    f"Gate approval requested — {opp.opportunity_name}",
+                    f"Your review is requested for the {opp.phase_status} gate.",
+                    link,
+                )
 
         await self.db.flush()
         # Re-query with selectinload so votes (including access_token) are available
+        result = await self.db.execute(
+            select(GateApprovalRequest)
+            .where(GateApprovalRequest.request_id == req.request_id)
+            .options(selectinload(GateApprovalRequest.votes))
+        )
+        return result.scalar_one()
+
+    # ------------------------------------------------------------------
+    # Create sourcing committee approval request (Phase 1-4)
+    # ------------------------------------------------------------------
+    async def create_committee_approval_request(
+        self,
+        opportunity_id: int,
+        payload: schemas.CommitteeGateApprovalCreateRequest,
+        requested_by: str,
+    ) -> GateApprovalRequest:
+        pv_svc = PurchasingValueService(self.db)
+        opp = await pv_svc.get_opportunity(opportunity_id)
+
+        if opp.status == "Cancelled":
+            raise AppException(400, "Cannot request approval for a cancelled opportunity.", "OPP_CANCELLED")
+
+        if opp.phase_status not in COMMITTEE_ELIGIBLE_PHASES:
+            raise AppException(
+                400,
+                f"Sourcing committee approval is not applicable in phase '{opp.phase_status}'. "
+                "Only Phase 1-4 opportunities can go through this approval flow.",
+                "INVALID_PHASE_FOR_APPROVAL",
+            )
+
+        # Deliberately excludes "Under Committee Review" — once a committee gate is
+        # requested the opportunity is locked until quorum is reached; a new request
+        # can only be opened after the current one resolves (Go/No Go/Review resets
+        # status via apply_gate_decision).
+        if opp.status not in ("Working on it", "Needs Rework"):
+            raise AppException(
+                400,
+                f"Cannot request approval: {opp.phase_status} opportunity must be in "
+                "'Working on it' or 'Needs Rework' status.",
+                "INVALID_PHASE_FOR_APPROVAL",
+            )
+
+        # Committee level is chosen once (expected at Phase 1) and locked for the
+        # rest of the opportunity's life — later phases cannot silently switch tier.
+        if opp.committee_level:
+            tier = opp.committee_level
+        else:
+            if not payload.committee_level:
+                raise AppException(
+                    422,
+                    "A committee level (Light, Intermediate or Full) must be selected "
+                    "for this opportunity's first sourcing committee gate.",
+                    "COMMITTEE_LEVEL_REQUIRED",
+                )
+            tier = payload.committee_level
+            opp.committee_level = tier
+
+        mandatory_roles = mandatory_roles_for_phase(opp.phase_status, tier)
+        provided_roles = {a.role: a.email for a in payload.approvers}
+        missing_roles = [r for r in mandatory_roles if r not in provided_roles]
+        if missing_roles:
+            raise AppException(
+                422,
+                f"{opp.phase_status} requires an approver for: {', '.join(missing_roles)}.",
+                "MISSING_MANDATORY_APPROVER",
+            )
+
+        now = datetime.utcnow()
+
+        # Close any previously open request for this opportunity before creating a new one
+        existing_result = await self.db.execute(
+            select(GateApprovalRequest).where(
+                GateApprovalRequest.opportunity_id == opportunity_id,
+                GateApprovalRequest.status == "Pending",
+            )
+        )
+        for old_req in existing_result.scalars().all():
+            old_req.status = "Superseded"
+            old_req.updated_at = now
+
+        snapshot = pv_svc._build_opportunity_snapshot(opp)
+
+        req = GateApprovalRequest(
+            opportunity_id=opportunity_id,
+            phase_from=opp.phase_status,
+            requested_by=requested_by,
+            requested_at=now,
+            message=payload.message,
+            status="Pending",
+            committee_level=tier,
+            opportunity_snapshot=snapshot,
+            created_at=now,
+            created_by=requested_by,
+        )
+        self.db.add(req)
+        await self.db.flush()  # get request_id
+
+        # Phase 1-4 committee gates use "Under Committee Review" (distinct from the
+        # Phase 0 gate's "Awaiting Validation") — the opportunity stays locked in
+        # this status until every mandatory approver has voted and consensus is
+        # reached (see _check_consensus), then apply_gate_decision advances it.
+        opp.status = "Under Committee Review"
+        opp.validation_request_sent_at = now
+        opp.validation_request_sent_by = requested_by
+
+        email_svc = get_email_service()
+        expires_at = now + timedelta(hours=TOKEN_TTL_HOURS)
+
+        # Attach the STP dossier at Phase 1 (Sourcing / Technical Productivity only,
+        # mirrors the Phase 0 gate), and the Full Opportunity Report at Phase 3/4
+        # (any type — a live cross-phase status snapshot, not an STP proposal doc).
+        attach_bytes: Optional[bytes] = None
+        attach_prefix = ""
+        if opp.phase_status == "Phase 1" and opp.opportunity_type in STP_ELIGIBLE_TYPES:
+            attach_bytes = generate_stp_pdf(opp, phase=1)
+            attach_prefix = "STP_Phase1"
+        elif opp.phase_status in ("Phase 3", "Phase 4"):
+            attach_bytes = generate_full_report_pdf(opp)
+            attach_prefix = "FullReport"
+
+        # One vote row per role, even if the same email covers several roles
+        # (e.g. a single tester approving as both Purchasing Director and CEO) —
+        # each role gets its own token/link and casts its own decision.
+        with _pdf_attachment(attach_bytes, attach_prefix, opp.opportunity_name) as (attach_path, attach_filename):
+            for approver in payload.approvers:
+                if not approver.email:
+                    continue
+
+                token = str(uuid.uuid4())
+                vote = GateApprovalVote(
+                    request_id=req.request_id,
+                    approver_email=approver.email,
+                    access_token=token,
+                    token_expires_at=expires_at,
+                    is_plant_manager=(approver.role == ROLE_PLANT_MANAGER),
+                    approver_role=approver.role,
+                    created_at=now,
+                    created_by=requested_by,
+                )
+                self.db.add(vote)
+
+                link = f"{settings.frontend_base_url}/approve/{token}"
+                html = self._build_email_html(
+                    opp, req, link, payload.message,
+                    approver_role=approver.role, committee_level=tier,
+                )
+                try:
+                    email_svc.send_sync(
+                        subject=f"[Action Required] Gate Approval — {opp.opportunity_name} ({opp.phase_status}, {tier} Committee)",
+                        recipients=[approver.email],
+                        body_html=html,
+                        attachment_path=attach_path,
+                        attachment_filename=attach_filename,
+                    )
+                except Exception:
+                    pass  # Non-blocking — vote still created
+                await self._notify_by_email(
+                    approver.email,
+                    "gate_approval_requested",
+                    f"Gate approval requested — {opp.opportunity_name}",
+                    f"Your role: {approver.role} · {tier} Committee · {opp.phase_status} gate.",
+                    link,
+                )
+
+        await self.db.flush()
         result = await self.db.execute(
             select(GateApprovalRequest)
             .where(GateApprovalRequest.request_id == req.request_id)
@@ -218,6 +468,7 @@ class GateApprovalService:
             schemas.PeerVote(
                 approver_email=v.approver_email,
                 is_plant_manager=v.is_plant_manager,
+                approver_role=v.approver_role,
                 decision=v.decision,
                 decided_at=v.decided_at,
             )
@@ -237,6 +488,8 @@ class GateApprovalService:
         return schemas.VoteFormData(
             vote_id=vote.vote_id,
             approver_email=vote.approver_email,
+            approver_role=vote.approver_role,
+            committee_level=req.committee_level,
             already_decided=vote.decision is not None,
             decision=vote.decision,
             token_expires_at=vote.token_expires_at,
@@ -279,6 +532,7 @@ class GateApprovalService:
             annual_quantity_n1=_f("annual_quantity_n1"),
             annual_quantity_n2=_f("annual_quantity_n2"),
             annual_quantity_n3=_f("annual_quantity_n3"),
+            annual_quantity_n4=_f("annual_quantity_n4"),
             # Savings
             saving_year_n=_f("saving_year_n"),
             saving_year_n1=_f("saving_year_n1"),
@@ -356,6 +610,23 @@ class GateApprovalService:
             vote.project_manager_email = payload.project_manager_email
 
         await self.db.flush()
+
+        # Notify the requester in-app with live progress — mirrors
+        # committee_review's per-vote _notify_vp pattern.
+        votes_result = await self.db.execute(
+            select(GateApprovalVote).where(GateApprovalVote.request_id == req.request_id)
+        )
+        all_votes = votes_result.scalars().all()
+        decided_count = sum(1 for v in all_votes if v.decision is not None)
+        snap = req.opportunity_snapshot or {}
+        opp_name = snap.get("opportunity_name") or "the opportunity"
+        await self._notify_by_email(
+            req.requested_by,
+            "gate_approval_vote_cast",
+            f"{vote.approver_email} {payload.decision.lower()} the {req.phase_from} gate",
+            f"{opp_name} — {decided_count}/{len(all_votes)} responses received.",
+            f"/purchasing-value?opp={req.opportunity_id}",
+        )
 
         # Check consensus — PM notification fires only if all approve (Go)
         await self._check_consensus(vote.request_id)
@@ -460,9 +731,20 @@ class GateApprovalService:
         req.updated_at = now
         await self.db.flush()
 
+        # Notify the requester in-app that the outcome was applied — mirrors
+        # committee_review's "auto-applied" notification once the round completes.
+        snap = req.opportunity_snapshot or {}
+        opp_name = snap.get("opportunity_name") or "Opportunity"
+        await self._notify_by_email(
+            req.requested_by,
+            "gate_approval_outcome",
+            f"Gate outcome: {consensus} — {opp_name}",
+            f"The {req.phase_from} gate consensus is {consensus}.",
+            f"/purchasing-value?opp={req.opportunity_id}",
+        )
+
         # PM email is best-effort; failure must not roll back the transition.
         if consensus == "Go" and plant_vote and plant_vote.project_manager_email:
-            snap = req.opportunity_snapshot or {}
             try:
                 self._notify_project_manager(
                     pm_email=plant_vote.project_manager_email,
@@ -474,6 +756,13 @@ class GateApprovalService:
                 )
             except Exception:
                 pass
+            await self._notify_by_email(
+                plant_vote.project_manager_email,
+                "gate_approval_pm_assigned",
+                f"You are assigned as Project Manager — {snap.get('opportunity_name') or 'Opportunity'}",
+                f"All approvers validated the {req.phase_from} gate. You now lead this project.",
+                f"/purchasing-value?opp={req.opportunity_id}",
+            )
 
     # ------------------------------------------------------------------
     # Email HTML builder
@@ -485,6 +774,8 @@ class GateApprovalService:
         link: str,
         message: Optional[str],
         is_plant_manager: bool = False,
+        approver_role: Optional[str] = None,
+        committee_level: Optional[str] = None,
     ) -> str:
         snap = req.opportunity_snapshot or {}
 
@@ -501,6 +792,10 @@ class GateApprovalService:
             ("Opportunity", opp.opportunity_name or "—"),
             ("Type", opp.opportunity_type or "—"),
             ("Phase", f"{req.phase_from} → next"),
+        ]
+        if approver_role:
+            rows.append(("Your role", f"{approver_role}" + (f" · {committee_level} Committee" if committee_level else "")))
+        rows += [
             ("Owner (Idea)", snap.get("idea_owner") or "—"),
             ("Project Manager", snap.get("project_owner") or "—"),
             ("Change type", snap.get("change_mode") or "—"),
