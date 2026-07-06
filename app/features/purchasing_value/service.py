@@ -32,6 +32,7 @@ from app.db.models import (
 from app.features.purchasing_value.schemas import (
     EscalateRequest,
     FinancialLineCompleteRequest,
+    FinancialLineReviseBaselineRequest,
     GateDecisionRequest,
     MonthlyActualUpdateRequest,
     OpportunityCreateRequest,
@@ -2729,67 +2730,156 @@ class PurchasingValueService:
     async def revise_financial_line_baseline(
         self,
         line_id: int,
-        revised_saving: Decimal,
-        note: Optional[str],
-        revised_by: Optional[str],
+        payload: FinancialLineReviseBaselineRequest,
     ) -> FinancialLine:
-        """Revise expected_annual_saving on an active financial line, rebuild the monthly profile, keep budget_value."""
+        """Correct the committed STP baseline for a line that ALREADY has actuals
+        (Phase 3+) — the only path to change price/quantity/bonus (or the flat
+        annual saving for Negotiation/Cash) once real savings have started, since
+        update_opportunity's direct-edit is unconditionally blocked by the actuals
+        governance lock there (BASELINE_LOCKED_ACTUALS) — even for
+        purchasing_director/vp_conversion. Restricted to _PRIVILEGED at the router.
+
+        Unlike the old version (which just scaled a typed-in annual number), this
+        recomputes through the SAME engine as the rest of the app:
+          - Sourcing/Technical Productivity: apply the proposed price/quantity/
+            bonus fields, recompute via compute_stp_financials (period_saving,
+            saving_year_n..n3, ROI, cash gaps) — mirrors decide_stp_revision's
+            Approved branch exactly, so results stay consistent everywhere the
+            opportunity's figures are displayed (STP tab, PDFs, KPIs).
+          - Negotiation/Cash (no price/quantity breakdown): apply revised_saving
+            directly to expected_annual_saving.
+        Then:
+          - Rebuild the monthly profile via _rebuild_monthly_profile, which
+            preserves every already-entered actual and regenerates only the
+            remaining (unactualized) months from the corrected figures.
+          - Re-sync ALL fiscal-year OpportunityBudgetYear rows via
+            _sync_budget_years — the old version never did this, leaving the
+            Budgeting page and KPIs stale after a revision.
+          - Append a structured entry to opp.revision_history (JSONB array,
+            append-only) with a before/after snapshot of both the raw fields and
+            the computed results, so every committed-baseline correction is
+            permanently queryable — not just a line in a growing comment string.
+        """
         line = await self.get_financial_line(line_id)
         if line.status != "Active":
             raise AppException(
                 422, "Can only revise an active financial line.", "LINE_NOT_ACTIVE"
             )
-        # M5 — guard: Closed opportunities are immutable even if the line is technically still Active
-        opp_result = await self.db.execute(
-            select(Opportunity).where(Opportunity.opportunity_id == line.opportunity_id)
-        )
-        opp = opp_result.scalar_one_or_none()
-        if opp and opp.phase_status == "Closed":
+        opp = await self.get_opportunity(line.opportunity_id)
+        if opp.phase_status == "Closed":
             raise AppException(
                 422,
                 "Cannot revise the baseline of a Closed opportunity.",
                 "OPPORTUNITY_CLOSED",
             )
 
-        old_saving = line.expected_annual_saving or Decimal("0")
-        line.expected_annual_saving = revised_saving
-        # budget_value stays unchanged — it is the original budget commitment
-        line.comments = (line.comments or "") + (
-            f"\n[Baseline revised {datetime.utcnow().strftime('%Y-%m-%d')} by {revised_by or 'system'}] "
-            f"€{old_saving:,.0f} → €{revised_saving:,.0f}. Reason: {note or 'N/A'}"
-        )
-        line.updated_at = datetime.utcnow()
-        line.updated_by = revised_by
+        is_stp = self._is_period(opp)
 
-        duration = int(line.duration_months or 12)
-        start = (
-            line.real_start_date
-            or line.planned_start_date
-            or date.today().replace(day=1)
+        def _snapshot_computed() -> dict:
+            return {
+                "expected_annual_saving": float(opp.expected_annual_saving) if opp.expected_annual_saving is not None else None,
+                "period_saving": float(opp.period_saving) if opp.period_saving is not None else None,
+                "roi_percent": float(opp.roi_percent) if opp.roi_percent is not None else None,
+                "roi_period_percent": float(opp.roi_period_percent) if opp.roi_period_percent is not None else None,
+                "cash_impact": float(opp.cash_impact) if opp.cash_impact is not None else None,
+            }
+
+        previous_fields = (
+            {f: float(getattr(opp, f)) if getattr(opp, f) is not None else None for f in self._STP_BASELINE_FIELDS}
+            if is_stp
+            else {"expected_annual_saving": float(opp.expected_annual_saving) if opp.expected_annual_saving is not None else None}
         )
-        # D1 — preserve STP escalating window structure on revision.
-        # Scale the formula-derived per-year windows proportionally to the revised
-        # period total so the Year-N/N+1/N+2/N+3 shape is kept while the monthly
-        # profile sums to the new baseline (not the old formula total).
-        # For flat types (Negotiation / Cash) the existing flat behaviour is preserved.
-        # opp already loaded above for the Closed guard — no second query needed.
-        is_stp = self._is_period(opp) if opp else False
-        stp_windows = self._stp_year_windows(opp) if is_stp else None
-        if is_stp and stp_windows:
-            window_total = sum(stp_windows)
-            if window_total:
-                scale = float(revised_saving) / window_total
-                stp_windows = [w * scale for w in stp_windows]
-            else:
-                # All windows are zero — fall back to flat so the revised saving is applied.
-                is_stp = False
-                stp_windows = None
+        previous_computed = _snapshot_computed()
+
+        if is_stp:
+            proposed: dict = {}
+            for field in self._STP_BASELINE_FIELDS:
+                val = getattr(payload, field, None)
+                if val is not None:
+                    proposed[field] = float(val) if isinstance(val, Decimal) else val
+            if not proposed:
+                raise AppException(
+                    422,
+                    "At least one STP field (price, quantity, bonus) must be provided.",
+                    "NO_FIELDS_PROVIDED",
+                )
+            for field, value in proposed.items():
+                setattr(opp, field, Decimal(str(value)) if isinstance(value, (int, float)) else value)
+
+            # Recompute STP financials — identical chain to decide_stp_revision's Approved branch.
+            stp_fin = compute_stp_financials(opp)
+            if stp_fin["period_saving"] is not None:
+                opp.period_saving = Decimal(str(stp_fin["period_saving"]))
+                year_n = stp_fin["saving_per_year"][0]
+                if year_n is not None:
+                    opp.expected_annual_saving = Decimal(str(year_n))
+            for idx, attr in enumerate(("saving_year_n", "saving_year_n1", "saving_year_n2", "saving_year_n3")):
+                yr = stp_fin["saving_per_year"][idx]
+                setattr(opp, attr, Decimal(str(yr)) if yr is not None else None)
+            opp.saving_by_year = compute_saving_by_calendar_year(opp) or None
+            if stp_fin["roi_full_year_pct"] is not None:
+                opp.roi_percent = Decimal(str(stp_fin["roi_full_year_pct"]))
+            if stp_fin["roi_period_pct"] is not None:
+                opp.roi_period_percent = Decimal(str(stp_fin["roi_period_pct"]))
+            if stp_fin["inventory_gap"] is not None:
+                opp.cash_inventory_gap = Decimal(str(stp_fin["inventory_gap"]))
+            if stp_fin["ap_gap"] is not None:
+                opp.cash_ap_gap = Decimal(str(stp_fin["ap_gap"]))
+            if stp_fin["inventory_gap"] is not None or stp_fin["ap_gap"] is not None:
+                opp.cash_impact = Decimal(str(round(
+                    (stp_fin["inventory_gap"] or 0.0) + (stp_fin["ap_gap"] or 0.0), 2
+                )))
+            new_fields = proposed
+        else:
+            if payload.revised_saving is None:
+                raise AppException(
+                    422,
+                    "revised_saving is required for Negotiation/Cash opportunities.",
+                    "MISSING_REVISED_SAVING",
+                )
+            opp.expected_annual_saving = payload.revised_saving
+            new_fields = {"expected_annual_saving": float(payload.revised_saving)}
+
+        # Rebuild the monthly profile for THIS line — preserves every actual already
+        # entered, regenerates only the remaining (unactualized) months.
+        # budget_value is untouched — it is the original budget commitment, distinct
+        # from the corrected expected/estimated saving.
+        duration = int(line.duration_months or 12)
+        start = line.real_start_date or line.planned_start_date or date.today().replace(day=1)
         await self._rebuild_monthly_profile(
-            line, revised_saving, start, duration,
+            line, opp.expected_annual_saving or Decimal("0"), start, duration,
             is_period_total=is_stp,
-            windows=stp_windows,
+            windows=self._stp_year_windows(opp) if is_stp else None,
         )
         await self._recalculate_ytd(line_id)
+
+        # Propagate the correction to every fiscal-year budget row (current AND
+        # future years) so the Budgeting page and KPIs never go stale.
+        await self._sync_budget_years(opp)
+
+        now = datetime.utcnow()
+        history_entry = {
+            "revised_at": now.isoformat(),
+            "revised_by": payload.revised_by,
+            "note": payload.note,
+            "opportunity_type": opp.opportunity_type,
+            "financial_line_id": line.financial_line_id,
+            "previous_fields": previous_fields,
+            "new_fields": new_fields,
+            "previous_computed": previous_computed,
+            "new_computed": _snapshot_computed(),
+        }
+        # Reassign (don't mutate in place) so SQLAlchemy's change tracking picks it up.
+        opp.revision_history = (opp.revision_history or []) + [history_entry]
+
+        line.comments = (line.comments or "") + (
+            f"\n[Baseline revised {now.strftime('%Y-%m-%d')} by {payload.revised_by or 'system'}] "
+            f"Reason: {payload.note}"
+        )
+        line.updated_at = now
+        line.updated_by = payload.revised_by
+        opp.updated_at = now
+        opp.updated_by = payload.revised_by
 
         await self.db.flush()
         await self.db.refresh(line, ["monthly_financials"])

@@ -1963,6 +1963,11 @@ class Opportunity(GovernanceMixin, Base):
     # STP revision approval — JSONB stores a pending director-approval request while
     # current values remain active.  Cleared on approve or reject.
     pending_stp_revision: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    # Structured audit trail of every committed baseline correction (Revise Baseline,
+    # post-actuals). Each entry: {revised_at, revised_by, note, opportunity_type,
+    # previous_fields, new_fields, previous_computed, new_computed}. Append-only,
+    # newest last — never rewritten or trimmed, so it's a permanent history.
+    revision_history: Mapped[Optional[list]] = mapped_column(JSONB, nullable=True)
 
     plant: Mapped[Optional["AvocarbonSite"]] = relationship(
         back_populates="opportunities"

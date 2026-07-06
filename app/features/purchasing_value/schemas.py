@@ -743,9 +743,32 @@ class FinancialLineCompleteRequest(BaseModel):
 
 
 class FinancialLineReviseBaselineRequest(BaseModel):
-    revised_saving: Decimal = Field(..., gt=0, description="New expected annual saving (€)")
-    note: Optional[str] = Field(None, description="Reason for revision — required for audit")
+    """Correct the committed baseline of a line that already has actuals (Phase 3+).
+
+    Sourcing/Technical Productivity: provide the STP fields that changed
+    (price/quantity/bonus — any subset); expected saving, ROI and cash figures
+    are recomputed from them via the same engine as the rest of the app.
+    Negotiation/Cash (no price/quantity breakdown): provide revised_saving instead.
+    """
+    note: str = Field(..., min_length=1, description="Reason for revision — required for audit")
     revised_by: Optional[str] = None
+    # Negotiation / Cash types only
+    revised_saving: Optional[Decimal] = Field(None, gt=0, description="New expected annual saving (€) — Negotiation/Cash types only")
+    # Sourcing / Technical Productivity types only (any subset)
+    current_price:      Optional[Decimal] = None
+    proposed_price:     Optional[Decimal] = None
+    current_price_n1:   Optional[Decimal] = None
+    current_price_n2:   Optional[Decimal] = None
+    current_price_n3:   Optional[Decimal] = None
+    proposed_price_n1:  Optional[Decimal] = None
+    proposed_price_n2:  Optional[Decimal] = None
+    proposed_price_n3:  Optional[Decimal] = None
+    annual_quantity_n1: Optional[int] = None
+    annual_quantity_n2: Optional[int] = None
+    annual_quantity_n3: Optional[int] = None
+    annual_quantity_n4: Optional[int] = None
+    bonus_before:       Optional[Decimal] = None
+    bonus_after:        Optional[Decimal] = None
 
 
 class FinancialLineResponse(BaseModel):
@@ -985,6 +1008,9 @@ class OpportunityResponse(BaseModel):
     updated_at: Optional[datetime] = None
     # STP revision approval — non-null when a Director-approval request is pending
     pending_stp_revision: Optional[dict] = None
+    # Structured, append-only audit trail of committed baseline corrections
+    # (Revise Baseline, post-actuals) — see Opportunity.revision_history.
+    revision_history: Optional[list] = None
     projects: List[ProjectResponse] = Field(default_factory=list)
     financial_lines: List[FinancialLineResponse] = Field(default_factory=list)
     budget_years: List[BudgetYearResponse] = Field(default_factory=list)

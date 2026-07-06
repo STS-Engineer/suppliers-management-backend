@@ -527,9 +527,7 @@ async def revise_financial_line_baseline(
     _require(current_user, _PRIVILEGED)
     try:
         svc = PurchasingValueService(db)
-        line = await svc.revise_financial_line_baseline(
-            line_id, payload.revised_saving, payload.note, payload.revised_by
-        )
+        line = await svc.revise_financial_line_baseline(line_id, payload)
         await db.commit()
         return {
             "status": "success",
