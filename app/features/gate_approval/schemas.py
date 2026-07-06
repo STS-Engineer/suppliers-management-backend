@@ -5,7 +5,11 @@ from datetime import datetime
 from typing import Optional, List
 from pydantic import BaseModel, Field, ConfigDict, field_validator
 
-from app.features.gate_approval.constants import ALL_ROLES, COMMITTEE_LEVELS
+from app.features.gate_approval.constants import (
+    ALL_ROLES,
+    COMMITTEE_LEVELS,
+    NEGOTIATION_APPROVER_ROLES,
+)
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
@@ -17,19 +21,40 @@ def _validate_email(v: str) -> str:
 
 
 class GateApprovalCreateRequest(BaseModel):
-    plant_manager_email: str = Field(..., description="Plant manager email — will designate the Project Manager")
-    purchasing_manager_emails: List[str] = Field(default_factory=list, description="Additional approvers (purchasing manager, etc.)")
+    # Required for every type except Negotiation, where the Plant Manager is
+    # informational-only (see GateApprovalService.create_approval_request).
+    plant_manager_email: Optional[str] = Field(None, description="Plant manager email — will designate the Project Manager (informational-only for Negotiation)")
+    purchasing_manager_emails: List[str] = Field(default_factory=list, description="Additional approvers (purchasing manager, etc.) — not used for Negotiation")
+    # Negotiation-only single-approver fields — either Purchasing Director or VP Conversion.
+    approver_role: Optional[str] = None
+    approver_email: Optional[str] = None
     message: Optional[str] = None
 
     @field_validator("plant_manager_email")
     @classmethod
-    def validate_plant_email(cls, v: str) -> str:
+    def validate_plant_email(cls, v: Optional[str]) -> Optional[str]:
+        if v is None or not v.strip():
+            return None
         return _validate_email(v)
 
     @field_validator("purchasing_manager_emails", mode="before")
     @classmethod
     def validate_purchasing_emails(cls, v: List[str]) -> List[str]:
         return [_validate_email(e) for e in v if e and e.strip()]
+
+    @field_validator("approver_role")
+    @classmethod
+    def validate_approver_role(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v not in NEGOTIATION_APPROVER_ROLES:
+            raise ValueError(f"Invalid approver role: {v!r}")
+        return v
+
+    @field_validator("approver_email")
+    @classmethod
+    def validate_approver_email(cls, v: Optional[str]) -> Optional[str]:
+        if v is None or not v.strip():
+            return None
+        return _validate_email(v)
 
 
 class CommitteeApprover(BaseModel):

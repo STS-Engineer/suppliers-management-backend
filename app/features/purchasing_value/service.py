@@ -855,12 +855,26 @@ class PurchasingValueService:
                         await self._create_project(opp, payload.project_manager)
 
             elif current_phase == "Phase 1":
-                opp.phase_status = "Phase 2"
-                opp.status = "Working on it"
-                if payload.comments:
-                    opp.comments = (
-                        opp.comments or ""
-                    ) + f"\n[Phase 1 Go] {payload.comments}"
+                if opp.opportunity_type == "Negotiation":
+                    # Negotiation skips Phase 2 (no deployment step) — jump
+                    # straight to Phase 3 and perform its side effect (the
+                    # financial line) inline, automatically, with no separate
+                    # Phase 3 approval request.
+                    opp.phase_status = "Phase 3"
+                    opp.status = "Working on it"
+                    if not opp.financial_lines:
+                        await self._create_financial_line(opp)
+                    if payload.comments:
+                        opp.comments = (
+                            opp.comments or ""
+                        ) + f"\n[Phase 1 Go — Negotiation, skips Phase 2] {payload.comments}"
+                else:
+                    opp.phase_status = "Phase 2"
+                    opp.status = "Working on it"
+                    if payload.comments:
+                        opp.comments = (
+                            opp.comments or ""
+                        ) + f"\n[Phase 1 Go] {payload.comments}"
 
             elif current_phase == "Phase 2":
                 opp.phase_status = "Phase 3"

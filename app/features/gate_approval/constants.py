@@ -13,6 +13,10 @@ ROLE_ENGINEERING = "Engineering"
 ROLE_FINANCE = "Finance"
 ROLE_OPERATIONS = "Operations"
 ROLE_SUPPLY_CHAIN = "Supply Chain"
+# Business role for the Negotiation single-approver flow — distinct from the
+# unrelated `vp_conversion` access_profile string used elsewhere for STP-edit
+# permissions; this one only ever appears as a CommitteeApprover.role value.
+ROLE_VP_CONVERSION = "VP Conversion"
 
 ALL_ROLES = (
     ROLE_PURCHASING_DIRECTOR,
@@ -27,7 +31,13 @@ ALL_ROLES = (
     ROLE_FINANCE,
     ROLE_OPERATIONS,
     ROLE_SUPPLY_CHAIN,
+    ROLE_VP_CONVERSION,
 )
+
+# Negotiation opportunities skip the Plant Manager / Project Leader / committee
+# tier entirely — a single approver, either Purchasing Director or VP
+# Conversion, decides the gate (see gate_approval/service.py).
+NEGOTIATION_APPROVER_ROLES = (ROLE_PURCHASING_DIRECTOR, ROLE_VP_CONVERSION)
 
 COMMITTEE_LEVELS = ("Light", "Intermediate", "Full")
 

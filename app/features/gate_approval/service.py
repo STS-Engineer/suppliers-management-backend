@@ -19,6 +19,7 @@ from app.features.auth.models import AccessIdentity
 from app.features.gate_approval import schemas
 from app.features.gate_approval.constants import (
     COMMITTEE_ELIGIBLE_PHASES,
+    NEGOTIATION_APPROVER_ROLES,
     ROLE_PLANT_MANAGER,
     mandatory_roles_for_phase,
 )
@@ -102,6 +103,7 @@ class GateApprovalService:
     ) -> GateApprovalRequest:
         pv_svc = PurchasingValueService(self.db)
         opp = await pv_svc.get_opportunity(opportunity_id)
+        is_negotiation = opp.opportunity_type == "Negotiation"
 
         if opp.status == "Cancelled":
             raise AppException(400, "Cannot request approval for a cancelled opportunity.", "OPP_CANCELLED")
@@ -170,6 +172,12 @@ class GateApprovalService:
 
         # Build snapshot using PurchasingValueService helper
         snapshot = pv_svc._build_opportunity_snapshot(opp)
+        # Negotiation: the Plant Manager is only notified once the gate is
+        # actually approved (Go) — not when the request is sent. Stash the
+        # email on the snapshot now (no vote row exists for them to read it
+        # from later) and fire the FYI email from _check_consensus on Go.
+        if is_negotiation and payload.plant_manager_email:
+            snapshot["_negotiation_plant_manager_email"] = payload.plant_manager_email
 
         req = GateApprovalRequest(
             opportunity_id=opportunity_id,
@@ -195,26 +203,45 @@ class GateApprovalService:
         email_svc = get_email_service()
         expires_at = now + timedelta(hours=TOKEN_TTL_HOURS)
 
-        # All approvers: plant manager first (flagged), then purchasing managers.
-        # Deduplicate by email so a person listed in both roles gets one vote row
-        # (as plant manager, which carries the PM designation responsibility).
-        seen_emails: set[str] = set()
-        all_approvers: list[tuple[str, bool]] = []
-        for email, is_pm in [
-            (payload.plant_manager_email, True),
-            *[(e, False) for e in payload.purchasing_manager_emails if e],
-        ]:
-            if email and email not in seen_emails:
-                seen_emails.add(email)
-                all_approvers.append((email, is_pm))
+        approver_roles: dict[str, str] = {}
 
-        if len(all_approvers) < 2:
-            raise AppException(
-                400,
-                "Gate approval requires at least 2 voters (Plant Manager + at least one Purchasing Manager). "
-                "A single approver cannot satisfy the segregation-of-duties requirement.",
-                "INSUFFICIENT_APPROVERS",
-            )
+        if is_negotiation:
+            # Negotiation: a single approver decides — either Purchasing
+            # Director or VP Conversion. The Plant Manager, if given, is
+            # notified by email only (see below) and never gets a vote.
+            if not payload.approver_role or payload.approver_role not in NEGOTIATION_APPROVER_ROLES:
+                raise AppException(
+                    422,
+                    "Select an approver role (Purchasing Director or VP Conversion).",
+                    "APPROVER_REQUIRED",
+                )
+            if not payload.approver_email:
+                raise AppException(422, "Approver email is required.", "APPROVER_REQUIRED")
+            all_approvers = [(payload.approver_email, False)]
+            approver_roles[payload.approver_email] = payload.approver_role
+        else:
+            # All approvers: plant manager first (flagged), then purchasing managers.
+            # Deduplicate by email so a person listed in both roles gets one vote row
+            # (as plant manager, which carries the PM designation responsibility).
+            if not payload.plant_manager_email:
+                raise AppException(422, "Plant Manager email is required.", "PLANT_MANAGER_REQUIRED")
+            seen_emails: set[str] = set()
+            all_approvers = []
+            for email, is_pm in [
+                (payload.plant_manager_email, True),
+                *[(e, False) for e in payload.purchasing_manager_emails if e],
+            ]:
+                if email and email not in seen_emails:
+                    seen_emails.add(email)
+                    all_approvers.append((email, is_pm))
+
+            if len(all_approvers) < 2:
+                raise AppException(
+                    400,
+                    "Gate approval requires at least 2 voters (Plant Manager + at least one Purchasing Manager). "
+                    "A single approver cannot satisfy the segregation-of-duties requirement.",
+                    "INSUFFICIENT_APPROVERS",
+                )
 
         # Phase 0 gate: attach the STP dossier (phase 0) for Sourcing / Technical
         # Productivity opportunities — Negotiation/Cash have no STP format.
@@ -233,6 +260,7 @@ class GateApprovalService:
                     access_token=token,
                     token_expires_at=expires_at,
                     is_plant_manager=is_pm,
+                    approver_role=approver_roles.get(email),
                     created_at=now,
                     created_by=requested_by,
                 )
@@ -243,7 +271,11 @@ class GateApprovalService:
                 # manager who approves later phases (1-3) is not asked to redesignate
                 # a PM that opp.project_owner already holds.
                 pm_note_applies = is_pm and opp.phase_status in ("Assigned", "Phase 0")
-                html = self._build_email_html(opp, req, link, payload.message, is_plant_manager=pm_note_applies)
+                html = self._build_email_html(
+                    opp, req, link, payload.message,
+                    is_plant_manager=pm_note_applies,
+                    approver_role=approver_roles.get(email),
+                )
                 try:
                     email_svc.send_sync(
                         subject=f"[Action Required] Gate Approval — {opp.opportunity_name} ({opp.phase_status})",
@@ -306,30 +338,51 @@ class GateApprovalService:
                 "INVALID_PHASE_FOR_APPROVAL",
             )
 
-        # Committee level is chosen once (expected at Phase 1) and locked for the
-        # rest of the opportunity's life — later phases cannot silently switch tier.
-        if opp.committee_level:
-            tier = opp.committee_level
-        else:
-            if not payload.committee_level:
+        is_negotiation = opp.opportunity_type == "Negotiation"
+        tier: Optional[str] = None
+
+        if is_negotiation:
+            # No committee tier for Negotiation — a single approver (Purchasing
+            # Director or VP Conversion) decides every phase. Other roles
+            # submitted (e.g. leftover Plant Manager/Project Leader fields) are
+            # simply ignored — they never get a vote.
+            chosen = [
+                a for a in payload.approvers
+                if a.role in NEGOTIATION_APPROVER_ROLES and a.email
+            ]
+            if not chosen:
                 raise AppException(
                     422,
-                    "A committee level (Light, Intermediate or Full) must be selected "
-                    "for this opportunity's first sourcing committee gate.",
-                    "COMMITTEE_LEVEL_REQUIRED",
+                    f"{opp.phase_status} requires an approver: Purchasing Director or VP Conversion.",
+                    "MISSING_MANDATORY_APPROVER",
                 )
-            tier = payload.committee_level
-            opp.committee_level = tier
+            approvers_to_notify = chosen[:1]
+        else:
+            # Committee level is chosen once (expected at Phase 1) and locked for the
+            # rest of the opportunity's life — later phases cannot silently switch tier.
+            if opp.committee_level:
+                tier = opp.committee_level
+            else:
+                if not payload.committee_level:
+                    raise AppException(
+                        422,
+                        "A committee level (Light, Intermediate or Full) must be selected "
+                        "for this opportunity's first sourcing committee gate.",
+                        "COMMITTEE_LEVEL_REQUIRED",
+                    )
+                tier = payload.committee_level
+                opp.committee_level = tier
 
-        mandatory_roles = mandatory_roles_for_phase(opp.phase_status, tier)
-        provided_roles = {a.role: a.email for a in payload.approvers}
-        missing_roles = [r for r in mandatory_roles if r not in provided_roles]
-        if missing_roles:
-            raise AppException(
-                422,
-                f"{opp.phase_status} requires an approver for: {', '.join(missing_roles)}.",
-                "MISSING_MANDATORY_APPROVER",
-            )
+            mandatory_roles = mandatory_roles_for_phase(opp.phase_status, tier)
+            provided_roles = {a.role: a.email for a in payload.approvers}
+            missing_roles = [r for r in mandatory_roles if r not in provided_roles]
+            if missing_roles:
+                raise AppException(
+                    422,
+                    f"{opp.phase_status} requires an approver for: {', '.join(missing_roles)}.",
+                    "MISSING_MANDATORY_APPROVER",
+                )
+            approvers_to_notify = payload.approvers
 
         now = datetime.utcnow()
 
@@ -387,8 +440,9 @@ class GateApprovalService:
         # One vote row per role, even if the same email covers several roles
         # (e.g. a single tester approving as both Purchasing Director and CEO) —
         # each role gets its own token/link and casts its own decision.
+        subject_suffix = f", {tier} Committee)" if tier else ")"
         with _pdf_attachment(attach_bytes, attach_prefix, opp.opportunity_name) as (attach_path, attach_filename):
-            for approver in payload.approvers:
+            for approver in approvers_to_notify:
                 if not approver.email:
                     continue
 
@@ -412,7 +466,7 @@ class GateApprovalService:
                 )
                 try:
                     email_svc.send_sync(
-                        subject=f"[Action Required] Gate Approval — {opp.opportunity_name} ({opp.phase_status}, {tier} Committee)",
+                        subject=f"[Action Required] Gate Approval — {opp.opportunity_name} ({opp.phase_status}{subject_suffix}",
                         recipients=[approver.email],
                         body_html=html,
                         attachment_path=attach_path,
@@ -424,7 +478,9 @@ class GateApprovalService:
                     approver.email,
                     "gate_approval_requested",
                     f"Gate approval requested — {opp.opportunity_name}",
-                    f"Your role: {approver.role} · {tier} Committee · {opp.phase_status} gate.",
+                    f"Your role: {approver.role}"
+                    + (f" · {tier} Committee" if tier else "")
+                    + f" · {opp.phase_status} gate.",
                     link,
                 )
 
@@ -764,6 +820,20 @@ class GateApprovalService:
                 f"/purchasing-value?opp={req.opportunity_id}",
             )
 
+        # Negotiation: the Plant Manager (stashed on the snapshot at request
+        # time — see create_approval_request) is notified only now, after the
+        # gate is approved — not when the request was sent, and never on
+        # No Go/Review. Best-effort, same as the PM email above.
+        pm_info_email = snap.get("_negotiation_plant_manager_email")
+        if consensus == "Go" and pm_info_email:
+            self._send_info_email(
+                email=pm_info_email,
+                opp_name=snap.get("opportunity_name") or "Opportunity",
+                opp_type=snap.get("opportunity_type") or "",
+                phase=req.phase_from or "Phase 0",
+                message=req.message,
+            )
+
     # ------------------------------------------------------------------
     # Email HTML builder
     # ------------------------------------------------------------------
@@ -843,6 +913,42 @@ class GateApprovalService:
     This link expires in 72 hours and can be used only once.
   </p>
 </div>"""
+
+    # ------------------------------------------------------------------
+    # Plain FYI email — no vote, no token (Negotiation Plant Manager notice,
+    # sent only once the gate is approved — see _check_consensus)
+    # ------------------------------------------------------------------
+    def _send_info_email(
+        self,
+        email: str,
+        opp_name: str,
+        opp_type: str,
+        phase: str,
+        message: Optional[str],
+    ) -> None:
+        msg_block = (
+            f"<p style='background:#f1f5f9;border-radius:8px;padding:10px 14px;"
+            f"font-size:13px;color:#334155;margin:16px 0'>{message}</p>"
+            if message else ""
+        )
+        html = f"""
+<div style="font-family:Inter,Arial,sans-serif;max-width:560px;margin:0 auto;padding:24px">
+  <h2 style="color:#1e40af;font-size:18px;margin-bottom:4px">Gate Approved — FYI</h2>
+  <p style="color:#64748b;font-size:13px;margin-top:0">
+    <strong>{opp_name}</strong> ({opp_type}, {phase}) has been approved.
+    This is an informational notice only — no action or vote was required
+    from you.
+  </p>
+  {msg_block}
+</div>"""
+        try:
+            get_email_service().send_sync(
+                subject=f"[FYI] Gate approved — {opp_name}",
+                recipients=[email],
+                body_html=html,
+            )
+        except Exception:
+            pass  # Non-blocking
 
     # ------------------------------------------------------------------
     # Notify designated Project Manager (Phase 0 approval)
