@@ -543,8 +543,11 @@ class OpportunityUpdateRequest(BaseModel):
 
 
 class STPRevisionRequestPayload(BaseModel):
-    """Buyer submits proposed STP price/volume changes for Director approval."""
-    director_email: str = Field(..., description="Email of the Purchasing Director who will approve")
+    """Buyer submits proposed STP price/volume changes for Director approval.
+
+    Approvers are resolved server-side from users with role purchasing_director
+    or vp_conversion — not chosen by the requester.
+    """
     note: str = Field(..., min_length=1, description="Justification — mandatory for audit trail")
     requested_by: Optional[str] = None
     # Proposed STP baseline fields (any subset — only provided fields are changed)
@@ -824,6 +827,11 @@ class BudgetDecision(BaseModel):
     opportunity_id: int
     budget_status: Literal["Empty", "Opportunity", "Budgeted"] = Field(
         ..., description="Empty | Opportunity | Budgeted"
+    )
+    is_additional: Optional[bool] = Field(
+        None,
+        description="Explicitly move this row in/out of the Additional bucket, "
+        "independent of budget_status. None = leave unchanged.",
     )
     delta_reason: Optional[List[str]] = Field(
         None,

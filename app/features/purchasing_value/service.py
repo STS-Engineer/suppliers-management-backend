@@ -15,6 +15,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import PANEL_ACTIVE_DECISIONS
 from app.core.exceptions import AppException
+from app.features.auth.models import AccessIdentity
+from app.features.notifications.models import Notification
 from app.db.models import (
     FinancialLine,
     MonthlyFinancial,
@@ -189,7 +191,8 @@ class PurchasingValueService:
     # ------------------------------------------------------------------
 
     async def update_opportunity(
-        self, opportunity_id: int, payload: OpportunityUpdateRequest
+        self, opportunity_id: int, payload: OpportunityUpdateRequest,
+        actor_role: Optional[str] = None,
     ) -> Opportunity:
         opp = await self.get_opportunity(opportunity_id)
 
@@ -238,14 +241,28 @@ class PurchasingValueService:
                 "BASELINE_LOCKED_ACTUALS",
             )
 
-        # STP revision approval gate — Phase 2/3 requires Director sign-off before
-        # baseline figures can change.  Current values remain active while the request
-        # is pending; the buyer must use POST /request-stp-revision instead.
+        # ── STP revision approval gate (Phase 2/3) ──────────────────────────
+        # Role split, enforced here AND mirrored on the frontend (stpReadOnly /
+        # canEditStpDirectly in PurchasingValuePage.tsx):
+        #   - purchasing_director / vp_conversion: `actor_role` bypasses the gate
+        #     below entirely — they edit price/quantity/bonus fields directly via
+        #     this same endpoint (normal Save Changes), no approval workflow,
+        #     because they ARE the approvers.
+        #   - every other non-viewer role: baseline is read-only here; any
+        #     attempted change to a baseline field raises STP_REQUIRES_APPROVAL,
+        #     and the caller must use POST /request-stp-revision instead, which
+        #     notifies every purchasing_director/vp_conversion by email + in-app
+        #     Notification (see request_stp_revision) for one of them to decide
+        #     via POST /decide-stp-revision.
+        # This only applies to Phase 2/3 — Phase 0/1 stays freely editable for
+        # everyone (checked implicitly: baseline_fields are locked only from
+        # Phase 2 onward, see the phase check below).
         if (
             opp.opportunity_type in ("Sourcing", "Technical Productivity")
             and opp.phase_status in ("Phase 2", "Phase 3")
             and not line_has_actuals   # Phase 3 with actuals already caught above
             and _baseline_change_attempted()
+            and actor_role not in ("purchasing_director", "vp_conversion")
         ):
             raise AppException(
                 422,
@@ -253,6 +270,18 @@ class PurchasingValueService:
                 "Use 'Request Revision' to submit the proposed values for sign-off — "
                 "current figures remain active until the Director approves.",
                 "STP_REQUIRES_APPROVAL",
+            )
+
+        # Even a Director/VP can't silently overwrite the baseline while someone
+        # else's revision request is awaiting their own decision — they must
+        # explicitly Approve/Reject it via decide_stp_revision first, so the
+        # requester's proposal + audit trail isn't bypassed without a record.
+        if opp.pending_stp_revision and _baseline_change_attempted():
+            raise AppException(
+                422,
+                "A revision request is already pending for this opportunity. "
+                "Approve or reject it before editing the baseline directly.",
+                "REVISION_ALREADY_PENDING",
             )
 
         # The STP is locked while it is awaiting a gate decision (submitted to a PM /
@@ -1589,32 +1618,57 @@ class PurchasingValueService:
         existing = {by.fiscal_year: by for by in existing_rows}
         seen = set()
 
-        for p in portions:
+        # Tracks the effective budget_status of every row processed so far in this
+        # sync (both pre-existing and newly created), so a later fiscal year can see
+        # whether an earlier one is already committed. Seeded from locked rows that
+        # aren't part of `portions` (shouldn't normally happen, but stay defensive).
+        status_by_fy: dict[int, str] = {
+            fy: row.budget_status for fy, row in existing.items()
+        }
+
+        for p in sorted(portions, key=lambda p: p["fiscal_year"]):
             fy = p["fiscal_year"]
             seen.add(fy)
             amt = Decimal(str(p["amount"]))
+            is_add = fy in closed_fys
+            # Once the opportunity has been committed ("Budgeted") for an earlier
+            # fiscal year, a later, still-open year it spills into defaults to
+            # "Budgeted" too — it follows the same commitment automatically instead
+            # of sitting as an undecided "Opportunity" until its own Create-Budget
+            # round. It stays unlocked, so it can still be freely changed until that
+            # year's own budget is closed. This never applies to an "additional"
+            # (already-closed) year — those always need an explicit Finance decision.
+            default_status = (
+                "Budgeted"
+                if not is_add
+                and any(
+                    f < fy and s == "Budgeted" for f, s in status_by_fy.items()
+                )
+                else "Opportunity"
+            )
             row = existing.get(fy)
             if row is not None:
                 row.applicable_amount = amt
                 row.portion_kind = p["kind"]
                 row.suggested_status = status
                 # Preserve a manual Create-Budget decision (locked); otherwise the row
-                # defaults to "Opportunity" (a forecast gain in the pipeline) until the
-                # director commits it to "Budgeted" or sets it to "Empty".
+                # defaults per `default_status` above until the director commits it
+                # to "Budgeted" or sets it to "Empty".
                 if row.status_locked_at is None:
-                    row.budget_status = "Opportunity"
+                    row.budget_status = default_status
+                status_by_fy[fy] = row.budget_status
             else:
-                self.db.add(
-                    OpportunityBudgetYear(
-                        opportunity_id=opp.opportunity_id,
-                        fiscal_year=fy,
-                        applicable_amount=amt,
-                        portion_kind=p["kind"],
-                        suggested_status=status,
-                        budget_status="Opportunity",
-                        is_additional=fy in closed_fys,
-                    )
+                new_row = OpportunityBudgetYear(
+                    opportunity_id=opp.opportunity_id,
+                    fiscal_year=fy,
+                    applicable_amount=amt,
+                    portion_kind=p["kind"],
+                    suggested_status=status,
+                    budget_status=default_status,
+                    is_additional=is_add,
                 )
+                self.db.add(new_row)
+                status_by_fy[fy] = default_status
 
         # Stale rows (duration shrank / dates cleared) — drop only if not locked.
         # A director-committed row (status_locked_at set) must never be silently
@@ -1941,6 +1995,15 @@ class PurchasingValueService:
             for d in (decisions or [])
             if d.get("budget_status") in valid
         }
+        # Explicit manual override of the Additional bucket, independent of
+        # budget_status — lets a director flag/unflag "Additional" even on an
+        # opportunity in a still-open fiscal year, not just automatically at
+        # closure. None entries (key absent or null) mean "leave unchanged".
+        is_additional_by_opp = {
+            d["opportunity_id"]: d["is_additional"]
+            for d in (decisions or [])
+            if d.get("opportunity_id") is not None and d.get("is_additional") is not None
+        }
         # Preserve existing delta reasons unless the assign payload explicitly
         # includes a replacement. Create Budget usually updates status only.
         delta_reason_by_opp = {
@@ -1983,7 +2046,13 @@ class PurchasingValueService:
             new_status = by_opp.get(opp.opportunity_id)
             if new_status is None:
                 continue
-            if year_is_closed and not r.is_additional:
+            incoming_is_additional = is_additional_by_opp.get(opp.opportunity_id)
+            effective_is_additional = (
+                incoming_is_additional
+                if incoming_is_additional is not None
+                else r.is_additional
+            )
+            if year_is_closed and not effective_is_additional:
                 raise AppException(
                     409,
                     f"Fiscal year {fiscal_year} is closed — baseline budget rows "
@@ -1992,6 +2061,8 @@ class PurchasingValueService:
                     "BUDGET_YEAR_CLOSED",
                 )
             r.budget_status = new_status
+            if incoming_is_additional is not None:
+                r.is_additional = incoming_is_additional
             r.status_locked_at = now
             r.status_locked_by = decided_by
             if opp.opportunity_id in delta_reason_by_opp:
@@ -2376,6 +2447,12 @@ class PurchasingValueService:
 
     # ------------------------------------------------------------------
     # STP revision approval (Phase 2 / Phase 3)
+    #
+    # DISABLED: request_stp_revision is currently unreachable — its router
+    # endpoint (POST /opportunities/{id}/request-stp-revision) is commented out
+    # in purchasing_value/router.py, so no new revision request (and therefore
+    # no email/notification fan-out) can be created. decide_stp_revision is
+    # kept live to resolve any request that was already pending beforehand.
     # ------------------------------------------------------------------
 
     _STP_BASELINE_FIELDS = (
@@ -2393,9 +2470,27 @@ class PurchasingValueService:
     ) -> Opportunity:
         """Buyer submits proposed STP price/volume changes for Purchasing Director approval.
 
-        Current values remain active.  Proposed values are stored in
-        `pending_stp_revision` JSONB; a preview of the resulting savings is computed
-        and included so the Director can assess the impact before deciding.
+        Who calls this: any non-viewer role (purchasing_manager, supplier_owner,
+        global_purchaser, local_purchaser) — i.e. everyone EXCEPT purchasing_director
+        and vp_conversion, who edit the STP baseline directly instead (see the
+        STP_REQUIRES_APPROVAL gate in `update_opportunity`) since they ARE the
+        approvers and don't need to ask themselves for permission.
+
+        Only callable in Phase 2/3 (checked below) — Phase 0/1 baseline is freely
+        editable by everyone, no revision workflow needed there.
+
+        Current values remain active — nothing changes on the opportunity yet.
+        Proposed values are stored in `pending_stp_revision` JSONB (only the fields
+        the buyer actually filled in); a savings-impact preview is computed and
+        included so the Director/VP can assess it before deciding.
+
+        Notification fan-out (both happen here, not deferred): every ACTIVE
+        AccessIdentity currently holding purchasing_director or vp_conversion is
+        resolved by role (not a free-text email the requester types in) and gets
+        BOTH an email (`_build_stp_revision_request_email`) AND an in-app
+        Notification (`stp_revision_request`) linking back to this opportunity.
+        Approvers added/removed after this point are not retroactively notified —
+        the fan-out is a snapshot taken at request time.
         """
         opp = await self.get_opportunity(opportunity_id)
 
@@ -2445,12 +2540,21 @@ class PurchasingValueService:
                 "STP_NEGATIVE_SAVING",
             )
 
+        # Approvers are resolved by role, not chosen by the requester — anyone
+        # holding purchasing_director or vp_conversion at request time is notified.
+        approvers_stmt = select(AccessIdentity).where(
+            AccessIdentity.access_profile.in_(["purchasing_director", "vp_conversion"]),
+            AccessIdentity.is_active.is_(True),
+        )
+        approvers = list((await self.db.execute(approvers_stmt)).scalars().all())
+        approver_emails = [a.email for a in approvers if a.email]
+
         now = datetime.utcnow()
         per_year = preview_fin.get("saving_per_year") or [None, None, None, None]
         opp.pending_stp_revision = {
             "requested_by":    payload.requested_by,
             "requested_at":    now.isoformat(),
-            "director_email":  payload.director_email,
+            "director_emails": approver_emails,
             "note":            payload.note,
             "proposed_fields": proposed,
             "current_snapshot": {
@@ -2468,16 +2572,26 @@ class PurchasingValueService:
         opp.updated_at = now
         opp.updated_by = payload.requested_by
 
-        # Notify Director by email
-        try:
-            body = _build_stp_revision_request_email(opp, payload, opp.pending_stp_revision["computed_preview"])
-            await send_email(
-                subject=f"[STP Revision Approval] {opp.opportunity_name}",
-                recipients=[payload.director_email],
-                body_html=body,
-            )
-        except Exception as exc:
-            logger.warning("STP revision request email failed for opp %s: %s", opportunity_id, exc)
+        # Notify Directors/VP Conversion by email + in-app notification
+        if approver_emails:
+            try:
+                body = _build_stp_revision_request_email(opp, payload, opp.pending_stp_revision["computed_preview"])
+                await send_email(
+                    subject=f"[STP Revision Approval] {opp.opportunity_name}",
+                    recipients=approver_emails,
+                    body_html=body,
+                )
+            except Exception as exc:
+                logger.warning("STP revision request email failed for opp %s: %s", opportunity_id, exc)
+
+        for identity in approvers:
+            self.db.add(Notification(
+                recipient_id=identity.id_identity,
+                notification_type="stp_revision_request",
+                title=f"STP revision to approve: {opp.opportunity_name}",
+                body=f"{payload.requested_by or 'A buyer'} requested a change to the STP baseline. Justification: {payload.note}",
+                action_url=f"/purchasing-value?opp={opportunity_id}",
+            ))
 
         await self.db.flush()
         await self.db.refresh(opp, ["projects", "financial_lines", "opp_documents", "budget_years", "plant"])
@@ -2490,10 +2604,17 @@ class PurchasingValueService:
     ) -> Opportunity:
         """Purchasing Director approves or rejects a pending STP revision request.
 
+        Who calls this: ONLY purchasing_director / vp_conversion — enforced at the
+        router (`_PRIVILEGED` in purchasing_value/router.py) and mirrored on the
+        frontend (Approve/Reject button + modal only rendered for these roles).
+        Any other role hitting this endpoint gets a 403 before this method runs.
+
         Approved  → proposed values applied, STP financials recomputed, monthly
                     profile rebuilt (if financial line active and no actuals yet).
         Rejected  → pending revision discarded, current values unchanged.
-        Both      → audit entry appended to opp.comments, requester notified by email.
+        Both      → audit entry appended to opp.comments; the ORIGINAL requester
+                    (not the approvers) gets an email + in-app Notification of
+                    the decision, symmetric with the fan-out in request_stp_revision.
         """
         if payload.decision not in ("Approved", "Rejected"):
             raise AppException(422, "Decision must be 'Approved' or 'Rejected'.", "INVALID_DECISION")
@@ -2580,6 +2701,22 @@ class PurchasingValueService:
                 )
             except Exception as exc:
                 logger.warning("STP revision decision email failed for opp %s: %s", opportunity_id, exc)
+
+            try:
+                identity_result = await self.db.execute(
+                    select(AccessIdentity).where(AccessIdentity.email.ilike(requester_email))
+                )
+                identity = identity_result.scalar_one_or_none()
+                if identity:
+                    self.db.add(Notification(
+                        recipient_id=identity.id_identity,
+                        notification_type="stp_revision_decision",
+                        title=f"STP revision {payload.decision.lower()}: {opp.opportunity_name}",
+                        body=f"Your requested STP revision was {payload.decision.lower()} by {payload.decided_by or 'the Director'}.",
+                        action_url=f"/purchasing-value?opp={opportunity_id}",
+                    ))
+            except Exception:
+                pass  # Non-blocking — email notification already covers delivery
 
         await self.db.flush()
         await self.db.refresh(opp, ["projects", "financial_lines", "opp_documents", "budget_years", "plant"])

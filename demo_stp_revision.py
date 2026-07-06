@@ -352,7 +352,6 @@ def main():
         )
 
         revision_payload = {
-            "director_email": DIRECTOR_EMAIL,
             "note": (
                 "Suite à l'appel d'offres Q3-2025, le fournisseur Renatech propose "
                 f"un prix de {REVISED_PRICE} €/pièce (vs {PROPOSED_PRICE} € actuellement). "
@@ -379,7 +378,7 @@ def main():
             [
                 "requested_by",
                 "requested_at",
-                "director_email",
+                "director_emails",
                 "note",
             ],
         )
@@ -514,7 +513,6 @@ def main():
             f"/api/v1/purchasing-value/opportunities/{opp2_id}/request-stp-revision",
             label="POST /request-stp-revision (opp B)",
             json={
-                "director_email": DIRECTOR_EMAIL,
                 "note": "Proposition fournisseur — à valider.",
                 "proposed_price": REVISED_PRICE,
             },

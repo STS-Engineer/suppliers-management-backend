@@ -128,7 +128,9 @@ async def update_opportunity(
     _require(current_user, _NON_VIEWER)
     try:
         svc = PurchasingValueService(db)
-        await svc.update_opportunity(opportunity_id, payload)
+        await svc.update_opportunity(
+            opportunity_id, payload, actor_role=current_user.get("access_profile")
+        )
         await db.commit()
         # Re-fetch after commit — avoids stale session cache (R9 monthly rebuilds, etc.)
         fresh_opp = await svc.get_opportunity(opportunity_id)
@@ -141,27 +143,39 @@ async def update_opportunity(
         raise
 
 
-@router.post("/opportunities/{opportunity_id}/request-stp-revision", response_model=dict)
-async def request_stp_revision(
-    opportunity_id: int,
-    payload: schemas.STPRevisionRequestPayload,
-    db: AsyncSession = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
-):
-    """Buyer submits proposed STP price/volume changes for Director approval (Phase 2/3)."""
-    _require(current_user, _NON_VIEWER)
-    try:
-        svc = PurchasingValueService(db)
-        await svc.request_stp_revision(opportunity_id, payload)
-        await db.commit()
-        fresh = await svc.get_opportunity(opportunity_id)
-        return {"status": "success", "data": opportunity_to_response(fresh)}
-    except AppException:
-        await db.rollback()
-        raise
-    except Exception:
-        await db.rollback()
-        raise
+# DISABLED — Request Revision creation is turned off. purchasing_director /
+# vp_conversion edit the STP baseline directly in Phase 2/3 (actor_role bypass
+# in PurchasingValueService.update_opportunity); other roles get read-only
+# fields with no way to submit a change. decide-stp-revision below is kept
+# functional so any revision that was already pending before this was disabled
+# can still be resolved. Uncomment to re-enable the request workflow.
+# @router.post("/opportunities/{opportunity_id}/request-stp-revision", response_model=dict)
+# async def request_stp_revision(
+#     opportunity_id: int,
+#     payload: schemas.STPRevisionRequestPayload,
+#     db: AsyncSession = Depends(get_db),
+#     current_user: dict = Depends(get_current_user),
+# ):
+#     """Buyer submits proposed STP price/volume changes for Director approval (Phase 2/3).
+#
+#     Open to any _NON_VIEWER role. purchasing_director/vp_conversion normally
+#     don't need this — they edit the baseline directly via PUT /opportunities/{id}
+#     (see the actor_role bypass in PurchasingValueService.update_opportunity) since
+#     they're the ones who'd approve their own request anyway.
+#     """
+#     _require(current_user, _NON_VIEWER)
+#     try:
+#         svc = PurchasingValueService(db)
+#         await svc.request_stp_revision(opportunity_id, payload)
+#         await db.commit()
+#         fresh = await svc.get_opportunity(opportunity_id)
+#         return {"status": "success", "data": opportunity_to_response(fresh)}
+#     except AppException:
+#         await db.rollback()
+#         raise
+#     except Exception:
+#         await db.rollback()
+#         raise
 
 
 @router.post("/opportunities/{opportunity_id}/decide-stp-revision", response_model=dict)
@@ -171,7 +185,12 @@ async def decide_stp_revision(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
-    """Purchasing Director approves or rejects a pending STP revision request."""
+    """Purchasing Director approves or rejects a pending STP revision request.
+
+    Restricted to _PRIVILEGED (purchasing_director, vp_conversion) — matches the
+    roles that receive the request email/notification in request_stp_revision,
+    and the frontend which only renders the Approve/Reject button for them.
+    """
     _require(current_user, _PRIVILEGED)
     try:
         svc = PurchasingValueService(db)
