@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import Response
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
@@ -748,6 +748,36 @@ async def get_suppliers_by_plant(
     return {
         "status": "success",
         "data": [schemas.SupplierOption(**u) for u in units],
+    }
+
+
+@router.get("/negotiation-approvers", response_model=dict)
+async def get_negotiation_approvers(
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """List active Purchasing Director / VP Conversion accounts for the
+    Negotiation gate approver picker (single approver, either role)."""
+    rows = await db.execute(
+        text("""
+            SELECT id_identity, full_name, email, access_profile
+            FROM access_identity
+            WHERE is_active = TRUE
+              AND access_profile IN ('purchasing_director', 'vp_conversion')
+            ORDER BY access_profile, full_name
+        """)
+    )
+    return {
+        "status": "success",
+        "data": [
+            {
+                "id_identity": r.id_identity,
+                "full_name": r.full_name,
+                "email": r.email,
+                "access_profile": r.access_profile,
+            }
+            for r in rows.fetchall()
+        ],
     }
 
 
