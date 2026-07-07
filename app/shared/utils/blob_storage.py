@@ -2,7 +2,7 @@ import os
 import logging
 from datetime import datetime
 from typing import Optional
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlparse, urlunparse, unquote
 from fastapi import UploadFile, HTTPException
 from azure.storage.blob import BlobClient, BlobServiceClient, ContentSettings
 from azure.core.exceptions import AzureError
@@ -50,7 +50,11 @@ def _extract_blob_name(file_url: str) -> Optional[str]:
     try:
         parsed = urlparse(file_url)
         parts = parsed.path.lstrip("/").split("/", 1)  # [container, blob_name]
-        return parts[1] if len(parts) == 2 else None
+        # urlparse().path keeps percent-encoding as-is (e.g. spaces, non-ASCII
+        # characters stay as %20/%E6...); decode it here, otherwise the Azure SDK
+        # re-encodes an already-encoded name when building the fresh SAS URL,
+        # producing a double-encoded (and therefore BlobNotFound) URL.
+        return unquote(parts[1]) if len(parts) == 2 else None
     except Exception:
         return None
 
