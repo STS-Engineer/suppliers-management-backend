@@ -607,6 +607,8 @@ class GateApprovalService:
             # Logistics
             incoterms_before=snap.get("incoterms_before"),
             incoterms_after=snap.get("incoterms_after"),
+            place_of_incoterms_before=snap.get("place_of_incoterms_before"),
+            place_of_incoterms_after=snap.get("place_of_incoterms_after"),
             top_days_before=_f("top_days_before"),
             top_days_after=_f("top_days_after"),
             # Planning

@@ -1900,6 +1900,8 @@ class Opportunity(GovernanceMixin, Base):
     # Incoterms, TOP, Transit — not stored anywhere else in the DB → stored here
     incoterms_before: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     incoterms_after: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    place_of_incoterms_before: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    place_of_incoterms_after: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
     top_days_before: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     top_days_after: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     transit_days_before: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)

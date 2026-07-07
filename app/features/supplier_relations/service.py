@@ -84,10 +84,15 @@ PLAN_STATUS_REQUEST_SENT = "Request sent"
 
 CRITERIA_VALUE_NORMALIZATION = {
     "top": {
-        # Old DB string → Monday canonical
-        "60 days end of month or +": "60 days eom or +",
-        # Typo/spacing variants
-        "60 days eom or+": "60 days eom or +",
+        # Canonical 29-tier table (see migration 20260707_0077) uses plain
+        # "X days end of month" labels, no "or +"/"eom" suffix. Map every
+        # historical spelling onto the matching canonical tier.
+        "60 days end of month or +": "60 days end of month",
+        "60 days eom or +": "60 days end of month",
+        "60 days eom or+": "60 days end of month",
+        "30 days end of month or +": "30 days end of month",
+        "45 days end of month or +": "45 days end of month",
+        "Cash in Advance": "Cash in advance",
     },
     "lta": {
         "3 years /+": "3 years/+",
@@ -150,8 +155,13 @@ CRITERIA_VALUE_NORMALIZATION = {
         "None": "None",
     },
     "prod_lia_ins": {
-        "2M€ or +": "2M$ or +",
-        "1M€ or +": "1M$ or +",
+        # Canonical tiers (see migration 20260707_0076): None / 500k€ or less /
+        # 1M€ or less / 1,5M€ or less / 1,5M€ or more. Map every historical
+        # spelling (old $ rows, old 2-tier € rows) onto the closest new tier.
+        "2M€ or +": "1,5M€ or more",
+        "1M€ or +": "1M€ or less",
+        "2M$ or +": "1,5M€ or more",
+        "1M$ or +": "1M€ or less",
     },
 }
 

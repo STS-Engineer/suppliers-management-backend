@@ -220,6 +220,8 @@ class VoteFormData(BaseModel):
     # Logistics
     incoterms_before: Optional[str] = None
     incoterms_after: Optional[str] = None
+    place_of_incoterms_before: Optional[str] = None
+    place_of_incoterms_after: Optional[str] = None
     top_days_before: Optional[float] = None
     top_days_after: Optional[float] = None
 

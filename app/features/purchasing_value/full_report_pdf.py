@@ -202,7 +202,8 @@ def generate_full_report_pdf(opp) -> bytes:
             ("Proposed Supplier", "—", opp.proposed_supplier_name or "—"),
             ("Country",           "—", opp.country_after or "—"),
             ("Incoterms",         opp.incoterms_before or "—", opp.incoterms_after or "—"),
-            ("Price (€/unit)",    _fmt(opp.current_price, decimals=4), _fmt(opp.proposed_price, decimals=4)),
+            ("Place of Incoterms", opp.place_of_incoterms_before or "—", opp.place_of_incoterms_after or "—"),
+            ("Delivered price, including taxes and freight (€/unit)", _fmt(opp.current_price, decimals=4), _fmt(opp.proposed_price, decimals=4)),
         ]
         header = [_hdr_cell("Field"), _hdr_cell("Before"), _hdr_cell("After")]
         data = [header] + [[_label_cell(lbl), _cell(b), _cell(a)] for lbl, b, a in rows]

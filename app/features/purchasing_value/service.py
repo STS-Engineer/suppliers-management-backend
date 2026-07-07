@@ -441,6 +441,8 @@ class PurchasingValueService:
         _set_if(opp, "proposed_price_n3", payload.proposed_price_n3)
         _set_if(opp, "incoterms_before", payload.incoterms_before)
         _set_if(opp, "incoterms_after", payload.incoterms_after)
+        _set_if(opp, "place_of_incoterms_before", payload.place_of_incoterms_before)
+        _set_if(opp, "place_of_incoterms_after", payload.place_of_incoterms_after)
         _set_if(opp, "top_days_before", payload.top_days_before)
         _set_if(opp, "top_days_after", payload.top_days_after)
         _set_if(opp, "transit_days_before", payload.transit_days_before)
@@ -694,6 +696,7 @@ class PurchasingValueService:
         "supplier_asked", "supplier_asked_result",
         # Logistics
         "incoterms_before", "incoterms_after",
+        "place_of_incoterms_before", "place_of_incoterms_after",
         "top_days_before", "top_days_after",
         "transit_days_before", "transit_days_after",
         "bonus_before", "bonus_after",
