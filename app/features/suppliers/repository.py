@@ -261,23 +261,4 @@ class SupplierRepository:
         await self.db.flush()
         return contact
     
-    async def update_contact(self, contact_id: int, data: dict) -> Optional[Contact]:
-        """Update a contact."""
-        contact = await self.find_contact_by_id(contact_id)
-        if contact:
-            for key, value in data.items():
-                if value is not None and hasattr(contact, key):
-                    setattr(contact, key, value)
-            await self.db.flush()
-        return contact
-        
-    async def delete_contact(self, contact_id: int) -> bool:
-        """Delete a contact."""
-        contact = await self.find_contact_by_id(contact_id)
-        if contact:
-            await self.db.delete(contact)
-            await self.db.flush()
-            return True
-        return False
-
 

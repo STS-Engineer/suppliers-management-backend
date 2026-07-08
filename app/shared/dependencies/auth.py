@@ -35,17 +35,3 @@ async def get_current_user(
         )
 
     return payload
-
-
-async def get_current_user_optional(
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
-) -> Optional[dict]:
-    """Return authenticated user if token exists."""
-
-    if credentials is None:
-        return None
-
-    try:
-        return decode_token(credentials.credentials)
-    except Exception:
-        return None

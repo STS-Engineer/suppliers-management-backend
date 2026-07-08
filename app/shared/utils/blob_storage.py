@@ -239,65 +239,6 @@ def _validate_extension(filename: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-async def upload_car_document(
-    file: UploadFile,
-    car_id: int,
-    audit_ref: str = "",
-) -> dict:
-    """
-    Upload a document for a Corrective Action Report.
-
-    Blob path:  car/car_{car_id}_{audit_ref}_{timestamp}_{safe_filename}
-
-    Returns a dict with:
-        blob_name   – full blob path inside the container
-        file_url    – public/SAS URL to the blob
-        filename    – original filename (sanitised)
-        mimetype    – detected MIME type
-        size        – file size in bytes
-    """
-    return await _upload_file(
-        file=file,
-        folder="car",
-        prefix=f"car_{car_id}_{audit_ref or 'noref'}",
-    )
-
-
-async def upload_answer_document(
-    file: UploadFile,
-    answer_id: int,
-    audit_ref: str = "",
-) -> dict:
-    """
-    Upload a document for an Audit Answer.
-
-    Blob path:  answers/answer_{answer_id}_{audit_ref}_{timestamp}_{safe_filename}
-    """
-    return await _upload_file(
-        file=file,
-        folder="answers",
-        prefix=f"answer_{answer_id}_{audit_ref or 'noref'}",
-    )
-
-
-async def upload_misc_document(
-    file: UploadFile,
-    purpose: str = "draft",
-) -> dict:
-    """
-    Upload a document not yet tied to a final entity id.
-    Useful for draft evidence uploads from UI.
-    """
-    safe_purpose = (
-        "".join(ch for ch in purpose if ch.isalnum() or ch in ("_", "-")) or "misc"
-    )
-    return await _upload_file(
-        file=file,
-        folder="answers",
-        prefix=f"{safe_purpose}",
-    )
-
-
 async def upload_evaluation_document(
     file: UploadFile,
     relation_id: int,
@@ -361,25 +302,6 @@ async def upload_opportunity_document(
 async def delete_blob(blob_name: str) -> bool:
     """
     Delete a blob by its full path inside the container.
-    Returns True if deleted, False if not found.
-    """
-    try:
-        container = _get_container_client()
-        blob_client: BlobClient = container.get_blob_client(blob_name)
-        blob_client.delete_blob()
-        logger.info("Deleted blob: %s", blob_name)
-        return True
-    except AzureError as exc:
-        if "BlobNotFound" in str(exc) or "404" in str(exc):
-            logger.warning("Blob not found (already deleted?): %s", blob_name)
-            return False
-        logger.error("Error deleting blob %s: %s", blob_name, exc)
-        raise HTTPException(status_code=500, detail=f"Error deleting file: {exc}")
-
-
-def delete_blob_sync(blob_name: str) -> bool:
-    """
-    Synchronous variant for service layers that are not async.
     Returns True if deleted, False if not found.
     """
     try:

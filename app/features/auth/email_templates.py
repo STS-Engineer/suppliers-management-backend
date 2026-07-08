@@ -92,30 +92,3 @@ def build_rejection_email(full_name: str, reason: str | None) -> str:
 administrator directly.</p>
 """
     return _wrap(body)
-
-
-def build_new_request_email(
-    requester_name: str,
-    requester_email: str,
-    requested_role: str,
-) -> str:
-    body = f"""
-<p>Hello,</p>
-<p>A new account request has been submitted and requires your review.</p>
-<table style="border-collapse:collapse; width:100%; font-size:14px;">
-  <tr>
-    <td style="padding:8px 12px; background:#f4f6f8; font-weight:bold; width:35%;">Name</td>
-    <td style="padding:8px 12px;">{requester_name}</td>
-  </tr>
-  <tr>
-    <td style="padding:8px 12px; background:#f4f6f8; font-weight:bold;">Email</td>
-    <td style="padding:8px 12px;">{requester_email}</td>
-  </tr>
-  <tr>
-    <td style="padding:8px 12px; background:#f4f6f8; font-weight:bold;">Requested role</td>
-    <td style="padding:8px 12px;">{requested_role}</td>
-  </tr>
-</table>
-<p style="margin-top:20px;">Please log in to the application to approve or reject this request.</p>
-"""
-    return _wrap(body)

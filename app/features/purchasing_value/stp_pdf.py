@@ -74,10 +74,6 @@ def _yn(val: Optional[str]) -> str:
     return val if val else "—"
 
 
-def _header_row(text: str, cols: int = 3) -> list:
-    return [Paragraph(f"<b>{text}</b>", _styles()["hdr"]), *[""] * (cols - 1)]
-
-
 def _styles():
     ss = getSampleStyleSheet()
     return {

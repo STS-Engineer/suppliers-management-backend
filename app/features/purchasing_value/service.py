@@ -2403,32 +2403,6 @@ class PurchasingValueService:
         per_year = compute_stp_financials(opp).get("saving_per_year") or []
         return [float(w) for w in per_year if w is not None]
 
-    def _ideal_for_offset(
-        self,
-        offset: int,
-        windows: Optional[list],
-        annual: Decimal,
-        duration_months: int,
-        is_period_total: bool,
-    ) -> float:
-        """UNROUNDED expected saving for the month `offset` months after the savings
-        start (see _rounded_series for how these are rounded so they tie out).
-
-        - STP with per-year windows: each 12-month window runs at window/12, so the
-          monthly amount escalates year over year. Months past the last window → 0.
-        - Otherwise (flat): a per-year rate (annual/12, or /duration when <12), or a
-          period total with no window breakdown (period/duration).
-        """
-        if is_period_total and windows:
-            yi = offset // 12
-            if yi >= len(windows):
-                return 0.0
-            return float(windows[yi]) / 12.0
-        if duration_months <= 0:
-            return 0.0
-        divisor = duration_months if is_period_total else min(duration_months, 12)
-        return float(annual) / divisor
-
     @staticmethod
     def _rounded_series(ideals: List[float]) -> List[Decimal]:
         """Round each monthly amount to 2 decimals, but make the LAST month absorb the
@@ -3844,48 +3818,6 @@ class PurchasingValueService:
 # ---------------------------------------------------------------------------
 # Utilities
 # ---------------------------------------------------------------------------
-
-
-def _build_budget_confirmed_email(opp: Opportunity) -> str:
-    saving = (
-        f"€{opp.expected_annual_saving:,.0f}" if opp.expected_annual_saving else "N/A"
-    )
-    plant = opp.plant.site_name if opp.plant else "N/A"
-    budget_year = str(int(opp.budget_year)) if opp.budget_year else "N/A"
-    confirmer = opp.budget_confirmed_by or "N/A"
-    confirmed_at = (
-        opp.budget_confirmed_at.strftime("%d %b %Y %H:%M")
-        if opp.budget_confirmed_at
-        else "N/A"
-    )
-    end_date = (
-        opp.planned_end_date.strftime("%d %b %Y") if opp.planned_end_date else "N/A"
-    )
-    start_date = (
-        opp.planned_start_date.strftime("%d %b %Y") if opp.planned_start_date else "N/A"
-    )
-    return f"""
-    <html><body style="font-family:Arial,sans-serif;color:#111827;max-width:620px;margin:0 auto">
-      <div style="background:#065f46;padding:20px 24px;border-radius:8px 8px 0 0">
-        <h2 style="color:#fff;margin:0;font-size:18px">✅ Opportunity Budgeted</h2>
-        <p style="color:#6ee7b7;margin:4px 0 0;font-size:13px">Purchasing Value Management — Budget Confirmation</p>
-      </div>
-      <div style="padding:24px;border:1px solid #d1fae5;border-top:none;border-radius:0 0 8px 8px">
-        <p>The following opportunity has been <strong>confirmed as Budgeted</strong> for {budget_year}:</p>
-        <table style="border-collapse:collapse;width:100%;font-size:13px;margin:16px 0">
-          <tr><td style="background:#ecfdf5;font-weight:600;padding:8px 12px;width:38%">Opportunity</td><td style="padding:8px 12px;border-bottom:1px solid #d1fae5">{opp.opportunity_name}</td></tr>
-          <tr><td style="background:#ecfdf5;font-weight:600;padding:8px 12px">Type</td><td style="padding:8px 12px;border-bottom:1px solid #d1fae5">{opp.opportunity_type}</td></tr>
-          <tr><td style="background:#ecfdf5;font-weight:600;padding:8px 12px">Plant</td><td style="padding:8px 12px;border-bottom:1px solid #d1fae5">{plant}</td></tr>
-          <tr><td style="background:#ecfdf5;font-weight:600;padding:8px 12px">Expected Annual Saving</td><td style="padding:8px 12px;border-bottom:1px solid #d1fae5;font-weight:700;color:#065f46">{saving}</td></tr>
-          <tr><td style="background:#ecfdf5;font-weight:600;padding:8px 12px">Budget Year</td><td style="padding:8px 12px;border-bottom:1px solid #d1fae5">{budget_year}</td></tr>
-          <tr><td style="background:#ecfdf5;font-weight:600;padding:8px 12px">Planned Start → End</td><td style="padding:8px 12px;border-bottom:1px solid #d1fae5">{start_date} → {end_date}</td></tr>
-          <tr><td style="background:#ecfdf5;font-weight:600;padding:8px 12px">Confirmed by</td><td style="padding:8px 12px;border-bottom:1px solid #d1fae5">{confirmer}</td></tr>
-          <tr><td style="background:#ecfdf5;font-weight:600;padding:8px 12px">Confirmed at</td><td style="padding:8px 12px">{confirmed_at} UTC</td></tr>
-        </table>
-        <p style="color:#6b7280;font-size:11px;margin-top:24px">Avocarbon · Purchasing Value Management</p>
-      </div>
-    </body></html>
-    """
 
 
 def _set_if(obj, attr: str, value) -> None:

@@ -39,9 +39,5 @@ SessionLocal = async_sessionmaker(
 )
 
 
-def get_engine():
-    return engine
-
-
 def get_session_factory():
     return SessionLocal

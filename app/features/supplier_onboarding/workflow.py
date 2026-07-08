@@ -450,39 +450,6 @@ class SupplierOnboardingWorkflow:
         return f"{operational_grade}{class_value}"
 
     @staticmethod
-    def _score_impact_answer(value: Optional[str]) -> int:
-        mapping = {
-            "major +": 5,
-            "major -": -5,
-            "minor +": 3,
-            "minor -": -3,
-            "none": 0,
-        }
-        if value is None:
-            return 0
-        return mapping.get(str(value).strip().lower(), 0)
-
-    def _extract_impact_score(
-        self, evaluation: Optional[Dict[str, Any]]
-    ) -> Optional[int]:
-        if not evaluation:
-            return None
-
-        answers = [
-            evaluation.get("impact_question_1"),
-            evaluation.get("impact_question_2"),
-            evaluation.get("impact_question_3"),
-            evaluation.get("impact_question_4"),
-            evaluation.get("impact_question_5"),
-            evaluation.get("impact_question_6"),
-        ]
-        if any(answer not in (None, "") for answer in answers):
-            return sum(self._score_impact_answer(answer) for answer in answers)
-
-        raw_score = evaluation.get("impact_score")
-        return int(raw_score) if raw_score not in (None, "") else None
-
-    @staticmethod
     def _extract_operational_grade(
         evaluation: Optional[Dict[str, Any]],
     ) -> Optional[str]:

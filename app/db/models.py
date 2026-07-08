@@ -12,7 +12,6 @@ from decimal import Decimal
 from typing import Optional, List
 
 from sqlalchemy import (
-    and_,
     DateTime,
     String,
     Text,
@@ -454,20 +453,6 @@ class SupplierSiteRelation(GovernanceMixin, Base):
         passive_deletes=True,
         order_by="SupplierSpendByYear.fiscal_year.desc()",
     )
-
-    @classmethod
-    def panel_active_filter(cls):
-        """Return a compound SQLAlchemy clause for all panel-active relation checks.
-
-        Usage: .where(SupplierSiteRelation.panel_active_filter())
-        """
-        from app.core.constants import PANEL_ACTIVE_DECISIONS
-        return and_(
-            cls.panel_decision.in_(PANEL_ACTIVE_DECISIONS),
-            cls.validation_status == "approved",
-            cls.is_active.is_(True),
-            cls.is_deleted.is_(False),
-        )
 
     def __repr__(self) -> str:
         return (
