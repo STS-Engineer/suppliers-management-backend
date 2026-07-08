@@ -6,14 +6,6 @@ from decimal import Decimal
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
-
-# strategic = 3 months, global = 6 months, local = annually
-_SCOPE_FREQUENCY: dict[str, str] = {
-    "strategic": "Quarterly",
-    "global": "Semi-Annual",
-    "local": "Annual",
-}
-
 from app.db.models import (
     AvocarbonSite,
     Contact,
@@ -24,6 +16,14 @@ from app.db.models import (
     SupplierUnit,
 )
 from app.core.exceptions import AppException
+
+
+# strategic = 3 months, global = 6 months, local = annually
+_SCOPE_FREQUENCY: dict[str, str] = {
+    "strategic": "Quarterly",
+    "global": "Semi-Annual",
+    "local": "Annual",
+}
 
 
 class SupplierOnboardingWorkflow:

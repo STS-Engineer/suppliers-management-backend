@@ -178,7 +178,7 @@ async def complete_supplier_onboarding(
                 await db.execute(
                     select(AccessIdentity).where(
                         AccessIdentity.access_profile == "purchasing_manager",
-                        AccessIdentity.is_active == True,
+                        AccessIdentity.is_active.is_(True),
                         AccessIdentity.registration_status == "active",
                     )
                 )
@@ -253,8 +253,8 @@ async def list_pending_validation(
             )
             .where(
                 SupplierGroup.validation_status == "pending",
-                SupplierGroup.is_deleted == False,
-                SupplierUnit.is_deleted == False,
+                SupplierGroup.is_deleted.is_(False),
+                SupplierUnit.is_deleted.is_(False),
             )
             .order_by(SupplierGroup.id_group.desc())
         )
@@ -317,7 +317,7 @@ async def _notify_buyer_for_group(
         await db.execute(
             select(AccessIdentity).where(
                 AccessIdentity.email == buyer_email,
-                AccessIdentity.is_active == True,
+                AccessIdentity.is_active.is_(True),
             )
         )
     ).scalar_one_or_none()

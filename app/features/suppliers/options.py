@@ -19,11 +19,13 @@ from app.db.models import PldScoringRules
 # validation can't query the DB inline the way the options endpoint does --
 # keep these in sync with pld_scoring_rules by hand when a criteria value is
 # added or changed.
-# Full canonical 29-tier table (see migration 20260707_0077), plus a handful
-# of pre-canonicalization aliases kept here purely so previously-valid saved
-# values still pass validation (CRITERIA_VALUE_NORMALIZATION maps them onto a
-# canonical tier at scoring time, but validation happens on the raw request
-# value before that normalization runs).
+
+# TOP_OPTIONS is the full canonical 29-tier table (see migration
+# 20260707_0077), plus a handful of pre-canonicalization aliases kept here
+# purely so previously-valid saved values still pass validation
+# (CRITERIA_VALUE_NORMALIZATION maps them onto a canonical tier at scoring
+# time, but validation happens on the raw request value before that
+# normalization runs).
 TOP_OPTIONS = [
     {"value": "Cash at order", "label": "Cash at order"},
     {"value": "Cash in advance", "label": "Cash in advance"},
@@ -227,8 +229,7 @@ async def get_onboarding_selection_options(db: AsyncSession) -> Dict[str, Any]:
     """Return the onboarding select options payload for the frontend.
 
     Built live from pld_scoring_rules -- the same table SupplierRelationService
-    queries to score submitted evaluations (see get_class_score() /
-    CRITERIA_VALUE_NORMALIZATION in supplier_relations/service.py) -- so the
+    queries via _lookup_pld_score() to score submitted evaluations -- so the
     dropdown options shown to users and the scoring table backing them can
     never drift apart the way the old hardcoded TOP_OPTIONS/etc. lists did.
 

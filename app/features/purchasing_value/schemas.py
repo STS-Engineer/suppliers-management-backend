@@ -353,7 +353,6 @@ def compute_budget_year_portions(per_year_savings, savings_start, duration_month
     if months <= 0:
         return []
 
-    TWELVE = Decimal("12")
     TWO_DP = Decimal("0.01")
 
     overall_end = add_months_preserve_day(savings_start, months)
