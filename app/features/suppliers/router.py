@@ -10,6 +10,7 @@ from app.shared.dependencies.db import get_db
 from app.shared.dependencies.auth import get_current_user
 from app.features.suppliers.service import SupplierService
 from app.features.suppliers import schemas
+from app.features.suppliers.options import get_onboarding_selection_options
 from app.features.supplier_onboarding.workflow import SupplierOnboardingWorkflow
 from app.core.exceptions import AppException
 from app.db.models import (
@@ -205,6 +206,22 @@ async def complete_supplier_onboarding(
         raise
     except Exception:
         raise
+
+
+@router.get(
+    "/onboarding/options",
+    response_model=dict,
+    tags=["onboarding"],
+)
+async def get_onboarding_options(
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Selectable class-criteria values + live scores, sourced from
+    pld_scoring_rules -- the single source of truth also used by
+    SupplierRelationService to score submitted evaluations."""
+    options = await get_onboarding_selection_options(db)
+    return {"status": "success", "data": options}
 
 
 # ============================================================================

@@ -1,5 +1,5 @@
 """Suppliers Pydantic schemas."""
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from datetime import date, datetime
 from decimal import Decimal
 import re
@@ -891,17 +891,25 @@ class CompleteSupplierOnboardingResponse(BaseModel):
 
 
 class OnboardingSelectionOptionsResponse(BaseModel):
-    """Selectable onboarding values sourced from the board data."""
+    """Selectable onboarding values, live from pld_scoring_rules.
 
-    top: List[dict[str, str]]
-    lta: List[dict[str, str]]
-    sqma: List[dict[str, str]]
-    family_coverage: List[dict[str, str]]
-    cons_or_wd: List[dict[str, str]]
-    financial_health: List[dict[str, str]]
+    Each option is {value, label, score} -- score lets the frontend compute a
+    class-score preview from this same response instead of keeping its own
+    separately-maintained score table.
+    """
+
+    top: List[dict[str, Any]]
+    lta: List[dict[str, Any]]
+    sqma: List[dict[str, Any]]
+    family_coverage: List[dict[str, Any]]
+    competitiveness: List[dict[str, Any]]
+    geo_coverage: List[dict[str, Any]]
+    cons_or_wd: List[dict[str, Any]]
+    financial_health: List[dict[str, Any]]
+    quality_certification: List[dict[str, Any]]
+    prod_lia_ins: List[dict[str, Any]]
+    prod: List[dict[str, Any]]
     certification_types: List[dict[str, str]]
     certification_standard_types: List[dict[str, str]]
     cert_types_by_standard: dict
-    prod_lia_ins: List[dict[str, str]]
-    prod: List[dict[str, str]]
 

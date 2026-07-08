@@ -727,10 +727,39 @@ class SupplierService:
         scoring_cert, _ = await rel_service._get_best_quality_cert_for_unit(unit_id)
         quality_certification_id = scoring_cert.id_certification if scoring_cert else None
 
-        operational_grade = self._extract_operational_grade(data)
-        class_value = self._extract_class_value(data)
-        class_score = self._to_decimal(data.class_score)
-        operational_score = self._to_decimal(data.operational_score)
+        # class_score/operational_score are ALWAYS recomputed server-side from
+        # pld_scoring_rules, never trusted from the request body -- every other
+        # save path in the app does the same (update_relation_class_evaluation,
+        # update_relation_operational_evaluation). Submitted data.class_score /
+        # data.operational_score are ignored; if the client sent stale or
+        # incorrect numbers, this endpoint no longer just accepts them as-is.
+        merged_class_values = {
+            "top": rel_service._normalize_criteria_value("top", data.top),
+            "lta": rel_service._normalize_criteria_value("lta", data.lta),
+            "productivity": rel_service._normalize_criteria_value("productivity", data.prod),
+            "quality_certification": rel_service._certification_label(scoring_cert),
+            "prod_lia_ins": rel_service._normalize_criteria_value("prod_lia_ins", data.prod_lia_ins),
+            "competitiveness": rel_service._normalize_criteria_value("competitiveness", data.competitiveness),
+            "sqma": rel_service._normalize_criteria_value("sqma", data.sqma),
+            "family_coverage": rel_service._normalize_criteria_value("family_coverage", data.family_coverage),
+            "geo_coverage": rel_service._normalize_criteria_value("geo_coverage", data.geo_coverage),
+            "cons_or_wd": rel_service._normalize_criteria_value("cons_or_wd", data.cons_or_wd),
+            "financial_health": rel_service._normalize_criteria_value("financial_health", data.financial_health),
+        }
+        class_score = await rel_service._try_calculate_class_score(merged_class_values)
+        class_value = (
+            rel_service._derive_class_value_from_score(class_score)
+            if class_score is not None
+            else self._extract_class_value(data)
+        )
+
+        merged_operational_values = rel_service._merge_operational_values(None, data)
+        operational_score = rel_service._calculate_operational_score(merged_operational_values)
+        operational_grade = (
+            rel_service._derive_operational_grade(operational_score)
+            if operational_score is not None
+            else self._extract_operational_grade(data)
+        )
         impact_score = data.impact_score
         strategic_mention = self._extract_strategic_mention(data)
         panel_decision = self._extract_panel_decision(data)

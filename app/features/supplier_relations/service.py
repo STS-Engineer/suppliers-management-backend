@@ -363,18 +363,19 @@ class SupplierRelationService:
             relation_id, ["evaluation_reference", "lta_agreement", "evaluation_criterion_evidence"]
         )
 
-        # Per-criterion scores for live display
+        # Per-criterion scores for live display. Raw (un-normalized) values are
+        # fine here -- get_criteria_scores_breakdown() normalizes internally.
         class_values_for_scores = {
             "top": self._pluck(class_input, "top") or self._pluck(relation, "top"),
             "lta": self._pluck(class_input, "lta") or self._pluck(relation, "lta"),
             "productivity": self._pluck(class_input, "productivity") or self._pluck(relation, "productivity"),
             "quality_certification": quality_certification,
-            "prod_lia_ins": self._pluck(class_input, "prod_lia_ins") or self._normalize_criteria_value("prod_lia_ins", self._pluck(relation, "prod_lia_ins")),
-            "competitiveness": self._normalize_criteria_value("competitiveness", self._pluck(class_input, "competitiveness") or self._pluck(relation, "competitiveness")),
-            "sqma": self._pluck(class_input, "sqma") or self._normalize_criteria_value("sqma", self._pluck(relation, "sqma")),
-            "family_coverage": self._pluck(class_input, "family_coverage") or self._normalize_criteria_value("family_coverage", self._pluck(relation, "family_coverage")),
-            "geo_coverage": self._normalize_criteria_value("geo_coverage", self._pluck(class_input, "geo_coverage") or self._pluck(relation, "geo_coverage")),
-            "cons_or_wd": self._pluck(class_input, "cons_or_wd") or self._normalize_criteria_value("cons_or_wd", self._pluck(relation, "cons_or_wd")),
+            "prod_lia_ins": self._pluck(class_input, "prod_lia_ins") or self._pluck(relation, "prod_lia_ins"),
+            "competitiveness": self._pluck(class_input, "competitiveness") or self._pluck(relation, "competitiveness"),
+            "sqma": self._pluck(class_input, "sqma") or self._pluck(relation, "sqma"),
+            "family_coverage": self._pluck(class_input, "family_coverage") or self._pluck(relation, "family_coverage"),
+            "geo_coverage": self._pluck(class_input, "geo_coverage") or self._pluck(relation, "geo_coverage"),
+            "cons_or_wd": self._pluck(class_input, "cons_or_wd") or self._pluck(relation, "cons_or_wd"),
             "financial_health": self._pluck(class_input, "financial_health") or self._pluck(relation, "financial_health"),
         }
         criteria_scores = await self.get_criteria_scores_breakdown(class_values_for_scores)
@@ -2906,7 +2907,7 @@ class SupplierRelationService:
             "evidence_file_name": upload["filename"],
             "comments": existing_detail.get("comments") or comments,
         }
-        detail = self._normalize_detail_payload(
+        detail = await self._normalize_detail_payload(
             criteria_type=normalized_criteria_type,
             selected_value=selected_value,
             payload=detail_payload,
@@ -4429,7 +4430,7 @@ class SupplierRelationService:
             )
             if hasattr(payload, "model_dump"):
                 payload = payload.model_dump(exclude_none=True)
-            detail = self._normalize_detail_payload(
+            detail = await self._normalize_detail_payload(
                 criteria_type=criteria_type,
                 selected_value=merged_values.get(criteria_type),
                 payload=payload,
@@ -4565,34 +4566,37 @@ class SupplierRelationService:
         self,
         merged_values: dict[str, Optional[str]],
     ) -> dict[str, Optional[float]]:
-        """Return a per-criterion score map for live display in the UI."""
+        """Return a per-criterion score map for live display in the UI.
+
+        Normalizes every criterion's raw value here, internally, rather than
+        trusting each caller to normalize before calling -- a prior version
+        relied on callers to normalize, and 4 of 11 criteria (top, lta,
+        productivity, financial_health) were passed raw, silently returning
+        None (blank score badges) for any relation using a pre-canonicalization
+        alias (e.g. "30 days end of month or +"). Normalization is idempotent
+        (a no-op on an already-canonical value), so this is safe regardless of
+        whether the caller already normalized.
+        """
         criteria_map = {
-            "top": merged_values.get("top"),
-            "lta": merged_values.get("lta"),
-            "productivity": merged_values.get("productivity"),
-            "quality_certification": merged_values.get("quality_certification"),
-            "prod_lia_ins": merged_values.get("prod_lia_ins"),
-            "competitiveness": merged_values.get("competitiveness"),
-            "sqma": merged_values.get("sqma"),
-            "family_coverage": merged_values.get("family_coverage"),
-            "geo_coverage": merged_values.get("geo_coverage"),
-            "cons_or_wd": merged_values.get("cons_or_wd"),
-            "financial_health": merged_values.get("financial_health"),
+            criteria_type: self._normalize_criteria_value(criteria_type, raw_value)
+            for criteria_type, raw_value in {
+                "top": merged_values.get("top"),
+                "lta": merged_values.get("lta"),
+                "productivity": merged_values.get("productivity"),
+                "quality_certification": merged_values.get("quality_certification"),
+                "prod_lia_ins": merged_values.get("prod_lia_ins"),
+                "competitiveness": merged_values.get("competitiveness"),
+                "sqma": merged_values.get("sqma"),
+                "family_coverage": merged_values.get("family_coverage"),
+                "geo_coverage": merged_values.get("geo_coverage"),
+                "cons_or_wd": merged_values.get("cons_or_wd"),
+                "financial_health": merged_values.get("financial_health"),
+            }.items()
         }
         result_map: dict[str, Optional[float]] = {}
         for criteria_type, selected_value in criteria_map.items():
-            if not selected_value:
-                result_map[criteria_type] = None
-                continue
-            stmt = (
-                select(PldScoringRules)
-                .where(PldScoringRules.criteria_type == criteria_type)
-                .where(PldScoringRules.is_active.is_(True))
-                .where(PldScoringRules.min_value == selected_value)
-                .order_by(PldScoringRules.score.desc())
-            )
-            row = (await self.db.execute(stmt)).scalars().first()
-            result_map[criteria_type] = float(row.score) if row and row.score is not None else None
+            score = await self._lookup_pld_score(criteria_type, selected_value)
+            result_map[criteria_type] = float(score) if score is not None else None
         return result_map
 
     async def get_self_assessment_baseline(
@@ -4675,6 +4679,32 @@ class SupplierRelationService:
         stmt = stmt.order_by(Document.uploaded_at.desc())
         return list((await self.db.execute(stmt)).scalars().all())
 
+    async def _lookup_pld_score(
+        self,
+        criteria_type: str,
+        value: Optional[str],
+    ) -> Optional[Decimal]:
+        """Single query point for pld_scoring_rules lookups. Expects an
+        already-normalized value (see _normalize_criteria_value) -- this
+        function does exact matching only, by design, so every caller stays
+        explicit about whether/when it normalizes. Used by
+        _try_calculate_class_score(), get_criteria_scores_breakdown(), and
+        _score_from_selected_value() so there is exactly one query to change
+        if the lookup rule (e.g. tie-breaking, an effective-date filter) ever
+        needs to change."""
+        if not value:
+            return None
+        stmt = (
+            select(PldScoringRules.score)
+            .where(PldScoringRules.criteria_type == criteria_type)
+            .where(PldScoringRules.is_active.is_(True))
+            .where(PldScoringRules.min_value == value)
+            .order_by(PldScoringRules.score.desc())
+        )
+        result = await self.db.execute(stmt)
+        score = result.scalars().first()
+        return Decimal(str(score)) if score is not None else None
+
     async def _try_calculate_class_score(
         self,
         merged_values: dict[str, Optional[str]],
@@ -4702,17 +4732,9 @@ class SupplierRelationService:
             if not selected_value:
                 continue
             any_filled = True
-            stmt = (
-                select(PldScoringRules)
-                .where(PldScoringRules.criteria_type == criteria_type)
-                .where(PldScoringRules.is_active.is_(True))
-                .where(PldScoringRules.min_value == selected_value)
-                .order_by(PldScoringRules.score.desc())
-            )
-            result = await self.db.execute(stmt)
-            rule = result.scalars().first()
-            if rule and rule.score is not None:
-                total += Decimal(str(rule.score))
+            score = await self._lookup_pld_score(criteria_type, selected_value)
+            if score is not None:
+                total += score
             else:
                 # No matching active scoring rule — the criterion contributes 0.
                 # Usually a normalization gap (value not mapped to a canonical tier);
@@ -4747,9 +4769,8 @@ class SupplierRelationService:
         normalized = str(criteria_type or "").strip().lower()
         return mapping.get(normalized, normalized)
 
-    @classmethod
-    def _normalize_detail_payload(
-        cls,
+    async def _normalize_detail_payload(
+        self,
         criteria_type: str,
         selected_value: Optional[str],
         payload: dict[str, Any],
@@ -4774,77 +4795,37 @@ class SupplierRelationService:
             "document_name": payload.get("document_name"),
             "document_url": payload.get("document_url"),
             "document_mime_type": payload.get("document_mime_type"),
-            "document_size": cls._prefer_decimal(payload.get("document_size")),
+            "document_size": self._prefer_decimal(payload.get("document_size")),
             "evidence_file_name": payload.get("evidence_file_name"),
             "validity_start_date": start_date,
             "validity_end_date": end_date,
             "signature_date": payload.get("signature_date"),
             "last_update_date": payload.get("last_update_date"),
-            "amount_value": cls._prefer_decimal(payload.get("amount_value")),
+            "amount_value": self._prefer_decimal(payload.get("amount_value")),
             "amount_currency": payload.get("amount_currency"),
             "auto_validity_end_date": auto_validity_end_date,
             "comments": payload.get("comments"),
-            "score": cls._prefer_decimal(
+            "score": self._prefer_decimal(
                 payload.get("score"),
-                cls._score_from_selected_value(criteria_type, selected_value),
+                await self._score_from_selected_value(criteria_type, selected_value),
             ),
         }
 
-    @classmethod
-    def _score_from_selected_value(
-        cls,
+    async def _score_from_selected_value(
+        self,
         criteria_type: str,
         selected_value: Optional[str],
     ) -> Optional[Decimal]:
+        """Look up a criterion value's score via the shared _lookup_pld_score()
+        helper -- the single source of truth also used by
+        _try_calculate_class_score() and get_criteria_scores_breakdown().
+        Previously this duplicated the scoring table as its own hardcoded
+        dict, which had drifted out of sync with pld_scoring_rules (e.g.
+        "15 days net" was hardcoded to 10 instead of the real 0)."""
         if not selected_value:
             return None
-        normalized_value = cls._normalize_criteria_value(criteria_type, selected_value)
-        score_map: dict[str, Decimal] = {
-            "60 days end of month or +": Decimal("100"),
-            "60 days net": Decimal("80"),
-            "30 days end of month or +": Decimal("50"),
-            "30 days net": Decimal("30"),
-            "Cash in Advance": Decimal("0"),
-            "15 days net": Decimal("10"),
-            "3 years/+": Decimal("100"),
-            "2 years": Decimal("80"),
-            "1 year": Decimal("50"),
-            "None/Invalid": Decimal("0"),
-            "3% or +": Decimal("100"),
-            "2% or +": Decimal("80"),
-            "1% or +": Decimal("50"),
-            "less than 1%": Decimal("30"),
-            "Neg": Decimal("0"),
-            "IATF / ISO9001 (cat BCD)": Decimal("100"),
-            "ISO9001": Decimal("50"),
-            "None": Decimal("0"),
-            "2M$ or +": Decimal("100"),
-            "1M$ or +": Decimal("50"),
-            "Best in Fam.": Decimal("100"),
-            "Almost Best in Fam.": Decimal("80"),
-            "Ave. in Fam.": Decimal("50"),
-            "Less Avg": Decimal("30"),
-            "Not Comp.": Decimal("0"),
-            "Signed": Decimal("100"),
-            "Signed m.res.": Decimal("50"),
-            "Signed M/Res/not sent": Decimal("30"),
-            "Rejected": Decimal("0"),
-            "Supplier can make all the family requirements": Decimal("100"),
-            "Supplier can make the main family requirements": Decimal("50"),
-            "Supplier can make only of few family requirements": Decimal("30"),
-            "Supplier can make 1 family requirements": Decimal("0"),
-            "Main plants covered": Decimal("100"),
-            "More than 50% plants are covered": Decimal("50"),
-            "1 plant is covered": Decimal("30"),
-            "Cons. Or Daily Deliveries": Decimal("100"),
-            "DDP or Weekly Del.": Decimal("50"),
-            "Biweekly Del.": Decimal("30"),
-            "Other": Decimal("0"),
-            "Good": Decimal("100"),
-            "To Monitor": Decimal("50"),
-            "At Risk": Decimal("0"),
-        }
-        return score_map.get(str(normalized_value))
+        normalized_value = self._normalize_criteria_value(criteria_type, selected_value)
+        return await self._lookup_pld_score(criteria_type, normalized_value)
 
     @staticmethod
     def _prefer_decimal(*values: Any) -> Optional[Decimal]:
