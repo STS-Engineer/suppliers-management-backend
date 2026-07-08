@@ -10,8 +10,10 @@ TOP_OPTIONS = [
     {"value": "30 days net", "label": "30 days net"},
     {"value": "30 days end of month or +", "label": "30 days end of month or +"},
     {"value": "60 days net", "label": "60 days net"},
+    {"value": "60 days end of month or +", "label": "60 days end of month or +"},
     {"value": "60 days eom or +", "label": "60 days eom or +"},
     {"value": "Cash in Advance", "label": "Cash in Advance"},
+    {"value": "Requested", "label": "Requested"},
 ]
 
 LTA_OPTIONS = [
@@ -125,9 +127,16 @@ CERT_TYPES_BY_STANDARD: Dict[str, list] = {
 }
 
 PROD_LIA_INS_OPTIONS = [
-    {"value": "2M$ or +", "label": "2M$ or +"},
-    {"value": "1M$ or +", "label": "1M$ or +"},
     {"value": "None", "label": "None"},
+    {"value": "500k€ or less", "label": "500k€ or less"},
+    {"value": "1M€ or less", "label": "1M€ or less"},
+    {"value": "1,5M€ or less", "label": "1,5M€ or less"},
+    {"value": "1,5M€ or more", "label": "1,5M€ or more"},
+    {"value": "1M€ or +", "label": "1M€ or +"},
+    {"value": "2M€ or +", "label": "2M€ or +"},
+    {"value": "1M$ or +", "label": "1M$ or +"},
+    {"value": "2M$ or +", "label": "2M$ or +"},
+    {"value": "Requested", "label": "Requested"},
 ]
 
 PROD_OPTIONS = [
