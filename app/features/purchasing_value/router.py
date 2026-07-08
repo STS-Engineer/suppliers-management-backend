@@ -5,6 +5,7 @@ from fastapi.responses import Response
 from sqlalchemy import select, text
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import IntegrityError
 from typing import Optional
 from datetime import date
 
@@ -94,7 +95,12 @@ async def create_opportunity(
     _require(current_user, _NON_VIEWER)
     try:
         svc = PurchasingValueService(db)
-        opp = await svc.create_opportunity(payload)
+        actor_email = (
+            current_user.get("email")
+            or current_user.get("upn")
+            or current_user.get("sub")
+        )
+        opp = await svc.create_opportunity(payload, created_by=actor_email)
         await db.commit()
         # Re-fetch after commit — avoids stale session cache (R9 monthly rebuilds, etc.)
         fresh_opp = await svc.get_opportunity(opp.opportunity_id)
@@ -1001,6 +1007,12 @@ async def list_budget_years(
     def eur(i):
         return i.get("applicable_amount_eur") or 0
 
+    def cash_expected_eur(i):
+        return i.get("cash_expected_eur") or 0
+
+    def cash_actual_eur(i):
+        return i.get("cash_actual_eur") or 0
+
     baseline = [i for i in items if not i.get("is_additional")]
     additional = [i for i in items if i.get("is_additional")]
 
@@ -1008,6 +1020,15 @@ async def list_budget_years(
     baseline_budgeted_eur = sum(eur(i) for i in baseline if i["budget_status"] == "Budgeted")
     additional_accepted_eur = sum(eur(i) for i in additional if i["budget_status"] == "Budgeted")
     total_budget_eur = baseline_budgeted_eur + additional_accepted_eur
+
+    # Cash totals — same baseline/additional/total breakdown, mirroring the
+    # savings totals above, sourced from Cash-type opportunities' monthly tracking.
+    baseline_cash_expected_eur = sum(cash_expected_eur(i) for i in baseline if i["budget_status"] == "Budgeted")
+    additional_cash_expected_eur = sum(cash_expected_eur(i) for i in additional if i["budget_status"] == "Budgeted")
+    total_cash_expected_eur = baseline_cash_expected_eur + additional_cash_expected_eur
+    baseline_cash_actual_eur = sum(cash_actual_eur(i) for i in baseline if i["budget_status"] == "Budgeted")
+    additional_cash_actual_eur = sum(cash_actual_eur(i) for i in additional if i["budget_status"] == "Budgeted")
+    total_cash_actual_eur = baseline_cash_actual_eur + additional_cash_actual_eur
 
     return {
         "status": "success",
@@ -1024,6 +1045,13 @@ async def list_budget_years(
                 "baseline_budgeted_eur": round(baseline_budgeted_eur, 2),
                 "additional_accepted_eur": round(additional_accepted_eur, 2),
                 "total_budget_eur": round(total_budget_eur, 2),
+                # Cash KPIs — Cash-type opportunities only, planned (expected) and actual
+                "baseline_cash_expected_eur": round(baseline_cash_expected_eur, 2),
+                "additional_cash_expected_eur": round(additional_cash_expected_eur, 2),
+                "total_cash_expected_eur": round(total_cash_expected_eur, 2),
+                "baseline_cash_actual_eur": round(baseline_cash_actual_eur, 2),
+                "additional_cash_actual_eur": round(additional_cash_actual_eur, 2),
+                "total_cash_actual_eur": round(total_cash_actual_eur, 2),
                 "additional_pending": sum(1 for i in additional if i["budget_status"] == "Opportunity"),
                 "additional_accepted": sum(1 for i in additional if i["budget_status"] == "Budgeted"),
                 "additional_rejected": sum(1 for i in additional if i["budget_status"] == "Empty"),
@@ -1033,6 +1061,10 @@ async def list_budget_years(
                 "total_opportunity": round(sum(eur(i) for i in items if i["budget_status"] == "Opportunity"), 2),
                 "total_empty": round(sum(eur(i) for i in items if i["budget_status"] == "Empty"), 2),
                 "total_validated": round(sum(eur(i) for i in items if i["suggested_status"] == "Validate"), 2),
+                # Data-quality: non-EUR opportunities with no usable fx_rate_to_eur are
+                # excluded from every *_eur total above (0.0 would look like a real
+                # zero) — surfaced here so Finance can see how many rows are missing.
+                "fx_missing_count": sum(1 for i in items if i.get("fx_missing")),
             },
         },
     }
@@ -1111,6 +1143,17 @@ async def close_budget_year(
     except AppException:
         await db.rollback()
         raise
+    except IntegrityError:
+        # Two concurrent "Close" requests can both pass the existence check
+        # before either commits — the second one's INSERT then fails on
+        # BudgetYearClosure.fiscal_year's unique constraint. Surface the same
+        # clean 409 the pre-check gives, instead of a raw 500.
+        await db.rollback()
+        raise AppException(
+            f"Budget year {fiscal_year} is already closed "
+            f"(closed concurrently by another request).",
+            status_code=409,
+        )
     except Exception:
         await db.rollback()
         raise
@@ -1366,7 +1409,53 @@ async def remind_action_item(
         or "unknown"
     )
     svc = PurchasingValueService(db)
-    result = await svc.send_action_item_reminder(
-        action_plan_id, sujet_idx, action_idx, sent_by
+    try:
+        result = await svc.send_action_item_reminder(
+            action_plan_id, sujet_idx, action_idx, sent_by
+        )
+        await db.commit()
+    except AppException:
+        await db.rollback()
+        raise
+    except Exception:
+        await db.rollback()
+        raise
+    return {"status": "success", "data": result}
+
+
+@router.post("/action-plans/{action_plan_id}/items/escalate", response_model=dict)
+async def escalate_action_item(
+    action_plan_id: int,
+    payload: schemas.EscalateActionItemRequest,
+    sujet_idx: int = Query(..., description="Index of the subject in plan_data.sujets"),
+    action_idx: int = Query(..., description="Index of the action within that subject"),
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Email an arbitrary recipient (e.g. a manager or director) about an action item."""
+    _require(current_user, _NON_VIEWER)
+    escalated_by = (
+        current_user.get("email")
+        or current_user.get("upn")
+        or current_user.get("sub")
+        or "unknown"
     )
+    svc = PurchasingValueService(db)
+    try:
+        result = await svc.send_action_item_escalation(
+            action_plan_id,
+            sujet_idx,
+            action_idx,
+            payload.recipient_email,
+            payload.subject,
+            payload.message,
+            escalated_by,
+        )
+        await db.commit()
+    except AppException:
+        await db.rollback()
+        raise
+    except Exception:
+        await db.rollback()
+        raise
     return {"status": "success", "data": result}

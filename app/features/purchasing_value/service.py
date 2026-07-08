@@ -11,6 +11,7 @@ from typing import Optional, List
 
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
+from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import PANEL_ACTIVE_DECISIONS
@@ -52,6 +53,8 @@ from app.features.purchasing_value.schemas import (
     compute_budget_year_portions,
     auto_payback_score,
     auto_leadtime_score,
+    budget_year_bounds,
+    add_months_preserve_day,
 )
 from app.shared.utils.email.email_service import send_email, send_email_with_attachment
 from app.shared.utils.blob_storage import (
@@ -154,7 +157,7 @@ class PurchasingValueService:
     # ------------------------------------------------------------------
 
     async def create_opportunity(
-        self, payload: OpportunityCreateRequest
+        self, payload: OpportunityCreateRequest, created_by: Optional[str] = None
     ) -> Opportunity:
         # Every opportunity must be tied to a plant — it is budgeted, supplier-evaluated
         # and KPI-rolled-up per plant. Required for all types (server-side too, so the
@@ -169,6 +172,7 @@ class PurchasingValueService:
         opp = Opportunity(
             opportunity_name=payload.opportunity_name,
             opportunity_type=payload.opportunity_type,
+            created_by=created_by,
             idea_owner=payload.idea_owner,
             description=payload.description,
             plant_id=payload.plant_id,
@@ -216,9 +220,10 @@ class PurchasingValueService:
                 "annual_quantity_n1", "annual_quantity_n2",
                 "annual_quantity_n3", "annual_quantity_n4",
                 "bonus_before", "bonus_after",
+                "cash_impact",
             )
         else:
-            baseline_fields = ("expected_annual_saving",)
+            baseline_fields = ("expected_annual_saving", "cash_impact")
 
         def _baseline_change_attempted() -> bool:
             for f in baseline_fields:
@@ -240,6 +245,27 @@ class PurchasingValueService:
                 "is locked. Use Revise Baseline (audited and reviewed) to change it; "
                 "baseline figures cannot be edited silently.",
                 "BASELINE_LOCKED_ACTUALS",
+            )
+
+        # Same lock, triggered earlier — a "Budgeted" opportunity is committed to a
+        # fiscal-year budget (see the Budgeting page) even before any actual has
+        # been recorded. The UI already greys out these fields once Budgeted
+        # (see `isBudgeted`/`locked` in PurchasingValuePage.tsx); this closes the
+        # gap where a direct API call could still silently change the committed
+        # saving/cash baseline without going through the audited Revise-Baseline
+        # flow.
+        if (
+            opp.validation_status == "Budgeted"
+            and not line_has_actuals
+            and _baseline_change_attempted()
+        ):
+            raise AppException(
+                422,
+                "This opportunity is committed to a budget (Budgeted) — the saving/"
+                "cash baseline is locked. Use Revise Baseline (audited and "
+                "reviewed) to change it; baseline figures cannot be edited "
+                "silently once budgeted.",
+                "BASELINE_LOCKED_BUDGETED",
             )
 
         # ── STP revision approval gate (Phase 2/3) ──────────────────────────
@@ -1858,9 +1884,9 @@ class PurchasingValueService:
                 selectinload(OpportunityBudgetYear.opportunity).selectinload(
                     Opportunity.plant
                 ),
-                selectinload(OpportunityBudgetYear.opportunity).selectinload(
-                    Opportunity.financial_lines
-                ),
+                selectinload(OpportunityBudgetYear.opportunity)
+                .selectinload(Opportunity.financial_lines)
+                .selectinload(FinancialLine.monthly_financials),
             )
             .order_by(OpportunityBudgetYear.id)
         )
@@ -1886,6 +1912,12 @@ class PurchasingValueService:
                 fx = 1.0
             else:
                 fx = float(opp.fx_rate_to_eur) if opp.fx_rate_to_eur and opp.fx_rate_to_eur > 0 else 0.0
+            # A non-EUR opp with no usable rate must not silently report EUR
+            # figures as 0 — that's indistinguishable from a genuine zero. Every
+            # *_eur field below is left None when this is true, and the count is
+            # surfaced in the summary (see router.py) so Finance can see how much
+            # is missing, matching kpi_service.py's non_eur_missing_rate pattern.
+            fx_missing = (opp.currency or "EUR") != "EUR" and fx <= 0
             contributing_lines = [
                 fl for fl in (opp.financial_lines or [])
                 if fl.status in ("Active", "Completed") and not fl.is_deleted
@@ -1893,6 +1925,45 @@ class PurchasingValueService:
 
             def _n(v):
                 return float(v) if v is not None else None
+
+            # Monthly-tracked figures scoped to this fiscal year — cash_expected/
+            # cash_actual and actual_saving are monthly fields on MonthlyFinancial,
+            # available regardless of opportunity_type (not limited to the "Cash"
+            # type). Used to pair each FY column with its own Expected/Actual,
+            # mirroring the Saving FY / Cash FY split shown on the Budgeting page.
+            cash_expected_eur = None
+            cash_actual_eur = None
+            saving_actual_fy_eur = None
+            if contributing_lines:
+                fy_start, fy_end_exclusive = budget_year_bounds(fiscal_year)
+                fy_months = [
+                    m
+                    for fl in contributing_lines
+                    for m in (fl.monthly_financials or [])
+                    if m.period_month and fy_start <= m.period_month < fy_end_exclusive
+                ]
+                raw_cash_expected = sum(_n(m.cash_expected) or 0.0 for m in fy_months)
+                raw_cash_actual = sum(
+                    _n(m.cash_actual) or 0.0 for m in fy_months if m.cash_actual is not None
+                )
+                cash_expected_eur = (
+                    round(raw_cash_expected * fx, 2)
+                    if raw_cash_expected and not fx_missing
+                    else None
+                )
+                cash_actual_eur = (
+                    round(raw_cash_actual * fx, 2)
+                    if any(m.cash_actual is not None for m in fy_months) and not fx_missing
+                    else None
+                )
+                raw_saving_actual_fy = sum(
+                    _n(m.actual_saving) or 0.0 for m in fy_months if m.actual_saving is not None
+                )
+                saving_actual_fy_eur = (
+                    round(raw_saving_actual_fy * fx, 2)
+                    if any(m.actual_saving is not None for m in fy_months) and not fx_missing
+                    else None
+                )
 
             eoy_forecast_eur = None
             expected_annual_saving_eur = None
@@ -1909,10 +1980,14 @@ class PurchasingValueService:
                 raw_exp = sum(_n(fl.expected_annual_saving) or 0.0 for fl in contributing_lines)
                 raw_actual = sum(_n(fl.cumulated_real_saving) or 0.0 for fl in contributing_lines)
                 raw_delta_ytd = sum(_n(fl.delta_vs_expected_ytd) or 0.0 for fl in contributing_lines)
-                eoy_forecast_eur = round(raw_eoy * fx, 2) if raw_eoy else None
-                expected_annual_saving_eur = round(raw_exp * fx, 2) if raw_exp else None
-                actual_ytd_eur = round(raw_actual * fx, 2) if raw_actual else None
-                delta_ytd_eur = round(raw_delta_ytd * fx, 2) if raw_delta_ytd else None
+                eoy_forecast_eur = round(raw_eoy * fx, 2) if raw_eoy and not fx_missing else None
+                expected_annual_saving_eur = (
+                    round(raw_exp * fx, 2) if raw_exp and not fx_missing else None
+                )
+                actual_ytd_eur = round(raw_actual * fx, 2) if raw_actual and not fx_missing else None
+                delta_ytd_eur = (
+                    round(raw_delta_ytd * fx, 2) if raw_delta_ytd and not fx_missing else None
+                )
                 # Δ EOY − Budget: both annual figures → meaningful comparison
                 # (applicable_amount is FY pro-rata; using it as denominator would mix units)
                 if eoy_forecast_eur is not None and expected_annual_saving_eur is not None:
@@ -1934,8 +2009,9 @@ class PurchasingValueService:
                     "currency": opp.currency or "EUR",
                     "fx_rate_to_eur": float(opp.fx_rate_to_eur) if opp.fx_rate_to_eur is not None else 1.0,
                     "applicable_amount_eur": round(float(r.applicable_amount) * fx, 2)
-                    if r.applicable_amount is not None
+                    if r.applicable_amount is not None and not fx_missing
                     else None,
+                    "fx_missing": fx_missing,
                     "portion_kind": r.portion_kind,
                     "suggested_status": r.suggested_status,
                     "budget_status": r.budget_status,
@@ -1951,6 +2027,9 @@ class PurchasingValueService:
                     "actual_ytd_eur": actual_ytd_eur,
                     "delta_ytd_eur": delta_ytd_eur,
                     "delta_eoy_budget": delta_eoy_budget,
+                    "saving_actual_fy_eur": saving_actual_fy_eur,
+                    "cash_expected_eur": cash_expected_eur,
+                    "cash_actual_eur": cash_actual_eur,
                     "real_start_date": opp.real_start_date.isoformat()
                     if opp.real_start_date
                     else None,
@@ -1963,8 +2042,8 @@ class PurchasingValueService:
                     # Opportunity has no created_at column — study_start_date (set
                     # when the buyer clicks "Start Study", Phase 0 kickoff) is the
                     # closest proxy for "when this opportunity began".
-                    "created_at": opp.study_start_date.isoformat()
-                    if opp.study_start_date
+                    "created_at": opp.created_at.isoformat()
+                    if opp.created_at
                     else None,
                     "duration_months": int(opp.duration_months)
                     if opp.duration_months is not None
@@ -2181,6 +2260,7 @@ class PurchasingValueService:
         duration_months: int,
         is_period_total: bool = False,
         windows: Optional[list] = None,
+        cash_annual: Optional[Decimal] = None,
     ) -> None:
         """R9 — rebuild the monthly profile from the real start date.
 
@@ -2248,18 +2328,25 @@ class PurchasingValueService:
             while cursor < rebuild_start:
                 base_offset += 1
                 cursor = add_months(cursor, 1)
-            # Flat fallback (no windows) spreads over the remaining months.
-            flat_annual_duration = (
-                duration_months if is_period_total else months_remaining
+            # Day-level prorated across the FULL nominal duration from new_start (same
+            # engine as _generate_monthly_profile / _day_prorated_ideals), then sliced
+            # to just the tail being rebuilt — guarantees a revised line's remaining
+            # months reconcile with the Budgeting page exactly like a freshly-created
+            # grid would, instead of the old flat per-month math.
+            full_ideals = self._day_prorated_ideals(
+                new_start, duration_months, is_period_total, windows, annual_saving
             )
-            monthlies = self._rounded_series(
-                [
-                    self._ideal_for_offset(
-                        base_offset + i, windows, annual_saving, flat_annual_duration, is_period_total
-                    )
-                    for i in range(months_remaining)
-                ]
-            )
+            tail_ideals = full_ideals[base_offset : base_offset + months_remaining]
+            monthlies = self._rounded_series(tail_ideals)
+
+            cash_series = None
+            if cash_annual:
+                full_cash_ideals = self._day_prorated_ideals(
+                    new_start, duration_months, True, None, cash_annual
+                )
+                tail_cash_ideals = full_cash_ideals[base_offset : base_offset + months_remaining]
+                cash_series = self._rounded_series(tail_cash_ideals)
+
             new_rows = []
             for i in range(months_remaining):
                 period = add_months(rebuild_start, i)
@@ -2268,12 +2355,16 @@ class PurchasingValueService:
                         financial_line_id=line.financial_line_id,
                         period_month=period,
                         expected_saving=monthlies[i],
+                        cash_expected=cash_series[i] if cash_series else None,
                     )
                 )
             self.db.add_all(new_rows)
 
-        # Update the financial line real_start_date
+        # Update the financial line real_start_date and duration — keeps
+        # line.duration_months from going stale relative to the opportunity (see
+        # _ensure_monthly_rows, which does the same sync on the initial grid).
         line.real_start_date = new_start
+        line.duration_months = Decimal(str(duration_months))
 
         # If the rows that caused an auto-escalation were removed, clear the stale flag.
         result3 = await self.db.execute(
@@ -2353,16 +2444,87 @@ class PurchasingValueService:
             out[-1] = (out[-1] + residual).quantize(Decimal("0.01"))
         return out
 
-    def _monthly_expected(
-        self, annual: Decimal, duration_months: int, is_period_total: bool = False
-    ) -> Decimal:
-        """Flat monthly expected (no per-year escalation). Used for cash rows and as
-        the fallback when no STP per-year windows exist. See _expected_for_offset for
-        the escalating STP profile."""
+    @staticmethod
+    def _day_prorated_ideals(
+        start_date: date,
+        duration_months: int,
+        is_period_total: bool,
+        windows: Optional[list],
+        annual: Decimal,
+    ) -> List[float]:
+        """UNROUNDED monthly ideals, day-level prorated across EVERY month (not just
+        the first) — mirrors compute_budget_year_portions's day-count math
+        (schemas.py), sliced by calendar month instead of fiscal year, so a monthly
+        grid summed by calendar year reconciles exactly with the Budgeting page's
+        Saving/Cash FY figures (OpportunityBudgetYear.applicable_amount).
+
+        The duration is split into consecutive 12-month "windows" anchored on
+        `start_date` (day preserved via add_months_preserve_day, so a window
+        genuinely spans 365/366 days, not 12 calendar-month boundaries). Each
+        window is spread at a uniform daily rate = window_amount / NOMINAL
+        window_days (the full 12-month span, even when the window is cut short
+        by `duration_months`). STP escalating windows get one window each
+        (`windows`); otherwise `annual` repeats every 12-month window. A
+        period-total (STP-period types with no escalation) is treated as a
+        single window spanning the whole duration (never truncated). When
+        `duration_months` isn't an exact multiple of a window's span, the final
+        window is truncated: its target is scaled down to
+        window_amount * (truncated_days / nominal_days) — otherwise the last
+        row would absorb the FULL window_amount into only a few months,
+        overpaying the tail by roughly the truncation ratio. The last row of
+        each (possibly truncated) window absorbs whatever remains so that
+        window's rows sum exactly to its (possibly scaled) target (same
+        reconciliation contract as compute_budget_year_portions /
+        _rounded_series)."""
         if duration_months <= 0:
-            return Decimal("0")
-        divisor = duration_months if is_period_total else min(duration_months, 12)
-        return round(annual / Decimal(str(divisor)), 2)
+            return []
+
+        if is_period_total and not windows:
+            window_amounts = [annual]
+            window_spans = [duration_months]
+        elif is_period_total and windows:
+            window_amounts = [Decimal(str(w)) for w in windows]
+            window_spans = [12] * len(window_amounts)
+        else:
+            n_windows = -(-duration_months // 12)  # ceil
+            window_amounts = [annual] * n_windows
+            window_spans = [12] * n_windows
+
+        ideals = [0.0] * duration_months
+        month_offset = 0
+        for w_amount, w_span in zip(window_amounts, window_spans):
+            span = min(w_span, duration_months - month_offset)
+            if span <= 0:
+                break
+            window_start = add_months_preserve_day(start_date, month_offset)
+            nominal_window_end = add_months_preserve_day(start_date, month_offset + w_span)
+            truncated_window_end = add_months_preserve_day(start_date, month_offset + span)
+            nominal_window_days = (nominal_window_end - window_start).days
+            truncated_window_days = (truncated_window_end - window_start).days
+            last_row = month_offset + span - 1
+            if nominal_window_days <= 0 or truncated_window_days <= 0:
+                month_offset += span
+                continue
+            window_target = (
+                w_amount * Decimal(truncated_window_days) / Decimal(nominal_window_days)
+            )
+            allocated = Decimal("0")
+            for i in range(month_offset, month_offset + span):
+                if i == last_row:
+                    ideals[i] += float(window_target - allocated)
+                    break
+                cal_month_start = add_months(start_date, i)
+                cal_month_end = add_months(start_date, i + 1)
+                overlap_start = max(cal_month_start, window_start)
+                overlap_end = min(cal_month_end, truncated_window_end)
+                days = (overlap_end - overlap_start).days
+                if days <= 0:
+                    continue
+                share = w_amount * Decimal(days) / Decimal(nominal_window_days)
+                ideals[i] += float(share)
+                allocated += share
+            month_offset += span
+        return ideals
 
     async def _generate_monthly_profile(
         self,
@@ -2374,18 +2536,30 @@ class PurchasingValueService:
         is_period_total: bool = False,
         windows: Optional[list] = None,
     ) -> None:
-        """Create one MonthlyFinancial row per month. Expected saving escalates per
-        12-month STP window when `windows` is given; cash stays flat."""
-        cash_monthly = (
-            self._monthly_expected(cash_annual, duration_months)
+        """Create one MonthlyFinancial row per month. Both expected saving and cash
+        are day-level prorated across every month via _day_prorated_ideals — see
+        that method for the reconciliation contract with the Budgeting page.
+
+        `cash_annual` is always treated as a single ONE-TIME total spread across
+        the whole duration (is_period_total=True) — unlike `annual_saving`, which
+        genuinely repeats every 12-month window for as long as the deal holds,
+        `cash_impact` is a single lump-sum estimate for the opportunity's lifetime
+        ("total cash estimate" per the Edit form). Treating it as annual-repeating
+        would multiply it once per 12-month window for any opportunity longer than
+        a year."""
+        monthlies = self._rounded_series(
+            self._day_prorated_ideals(
+                start_date, duration_months, is_period_total, windows, annual_saving
+            )
+        )
+        cash_series = (
+            self._rounded_series(
+                self._day_prorated_ideals(
+                    start_date, duration_months, True, None, cash_annual
+                )
+            )
             if cash_annual
             else None
-        )
-        monthlies = self._rounded_series(
-            [
-                self._ideal_for_offset(i, windows, annual_saving, duration_months, is_period_total)
-                for i in range(duration_months)
-            ]
         )
         rows: List[MonthlyFinancial] = []
         for i in range(duration_months):
@@ -2395,7 +2569,7 @@ class PurchasingValueService:
                     financial_line_id=line.financial_line_id,
                     period_month=period,
                     expected_saving=monthlies[i],
-                    cash_expected=cash_monthly,
+                    cash_expected=cash_series[i] if cash_series else None,
                 )
             )
         self.db.add_all(rows)
@@ -2428,6 +2602,11 @@ class PurchasingValueService:
         new_annual = opp.expected_annual_saving or Decimal("0")
         line.expected_annual_saving = new_annual
         line.budget_value = new_annual
+        # Keep the line's duration in sync with the opportunity's current value —
+        # it's otherwise only ever set once at line creation and would go stale if
+        # opp.duration_months is edited afterward, silently desyncing any later
+        # rebuild (Revise Baseline / STP revision) that reads line.duration_months.
+        line.duration_months = Decimal(str(duration_months))
         # Drop any previously generated (empty) rows, then build from the real start.
         for m in list(line.monthly_financials or []):
             await self.db.delete(m)
@@ -2687,7 +2866,7 @@ class PurchasingValueService:
                         stp_windows = self._stp_year_windows(opp)
                         await self._rebuild_monthly_profile(
                             fl, opp.expected_annual_saving or Decimal("0"),
-                            fl.real_start_date, int(fl.duration_months or 12),
+                            fl.real_start_date, int(opp.duration_months or 12),
                             is_period_total=True, windows=stp_windows,
                         )
 
@@ -2861,12 +3040,19 @@ class PurchasingValueService:
         # entered, regenerates only the remaining (unactualized) months.
         # budget_value is untouched — it is the original budget commitment, distinct
         # from the corrected expected/estimated saving.
-        duration = int(line.duration_months or 12)
+        # Duration comes from the opportunity, not the line — line.duration_months
+        # is only synced on rebuild (see _ensure_monthly_rows/_rebuild_monthly_profile)
+        # and could otherwise be stale if opp.duration_months changed since.
+        duration = int(opp.duration_months or 12)
         start = line.real_start_date or line.planned_start_date or date.today().replace(day=1)
+        cash_annual = (
+            opp.cash_impact if opp.opportunity_type in ("Negotiation", "Cash") else None
+        )
         await self._rebuild_monthly_profile(
             line, opp.expected_annual_saving or Decimal("0"), start, duration,
             is_period_total=is_stp,
             windows=self._stp_year_windows(opp) if is_stp else None,
+            cash_annual=cash_annual,
         )
         await self._recalculate_ytd(line_id)
 
@@ -3080,6 +3266,18 @@ class PurchasingValueService:
                         "ATTACHMENT_REQUIRED",
                     )
 
+    @staticmethod
+    def _log_action_event(action: dict, event: str, by: str, **details) -> None:
+        """Append a timestamped entry to an action's audit trail (IATF traceability:
+        every status change, reminder, escalation and attachment must be recorded)."""
+        entry = {
+            "event": event,
+            "by": by,
+            "at": datetime.utcnow().isoformat(),
+            **details,
+        }
+        action.setdefault("history", []).append(entry)
+
     async def create_action_plan(self, opportunity_id: int, payload, user_email: str):
         from app.db.models import OpportunityActionPlan
 
@@ -3166,6 +3364,7 @@ class PurchasingValueService:
             existing["plan_title"] = payload.plan_title
 
         plan.plan_data = existing
+        flag_modified(plan, "plan_data")
         plan.updated_at = datetime.utcnow()
         plan.updated_by = user_email
 
@@ -3272,6 +3471,9 @@ class PurchasingValueService:
                         "plan_code": plan.plan_code,
                         "plan_title": plan.plan_title,
                         "plan_created_at": plan.created_at.isoformat() if plan.created_at else None,
+                        "plan_created_by": plan.created_by,
+                        "plan_updated_at": plan.updated_at.isoformat() if plan.updated_at else None,
+                        "plan_updated_by": plan.updated_by,
                         "opportunity_id": plan.opportunity_id,
                         "opportunity_name": opp_name,
                         "opp_phase": opp.phase_status if opp else None,
@@ -3287,6 +3489,12 @@ class PurchasingValueService:
                         "attachments": action.get("attachments", []),
                         "attachment_count": len(action.get("attachments", [])),
                         "description": action.get("description"),
+                        "history": action.get("history", []),
+                        "last_reminded_at": action.get("last_reminded_at"),
+                        "last_reminded_to": action.get("last_reminded_to"),
+                        "last_escalated_at": action.get("last_escalated_at"),
+                        "last_escalated_to": action.get("last_escalated_to"),
+                        "last_escalated_by": action.get("last_escalated_by"),
                     })
 
         items.sort(key=lambda x: (x["responsible_email"] or "zzz", x["due_date"] or "9999"))
@@ -3328,8 +3536,15 @@ class PurchasingValueService:
         if "attachments" not in actions[action_idx]:
             actions[action_idx]["attachments"] = []
         actions[action_idx]["attachments"].append(attachment)
+        self._log_action_event(
+            actions[action_idx],
+            "attachment_added",
+            user_email,
+            filename=attachment.get("filename"),
+        )
 
         plan.plan_data = data
+        flag_modified(plan, "plan_data")
         plan.updated_at = datetime.utcnow()
         plan.updated_by = user_email
         await self.db.flush()
@@ -3359,6 +3574,8 @@ class PurchasingValueService:
         if action_idx >= len(actions):
             raise AppException(404, "Action index out of range.", "ACTION_NOT_FOUND")
 
+        previous_status = actions[action_idx].get("status", "open")
+
         if status == "closed":
             if not implementation_date:
                 raise AppException(
@@ -3376,8 +3593,17 @@ class PurchasingValueService:
         else:
             actions[action_idx].pop("closed_date", None)
         actions[action_idx]["status"] = status
+        self._log_action_event(
+            actions[action_idx],
+            "status_changed",
+            user_email,
+            from_status=previous_status,
+            to_status=status,
+            closed_date=implementation_date if status == "closed" else None,
+        )
 
         plan.plan_data = data
+        flag_modified(plan, "plan_data")
         plan.updated_at = datetime.utcnow()
         plan.updated_by = user_email
         await self.db.flush()
@@ -3392,7 +3618,7 @@ class PurchasingValueService:
     ) -> dict:
         """Email the responsible person a reminder about one open action item."""
         plan = await self.get_action_plan(action_plan_id)
-        data = plan.plan_data or {}
+        data = dict(plan.plan_data or {})
         sujets = data.get("sujets", [])
 
         if sujet_idx >= len(sujets):
@@ -3455,7 +3681,107 @@ class PurchasingValueService:
             recipients=[recipient],
             body_html=html,
         )
+
+        now = datetime.utcnow().isoformat()
+        action["last_reminded_at"] = now
+        action["last_reminded_by"] = sent_by
+        action["last_reminded_to"] = recipient
+        self._log_action_event(action, "reminder_sent", sent_by, to=recipient)
+
+        plan.plan_data = data
+        flag_modified(plan, "plan_data")
+        plan.updated_at = datetime.utcnow()
+        await self.db.flush()
         return {"reminded": recipient}
+
+    async def send_action_item_escalation(
+        self,
+        action_plan_id: int,
+        sujet_idx: int,
+        action_idx: int,
+        recipient_email: str,
+        subject: str,
+        message: Optional[str],
+        escalated_by: str,
+    ) -> dict:
+        """Email an arbitrary recipient (e.g. a manager) about an action item."""
+        plan = await self.get_action_plan(action_plan_id)
+        data = dict(plan.plan_data or {})
+        sujets = data.get("sujets", [])
+
+        if sujet_idx >= len(sujets):
+            raise AppException(404, "Subject index out of range.", "SUJET_NOT_FOUND")
+        sujet = sujets[sujet_idx]
+        actions = sujet.get("actions", [])
+        if action_idx >= len(actions):
+            raise AppException(404, "Action index out of range.", "ACTION_NOT_FOUND")
+        action = actions[action_idx]
+
+        opp_result = await self.db.execute(
+            select(Opportunity).where(Opportunity.opportunity_id == plan.opportunity_id)
+        )
+        opp = opp_result.scalar_one_or_none()
+        opp_name = opp.opportunity_name if opp else f"Opportunity #{plan.opportunity_id}"
+
+        due_date = action.get("due_date")
+        title = action.get("titre") or "Untitled action"
+        responsible_name = action.get("responsable") or data.get("responsable") or ""
+        responsible_email = action.get("email_responsable") or data.get("email_responsable") or ""
+
+        html = f"""
+<div style="font-family:Inter,Arial,sans-serif;max-width:520px;margin:0 auto;padding:24px">
+  <h2 style="color:#be123c;font-size:18px;margin-bottom:4px">Action Plan Escalation</h2>
+  <p style="color:#64748b;font-size:13px;margin-top:0">
+    <strong>{escalated_by}</strong> is escalating an action item to you.
+  </p>
+  {f'<p style="font-size:13px;color:#334155;white-space:pre-wrap">{message}</p>' if message else ""}
+  <table style="width:100%;border-collapse:collapse;margin:16px 0">
+    <tr>
+      <td style="padding:4px 12px 4px 0;color:#64748b;font-size:13px">Opportunity</td>
+      <td style="padding:4px 0;font-size:13px;font-weight:600">{opp_name}</td>
+    </tr>
+    <tr>
+      <td style="padding:4px 12px 4px 0;color:#64748b;font-size:13px">Action</td>
+      <td style="padding:4px 0;font-size:13px;font-weight:600">{title}</td>
+    </tr>
+    <tr>
+      <td style="padding:4px 12px 4px 0;color:#64748b;font-size:13px">Responsible</td>
+      <td style="padding:4px 0;font-size:13px;font-weight:600">{responsible_name or responsible_email or "—"}</td>
+    </tr>
+    <tr>
+      <td style="padding:4px 12px 4px 0;color:#64748b;font-size:13px">Status</td>
+      <td style="padding:4px 0;font-size:13px;font-weight:600">{action.get("status", "open")}</td>
+    </tr>
+    <tr>
+      <td style="padding:4px 12px 4px 0;color:#64748b;font-size:13px">Due date</td>
+      <td style="padding:4px 0;font-size:13px;font-weight:600">{due_date or "—"}</td>
+    </tr>
+  </table>
+</div>"""
+
+        await send_email(
+            subject=subject,
+            recipients=[recipient_email],
+            body_html=html,
+        )
+
+        now = datetime.utcnow().isoformat()
+        action["last_escalated_at"] = now
+        action["last_escalated_by"] = escalated_by
+        action["last_escalated_to"] = recipient_email
+        self._log_action_event(
+            action,
+            "escalation_sent",
+            escalated_by,
+            to=recipient_email,
+            subject=subject,
+        )
+
+        plan.plan_data = data
+        flag_modified(plan, "plan_data")
+        plan.updated_at = datetime.utcnow()
+        await self.db.flush()
+        return {"escalated_to": recipient_email}
 
     async def _recalculate_ytd(self, financial_line_id: int) -> None:
         """Recalculate monthly cumulated fields AND push totals back to FinancialLine.

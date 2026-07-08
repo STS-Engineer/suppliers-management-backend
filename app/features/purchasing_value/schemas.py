@@ -5,7 +5,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Dict, Optional, List, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
 
 # ---------------------------------------------------------------------------
@@ -697,6 +697,8 @@ class MonthlyFinancialResponse(BaseModel):
     cash_expected: Optional[Decimal] = None
     cash_actual: Optional[Decimal] = None
     cumulated_cash_actual: Optional[Decimal] = None
+    updated_at: Optional[datetime] = None
+    updated_by: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -727,6 +729,12 @@ class EscalateRequest(BaseModel):
     escalated_by: Optional[str] = None
     # Optional: email specific recipients beyond the purchasing_owner
     extra_recipients: Optional[List[str]] = None
+
+
+class EscalateActionItemRequest(BaseModel):
+    recipient_email: EmailStr
+    subject: str = Field(..., min_length=3)
+    message: Optional[str] = None
 
 
 class RecoveryUpdateRequest(BaseModel):
@@ -1009,6 +1017,7 @@ class OpportunityResponse(BaseModel):
     reason_capacity: Optional[bool] = None
     reason_other: Optional[str] = None
     created_at: Optional[datetime] = None
+    created_by: Optional[str] = None
     updated_at: Optional[datetime] = None
     # STP revision approval — non-null when a Director-approval request is pending
     pending_stp_revision: Optional[dict] = None

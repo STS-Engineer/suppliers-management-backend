@@ -287,8 +287,32 @@ class PurchasingKpiService:
             active_lines = [line for line in kpi_lines if line.status == "Active"]
             all_opps = [
                 o for o in all_opps
-                if (not _cat_set   or (o.opportunity_type or "") in _cat_set)
+                if (not _plant_set or o.plant_id in _plant_set)
+                and (not _cat_set   or (o.opportunity_type or "") in _cat_set)
                 and (not _buyer_set or (o.idea_owner or "") in _buyer_set)
+            ]
+            # Re-derive every dict/list keyed off the PRE-filter data — otherwise
+            # sections built earlier (committed budget, pipeline, by-type lookup)
+            # would silently ignore the active filter while every other KPI on
+            # the same dashboard view correctly shrinks. See _filtered_opp_ids.
+            _filtered_opp_ids = {o.opportunity_id for o in all_opps}
+            kpi_lines_by_opp = {}
+            for line in kpi_lines:
+                kpi_lines_by_opp.setdefault(line.opportunity_id, []).append(line)
+            committed_budget_by_opp = {
+                k: v for k, v in committed_budget_by_opp.items() if k in _filtered_opp_ids
+            }
+            opportunity_pipeline_by_opp = {
+                k: v for k, v in opportunity_pipeline_by_opp.items() if k in _filtered_opp_ids
+            }
+            committed_opp_ids = set(committed_budget_by_opp)
+            opportunity_opp_ids = set(opportunity_pipeline_by_opp)
+            all_gate_requests = [
+                r for r in all_gate_requests if r.opportunity_id in _filtered_opp_ids
+            ]
+            all_projects = [
+                p for p in all_projects
+                if p.opportunity_id is None or p.opportunity_id in _filtered_opp_ids
             ]
 
         # ── FORECAST KPIs ─────────────────────────────────────────────────
@@ -507,7 +531,9 @@ class PurchasingKpiService:
         )
 
         # ── MONTHLY SAVINGS (for chart) ───────────────────────────────────
-        # expected_saving uses equal distribution: annual / duration_months (not days-based).
+        # expected_saving is read as stored on MonthlyFinancial — day-level
+        # prorated per month by the purchasing_value service (see
+        # PurchasingValueService._day_prorated_ideals), not recomputed here.
 
         monthly_map: dict[str, dict] = {}
         for line in kpi_lines:
