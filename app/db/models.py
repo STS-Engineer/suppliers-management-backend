@@ -1807,6 +1807,10 @@ class Opportunity(GovernanceMixin, Base):
     opportunity_id: Mapped[int] = mapped_column(
         Integer, primary_key=True, autoincrement=True
     )
+    created_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, server_default=func.current_timestamp(), nullable=True
+    )
+    created_by: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
     opportunity_name: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     opportunity_type: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
