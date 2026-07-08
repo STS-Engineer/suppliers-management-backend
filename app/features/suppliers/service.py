@@ -760,7 +760,14 @@ class SupplierService:
             if operational_score is not None
             else self._extract_operational_grade(data)
         )
-        impact_score = data.impact_score
+        impact_score = rel_service._calculate_impact_score([
+            data.impact_question_1,
+            data.impact_question_2,
+            data.impact_question_3,
+            data.impact_question_4,
+            data.impact_question_5,
+            data.impact_question_6,
+        ])
         strategic_mention = self._extract_strategic_mention(data)
         panel_decision = self._extract_panel_decision(data)
         final_grade = self._compose_final_grade(operational_grade, class_value)

@@ -171,6 +171,18 @@ FINANCIAL_HEALTH_VALIDITY_YEARS = {
     "At Risk": 1,
 }
 
+# Canonical point values for the 6 supplier-impact questions. Mirrors
+# RelationEvaluationPage.tsx's IMPACT_SCORES and onboarding.ts's
+# scoreImpactAnswer() -- keys are lowercased since answers are matched
+# case-insensitively (see _calculate_impact_score).
+IMPACT_ANSWER_SCORES = {
+    "major +": 5,
+    "major -": -5,
+    "minor +": 3,
+    "minor -": -3,
+    "none": 0,
+}
+
 
 class SupplierRelationService:
     def __init__(self, db: AsyncSession):
@@ -3086,9 +3098,30 @@ class SupplierRelationService:
             or self._pluck(current_classification, "panel_decision")
             or relation.panel_decision
         )
+        merged_impact_answers = [
+            data.impact_question_1
+            if data.impact_question_1 is not None
+            else self._pluck(previous_impact_input, "question_1"),
+            data.impact_question_2
+            if data.impact_question_2 is not None
+            else self._pluck(previous_impact_input, "question_2"),
+            data.impact_question_3
+            if data.impact_question_3 is not None
+            else self._pluck(previous_impact_input, "question_3"),
+            data.impact_question_4
+            if data.impact_question_4 is not None
+            else self._pluck(previous_impact_input, "question_4"),
+            data.impact_question_5
+            if data.impact_question_5 is not None
+            else self._pluck(previous_impact_input, "question_5"),
+            data.impact_question_6
+            if data.impact_question_6 is not None
+            else self._pluck(previous_impact_input, "question_6"),
+        ]
+        computed_impact_score = self._calculate_impact_score(merged_impact_answers)
         impact_score = (
-            data.impact_score
-            if data.impact_score is not None
+            computed_impact_score
+            if computed_impact_score is not None
             else self._pluck(current_classification, "impact_score")
         )
         evaluation_changed = self._class_evaluation_changed(
@@ -3181,24 +3214,12 @@ class SupplierRelationService:
                 current_classification,
                 previous_impact_input,
             ),
-            question_1=data.impact_question_1
-            if data.impact_question_1 is not None
-            else self._pluck(previous_impact_input, "question_1"),
-            question_2=data.impact_question_2
-            if data.impact_question_2 is not None
-            else self._pluck(previous_impact_input, "question_2"),
-            question_3=data.impact_question_3
-            if data.impact_question_3 is not None
-            else self._pluck(previous_impact_input, "question_3"),
-            question_4=data.impact_question_4
-            if data.impact_question_4 is not None
-            else self._pluck(previous_impact_input, "question_4"),
-            question_5=data.impact_question_5
-            if data.impact_question_5 is not None
-            else self._pluck(previous_impact_input, "question_5"),
-            question_6=data.impact_question_6
-            if data.impact_question_6 is not None
-            else self._pluck(previous_impact_input, "question_6"),
+            question_1=merged_impact_answers[0],
+            question_2=merged_impact_answers[1],
+            question_3=merged_impact_answers[2],
+            question_4=merged_impact_answers[3],
+            question_5=merged_impact_answers[4],
+            question_6=merged_impact_answers[5],
             impact_score=impact_score,
             comments=data.comments,
             entered_by=data.changed_by or "SYSTEM",
@@ -3517,7 +3538,14 @@ class SupplierRelationService:
             if data.operational_class
             else None
         )
-        impact_score = data.impact_score
+        impact_score = self._calculate_impact_score([
+            data.impact_question_1,
+            data.impact_question_2,
+            data.impact_question_3,
+            data.impact_question_4,
+            data.impact_question_5,
+            data.impact_question_6,
+        ])
         strategic_mention = (
             data.strategic_mention.lower() if data.strategic_mention else None
         )
@@ -4885,6 +4913,24 @@ class SupplierRelationService:
         if not selected_scores:
             return None
         return sum(selected_scores) / Decimal(len(selected_scores))
+
+    @classmethod
+    def _calculate_impact_score(
+        cls,
+        answers: list[Optional[str]],
+    ) -> Optional[int]:
+        """Canonical server-side impact score: sum of the 6 impact-question
+        answers' point values. Every save path previously trusted
+        data.impact_score as submitted by the client with no server-side
+        computation at all -- unlike class_score/operational_score, which are
+        always recomputed here. Mirrors the two frontend copies of this same
+        mapping (RelationEvaluationPage.tsx's IMPACT_SCORES,
+        onboarding.ts's scoreImpactAnswer/calculateImpactScore, used by
+        EvaluationDetailsForm.tsx) -- both currently agree, but nothing
+        previously verified that server-side."""
+        if not any(a not in (None, "") for a in answers):
+            return None
+        return sum(IMPACT_ANSWER_SCORES.get(str(a).strip().lower(), 0) for a in answers if a)
 
     @staticmethod
     def _derive_operational_grade(score: Optional[Decimal]) -> Optional[str]:
