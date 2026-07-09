@@ -149,6 +149,31 @@ async def update_opportunity(
         raise
 
 
+@router.delete("/opportunities/{opportunity_id}", response_model=dict)
+async def delete_opportunity(
+    opportunity_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, ["vp_conversion"])
+    try:
+        svc = PurchasingValueService(db)
+        actor_email = (
+            current_user.get("email")
+            or current_user.get("upn")
+            or current_user.get("sub")
+        )
+        await svc.delete_opportunity(opportunity_id, deleted_by=actor_email)
+        await db.commit()
+        return {"status": "success", "data": {"opportunity_id": opportunity_id}}
+    except AppException:
+        await db.rollback()
+        raise
+    except Exception:
+        await db.rollback()
+        raise
+
+
 # DISABLED — Request Revision creation is turned off. purchasing_director /
 # vp_conversion edit the STP baseline directly in Phase 2/3 (actor_role bypass
 # in PurchasingValueService.update_opportunity); other roles get read-only

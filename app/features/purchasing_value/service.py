@@ -128,6 +128,18 @@ class PurchasingValueService:
             raise AppException(404, "Opportunity not found", "OPPORTUNITY_NOT_FOUND")
         return opp
 
+    async def delete_opportunity(
+        self, opportunity_id: int, deleted_by: Optional[str] = None
+    ) -> None:
+        """Soft-delete an opportunity (is_deleted=True), consistent with how every
+        read path filters opportunities. Hard delete is avoided so historical
+        financial lines, documents, and gate decisions stay intact."""
+        opp = await self.get_opportunity(opportunity_id)
+        opp.is_deleted = True
+        opp.deleted_at = datetime.utcnow()
+        opp.deleted_by = deleted_by
+        await self.db.flush()
+
     async def get_financial_line(self, line_id: int) -> FinancialLine:
         result = await self.db.execute(
             select(FinancialLine)
