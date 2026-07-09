@@ -208,6 +208,11 @@ class VoteFormData(BaseModel):
     period_saving: Optional[float] = None
     expected_annual_saving: Optional[float] = None
 
+    # Cash — one-shot impact, any opportunity type can carry one
+    cash_impact: Optional[float] = None
+    cash_inventory_gap: Optional[float] = None
+    cash_ap_gap: Optional[float] = None
+
     # ROI & investment
     roi_percent: Optional[float] = None
     roi_period_percent: Optional[float] = None

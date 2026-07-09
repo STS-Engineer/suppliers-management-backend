@@ -596,6 +596,10 @@ class GateApprovalService:
             saving_year_n3=_f("saving_year_n3"),
             period_saving=_f("period_saving"),
             expected_annual_saving=_f("expected_annual_saving"),
+            # Cash
+            cash_impact=_f("cash_impact"),
+            cash_inventory_gap=_f("cash_inventory_gap"),
+            cash_ap_gap=_f("cash_ap_gap"),
             # ROI & investment
             roi_percent=_f("roi_percent"),
             roi_period_percent=_f("roi_period_percent"),
@@ -867,14 +871,24 @@ class GateApprovalService:
         ]
         if approver_role:
             rows.append(("Your role", f"{approver_role}" + (f" · {committee_level} Committee" if committee_level else "")))
+        rows.append(("Owner (Idea)", snap.get("idea_owner") or "—"))
+        # Negotiation has no STP format (no project/price breakdown) — show the
+        # flat saving + cash figures instead of the STP-only fields below.
+        if opp.opportunity_type == "Negotiation":
+            if snap.get("expected_annual_saving") not in (None, 0):
+                rows.append(("Est. Annual Saving", fmt(snap.get("expected_annual_saving"), " €")))
+            if snap.get("cash_impact") not in (None, 0):
+                rows.append(("Cash Impact", fmt(snap.get("cash_impact"), " €")))
+        else:
+            rows += [
+                ("Project Manager", snap.get("project_owner") or "—"),
+                ("Change type", snap.get("change_mode") or "—"),
+                ("Current price", fmt(snap.get("current_price"), " €", 4)),
+                ("Proposed price", fmt(snap.get("proposed_price"), " €", 4)),
+                ("Saving / year", fmt(snap.get("saving_year_n"), " €")),
+                ("Period saving", fmt(snap.get("period_saving"), " €")),
+            ]
         rows += [
-            ("Owner (Idea)", snap.get("idea_owner") or "—"),
-            ("Project Manager", snap.get("project_owner") or "—"),
-            ("Change type", snap.get("change_mode") or "—"),
-            ("Current price", fmt(snap.get("current_price"), " €", 4)),
-            ("Proposed price", fmt(snap.get("proposed_price"), " €", 4)),
-            ("Saving / year", fmt(snap.get("saving_year_n"), " €")),
-            ("Period saving", fmt(snap.get("period_saving"), " €")),
             ("Planned start", snap.get("planned_start_date") or "—"),
             ("Duration", fmt(snap.get("duration_months"), " months")),
         ]
