@@ -148,11 +148,18 @@ class SupplierGroupUpdate(SupplierGroupBase):
     nom: Optional[str] = Field(None, max_length=200)
 
 
+class ActiveStatusRequest(BaseModel):
+    """Body for the group/unit activate-deactivate endpoints."""
+    is_active: bool
+
+
 class SupplierGroupResponse(SupplierGroupBase):
     """Response schema for supplier group."""
     id_group: int
     group_code: Optional[str] = None
     validation_status: str = "approved"
+    is_active: bool = True
+    inactivated_at: Optional[datetime] = None
     commodities: List[str] = Field(
         default_factory=list,
         description="Read-only commodities aggregated from this group's supplier units",
@@ -261,7 +268,9 @@ class SupplierUnitCreate(SupplierUnitBase):
 class SupplierUnitUpdate(SupplierUnitBase):
     """Schema for updating a supplier unit."""
     supplier_name: Optional[str] = Field(None, max_length=50)
-    is_active: Optional[bool] = Field(None, description="Active status of the unit")
+    # is_active is intentionally NOT settable here — it must go through the
+    # dedicated PATCH /units/{unit_id}/status endpoint, which cascades the
+    # change to the unit's site relations and stamps inactivated_at.
 
 
 class SupplierUnitResponse(SupplierUnitBase):
@@ -270,6 +279,7 @@ class SupplierUnitResponse(SupplierUnitBase):
     id_group: Optional[int]
     unit_code: Optional[str] = None
     is_active: bool = True
+    inactivated_at: Optional[datetime] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 

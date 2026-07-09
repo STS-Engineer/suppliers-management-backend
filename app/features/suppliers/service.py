@@ -45,10 +45,12 @@ class SupplierService:
     # SupplierGroup Operations
     # ========================================================================
     
-    async def list_supplier_groups(self, skip: int = 0, limit: int = 100) -> Dict[str, Any]:
-        """List all supplier groups with pagination."""
-        groups = await self.repo.find_all_groups(skip=skip, limit=limit)
-        total = await self.repo.count_groups()
+    async def list_supplier_groups(
+        self, skip: int = 0, limit: int = 100, is_active: Optional[bool] = None
+    ) -> Dict[str, Any]:
+        """List all supplier groups with pagination. is_active=None returns both."""
+        groups = await self.repo.find_all_groups(skip=skip, limit=limit, is_active=is_active)
+        total = await self.repo.count_groups(is_active=is_active)
         return {
             "items": groups,
             "total": total,
@@ -130,15 +132,84 @@ class SupplierService:
         if success:
             await self.db.commit()
         return success
-    
+
+    async def set_group_active_status(
+        self,
+        group_id: int,
+        is_active: bool,
+        changed_by: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Activate/deactivate a supplier group.
+
+        Deactivating cascades to every (non-deleted) unit in the group, and
+        from each of those units to their site relations — a group with no
+        active presence shouldn't leave units/relations looking live.
+        Reactivating the group reactivates its units too, but NOT their
+        relations — each relation may have been deactivated for its own
+        reason and must be reactivated individually.
+        """
+        group = await self.repo.find_group_by_id(group_id)
+        if not group:
+            raise AppException(f"Supplier group with ID {group_id} not found", status_code=404)
+
+        now = datetime.utcnow()
+        group.is_active = is_active
+        group.inactivated_at = now if not is_active else None
+
+        units = await self.repo.find_units_by_group(group_id)
+        units_affected = 0
+        relations_affected = 0
+        for unit in units:
+            if is_active:
+                if not unit.is_active:
+                    unit.is_active = True
+                    unit.inactivated_at = None
+                    units_affected += 1
+                continue
+            if unit.is_active:
+                unit.is_active = False
+                unit.inactivated_at = now
+                units_affected += 1
+            relations_result = await self.db.execute(
+                select(SupplierSiteRelation).where(
+                    SupplierSiteRelation.id_supplier_unit == unit.id_supplier_unit,
+                    SupplierSiteRelation.is_active.is_(True),
+                    SupplierSiteRelation.is_deleted.is_(False),
+                )
+            )
+            for relation in relations_result.scalars().all():
+                relation.is_active = False
+                relation.inactivated_at = now
+                relations_affected += 1
+
+        await self._record_audit_event(
+            table_name="supplier_group",
+            record_pk=group_id,
+            action="ACTIVATE" if is_active else "DEACTIVATE",
+            changed_by=changed_by,
+            new_values={
+                "is_active": is_active,
+                "units_affected": units_affected,
+                "relations_affected": relations_affected,
+            },
+        )
+        await self.db.commit()
+        return {
+            "group": group,
+            "units_affected": units_affected,
+            "relations_affected": relations_affected,
+        }
+
     # ========================================================================
     # SupplierUnit Operations
     # ========================================================================
     
-    async def list_supplier_units(self, skip: int = 0, limit: int = 100) -> Dict[str, Any]:
-        """List all supplier units with pagination."""
-        units = await self.repo.find_all_units(skip=skip, limit=limit)
-        total = await self.repo.count_units()
+    async def list_supplier_units(
+        self, skip: int = 0, limit: int = 100, is_active: Optional[bool] = None
+    ) -> Dict[str, Any]:
+        """List all supplier units with pagination. is_active=None returns both."""
+        units = await self.repo.find_all_units(skip=skip, limit=limit, is_active=is_active)
+        total = await self.repo.count_units(is_active=is_active)
         return {
             "items": units,
             "total": total,
@@ -225,12 +296,14 @@ class SupplierService:
             "site_relations_count": len(relations),
         }
     
-    async def list_units_by_group(self, group_id: int) -> List[SupplierUnit]:
-        """List all units for a specific supplier group."""
+    async def list_units_by_group(
+        self, group_id: int, is_active: Optional[bool] = None
+    ) -> List[SupplierUnit]:
+        """List all units for a specific supplier group. is_active=None returns both."""
         group = await self.repo.find_group_by_id(group_id)
         if not group:
             raise AppException(f"Supplier group with ID {group_id} not found", status_code=404)
-        return await self.repo.find_units_by_group(group_id)
+        return await self.repo.find_units_by_group(group_id, is_active=is_active)
     
     async def create_supplier_unit(
         self,
@@ -320,7 +393,54 @@ class SupplierService:
             )
             await self.db.commit()
         return success
-    
+
+    async def set_unit_active_status(
+        self,
+        unit_id: int,
+        is_active: bool,
+        changed_by: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Activate/deactivate a supplier unit.
+
+        Deactivating cascades to every active (non-deleted) site relation for
+        this unit — a unit with no active presence shouldn't leave relations
+        looking live. Reactivating the unit does NOT reactivate its relations;
+        each relation may have been deactivated for its own reason.
+        """
+        unit = await self.repo.find_unit_by_id(unit_id)
+        if not unit:
+            raise AppException(f"Supplier unit with ID {unit_id} not found", status_code=404)
+
+        previous_snapshot = self._unit_audit_snapshot(unit)
+        now = datetime.utcnow()
+        unit.is_active = is_active
+        unit.inactivated_at = now if not is_active else None
+
+        relations_affected = 0
+        if not is_active:
+            relations_result = await self.db.execute(
+                select(SupplierSiteRelation).where(
+                    SupplierSiteRelation.id_supplier_unit == unit_id,
+                    SupplierSiteRelation.is_active.is_(True),
+                    SupplierSiteRelation.is_deleted.is_(False),
+                )
+            )
+            for relation in relations_result.scalars().all():
+                relation.is_active = False
+                relation.inactivated_at = now
+                relations_affected += 1
+
+        await self._record_audit_event(
+            table_name="supplier_unit",
+            record_pk=unit_id,
+            action="ACTIVATE" if is_active else "DEACTIVATE",
+            changed_by=changed_by,
+            old_values=previous_snapshot,
+            new_values=self._unit_audit_snapshot(unit),
+        )
+        await self.db.commit()
+        return {"unit": unit, "relations_affected": relations_affected}
+
     async def create_complete_supplier(
         self,
         group_data: dict = None,
@@ -1217,6 +1337,7 @@ class SupplierService:
             )
             .where(SupplierSiteRelation.is_deleted.is_(False))
             .where(SupplierSiteRelation.validation_status == "approved")
+            .where(SupplierSiteRelation.is_active.is_(True))
             .distinct()
         )
         base = (
@@ -1233,6 +1354,21 @@ class SupplierService:
             )
             .where(SupplierCertification.is_deleted.is_(False))
             .where(SupplierCertification.id_supplier_unit.in_(units_with_eval))
+            # Defensive — the unit/group cascade always deactivates every relation
+            # on deactivation, so this is normally implied by the relation check
+            # above, but a deactivated unit/group must never leak through here.
+            .where(
+                or_(
+                    SupplierUnitModel.id_supplier_unit.is_(None),
+                    SupplierUnitModel.is_active.is_(True),
+                )
+            )
+            .where(
+                or_(
+                    SupplierGroupModel.id_group.is_(None),
+                    SupplierGroupModel.is_active.is_(True),
+                )
+            )
         )
         if standard_type:
             base = base.where(SupplierCertification.standard_type == standard_type)

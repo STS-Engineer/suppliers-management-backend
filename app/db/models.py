@@ -172,6 +172,10 @@ class SupplierGroup(GovernanceMixin, Base):
     validation_status: Mapped[str] = mapped_column(
         String(20), server_default="approved", nullable=False
     )
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, server_default="true", nullable=False
+    )
+    inactivated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
     units: Mapped[List["SupplierUnit"]] = relationship(
         back_populates="group", cascade="all, delete-orphan", passive_deletes=True

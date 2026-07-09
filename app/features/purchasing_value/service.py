@@ -3180,7 +3180,9 @@ class PurchasingValueService:
                 SupplierSiteRelation.panel_decision.in_(PANEL_ACTIVE_DECISIONS),
                 SupplierSiteRelation.is_active.is_(True),
                 SupplierSiteRelation.is_deleted.is_(False),
+                SupplierUnit.is_active.is_(True),
                 SupplierUnit.is_deleted.is_(False),
+                SupplierGroup.is_active.is_(True),
                 SupplierGroup.is_deleted.is_(False),
             )
             .options(selectinload(SupplierUnit.group))

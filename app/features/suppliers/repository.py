@@ -25,9 +25,9 @@ class SupplierRepository:
     # ========================================================================
 
     async def find_all_groups(
-        self, skip: int = 0, limit: int = 100
+        self, skip: int = 0, limit: int = 100, is_active: Optional[bool] = None
     ) -> List[SupplierGroup]:
-        """Find all supplier groups with pagination."""
+        """Find all supplier groups with pagination. is_active=None returns both."""
         stmt = (
             select(SupplierGroup)
             .where(SupplierGroup.is_deleted.is_(False))
@@ -38,14 +38,18 @@ class SupplierRepository:
             .offset(skip)
             .limit(limit)
         )
+        if is_active is not None:
+            stmt = stmt.where(SupplierGroup.is_active.is_(is_active))
         result = await self.db.execute(stmt)
         return result.scalars().all()
 
-    async def count_groups(self) -> int:
-        """Count total number of supplier groups."""
+    async def count_groups(self, is_active: Optional[bool] = None) -> int:
+        """Count total number of supplier groups. is_active=None counts both."""
         stmt = select(func.count(SupplierGroup.id_group)).where(
             SupplierGroup.is_deleted.is_(False)
         )
+        if is_active is not None:
+            stmt = stmt.where(SupplierGroup.is_active.is_(is_active))
         result = await self.db.execute(stmt)
         return result.scalar() or 0
 
@@ -132,31 +136,39 @@ class SupplierRepository:
     # ========================================================================
 
     async def find_all_units(
-        self, skip: int = 0, limit: int = 100
+        self, skip: int = 0, limit: int = 100, is_active: Optional[bool] = None
     ) -> List[SupplierUnit]:
-        """Find all supplier units with pagination."""
+        """Find all supplier units with pagination. is_active=None returns both."""
         stmt = (
             select(SupplierUnit)
             .where(SupplierUnit.is_deleted.is_(False))
             .offset(skip)
             .limit(limit)
         )
+        if is_active is not None:
+            stmt = stmt.where(SupplierUnit.is_active.is_(is_active))
         result = await self.db.execute(stmt)
         return result.scalars().all()
 
-    async def find_units_by_group(self, group_id: int) -> List[SupplierUnit]:
-        """Find all supplier units for a specific group."""
+    async def find_units_by_group(
+        self, group_id: int, is_active: Optional[bool] = None
+    ) -> List[SupplierUnit]:
+        """Find all supplier units for a specific group. is_active=None returns both."""
         stmt = select(SupplierUnit).where(
             SupplierUnit.id_group == group_id, SupplierUnit.is_deleted.is_(False)
         )
+        if is_active is not None:
+            stmt = stmt.where(SupplierUnit.is_active.is_(is_active))
         result = await self.db.execute(stmt)
         return result.scalars().all()
 
-    async def count_units(self) -> int:
-        """Count total number of supplier units."""
+    async def count_units(self, is_active: Optional[bool] = None) -> int:
+        """Count total number of supplier units. is_active=None counts both."""
         stmt = select(func.count(SupplierUnit.id_supplier_unit)).where(
             SupplierUnit.is_deleted.is_(False)
         )
+        if is_active is not None:
+            stmt = stmt.where(SupplierUnit.is_active.is_(is_active))
         result = await self.db.execute(stmt)
         return result.scalar() or 0
 

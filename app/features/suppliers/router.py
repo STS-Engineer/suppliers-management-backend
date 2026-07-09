@@ -81,6 +81,19 @@ def _resolve_actor(current_user: dict | None) -> Optional[str]:
     )
 
 
+def _parse_active_status(value: str) -> Optional[bool]:
+    """"active" (default) -> True, "inactive" -> False, "all" -> None (no filter)."""
+    if value == "active":
+        return True
+    if value == "inactive":
+        return False
+    if value == "all":
+        return None
+    raise HTTPException(
+        status_code=422, detail="status must be one of: active, inactive, all"
+    )
+
+
 # ============================================================================
 # Complete Supplier Onboarding Workflow (Main Endpoint)
 # ============================================================================
@@ -408,6 +421,7 @@ async def reject_supplier(
 async def list_supplier_groups(
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=1000),
+    status: str = Query("active", description="active | inactive | all"),
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
@@ -416,10 +430,15 @@ async def list_supplier_groups(
 
     - **skip**: Number of records to skip (default: 0)
     - **limit**: Number of records to return (default: 100, max: 1000)
+    - **status**: "active" (default — every picker elsewhere in the app relies
+      on this default to hide deactivated groups), "inactive" (Deactivated
+      tab), or "all"
     """
     try:
         service = SupplierService(db)
-        result = await service.list_supplier_groups(skip=skip, limit=limit)
+        result = await service.list_supplier_groups(
+            skip=skip, limit=limit, is_active=_parse_active_status(status)
+        )
         return {
             "status": "success",
             "data": {
@@ -540,6 +559,42 @@ async def delete_supplier_group(
         raise
 
 
+@router.patch("/groups/{group_id}/status", response_model=dict)
+async def set_group_active_status(
+    group_id: int,
+    data: schemas.ActiveStatusRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Activate or deactivate a supplier group.
+
+    Deactivating cascades to every unit in the group and, from those units,
+    to their site relations. Reactivating the group reactivates its units,
+    but not their relations — see SupplierService.set_group_active_status.
+    """
+    _block_viewer(current_user)
+    try:
+        svc = SupplierService(db)
+        result = await svc.set_group_active_status(
+            group_id, data.is_active, changed_by=_resolve_actor(current_user)
+        )
+        return {
+            "status": "success",
+            "data": {
+                "group": schemas.SupplierGroupResponse.model_validate(result["group"]),
+                "units_affected": result["units_affected"],
+                "relations_affected": result["relations_affected"],
+            },
+            "message": (
+                f"Supplier group {group_id} {'activated' if data.is_active else 'deactivated'}"
+            ),
+        }
+    except AppException:
+        raise
+    except Exception:
+        raise
+
+
 # ============================================================================
 # SupplierUnit Endpoints
 # ============================================================================
@@ -549,13 +604,16 @@ async def delete_supplier_group(
 async def list_supplier_units(
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=1000),
+    status: str = Query("active", description="active | inactive | all"),
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
     """List all supplier units with pagination."""
     try:
         service = SupplierService(db)
-        result = await service.list_supplier_units(skip=skip, limit=limit)
+        result = await service.list_supplier_units(
+            skip=skip, limit=limit, is_active=_parse_active_status(status)
+        )
         return {
             "status": "success",
             "data": {
@@ -597,13 +655,16 @@ async def get_supplier_unit(
 @router.get("/groups/{group_id}/units", response_model=dict)
 async def list_units_for_group(
     group_id: int,
+    status: str = Query("active", description="active | inactive | all"),
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
     """List all supplier units for a specific supplier group."""
     try:
         service = SupplierService(db)
-        units = await service.list_units_by_group(group_id)
+        units = await service.list_units_by_group(
+            group_id, is_active=_parse_active_status(status)
+        )
         return {
             "status": "success",
             "data": {
@@ -777,6 +838,41 @@ async def delete_supplier_unit(
             "status": "success",
             "data": {"deleted": success},
             "message": f"Supplier unit {unit_id} deleted successfully",
+        }
+    except AppException:
+        raise
+    except Exception:
+        raise
+
+
+@router.patch("/units/{unit_id}/status", response_model=dict)
+async def set_unit_active_status(
+    unit_id: int,
+    data: schemas.ActiveStatusRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Activate or deactivate a supplier unit.
+
+    Deactivating cascades to every active site relation for this unit.
+    Reactivating the unit does NOT reactivate its relations — each must be
+    reactivated individually. See SupplierService.set_unit_active_status.
+    """
+    _block_viewer(current_user)
+    try:
+        svc = SupplierService(db)
+        result = await svc.set_unit_active_status(
+            unit_id, data.is_active, changed_by=_resolve_actor(current_user)
+        )
+        return {
+            "status": "success",
+            "data": {
+                "unit": schemas.SupplierUnitResponse.model_validate(result["unit"]),
+                "relations_affected": result["relations_affected"],
+            },
+            "message": (
+                f"Supplier unit {unit_id} {'activated' if data.is_active else 'deactivated'}"
+            ),
         }
     except AppException:
         raise
