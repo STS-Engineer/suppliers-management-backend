@@ -524,7 +524,7 @@ async def rebuild_monthly_profile(
             raise AppException(404, "Financial line not found", "NOT_FOUND")
         svc = PurchasingValueService(db)
         start = line.real_start_date or line.planned_start_date
-        if not start or not line.expected_annual_saving:
+        if start is None or line.expected_annual_saving is None:
             raise AppException(
                 422,
                 "Line needs planned_start_date and expected_annual_saving.",

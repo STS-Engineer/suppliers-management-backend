@@ -45,7 +45,7 @@ class STPBenefits(BaseModel):
 # Reference values (single source of truth — mirrors the spec)
 # ---------------------------------------------------------------------------
 
-OPPORTUNITY_TYPES = ["Negotiation", "Sourcing", "Technical Productivity", "Cash"]
+OPPORTUNITY_TYPES = ["Negotiation", "Sourcing", "Technical Productivity"]
 
 OPPORTUNITY_STATUSES = [
     "Assigned",                  # just created, Phase 0 not yet started
@@ -427,7 +427,7 @@ def compute_saving_by_calendar_year(opp) -> dict:
 
 class OpportunityCreateRequest(BaseModel):
     opportunity_name: str = Field(..., min_length=1, max_length=500)
-    opportunity_type: str = Field(..., description="Negotiation|Sourcing|Technical Productivity|Cash")
+    opportunity_type: str = Field(..., description="Negotiation|Sourcing|Technical Productivity")
     idea_owner: str = Field(..., description="Email of the initial pilot (buyer)")
     description: Optional[str] = None
     plant_id: Optional[int] = None
@@ -717,7 +717,7 @@ class AddComponentLineRequest(BaseModel):
     """Add an additional FinancialLine for a specific component/part number."""
     component_name: str = Field(..., min_length=1, description="Component description or name")
     component_pn: Optional[str] = Field(None, description="Part number (PN)")
-    expected_annual_saving: Decimal = Field(..., gt=0, description="Annual saving for this component (€)")
+    expected_annual_saving: Decimal = Field(..., ge=0, description="Annual saving for this component (€)")
     planned_start_date: Optional[date] = None
     duration_months: Optional[int] = Field(12, ge=1, le=120)
     added_by: Optional[str] = None
@@ -762,7 +762,7 @@ class FinancialLineReviseBaselineRequest(BaseModel):
     note: str = Field(..., min_length=1, description="Reason for revision — required for audit")
     revised_by: Optional[str] = None
     # Negotiation / Cash types only
-    revised_saving: Optional[Decimal] = Field(None, gt=0, description="New expected annual saving (€) — Negotiation/Cash types only")
+    revised_saving: Optional[Decimal] = Field(None, ge=0, description="New expected annual saving (€) — Negotiation/Cash types only")
     # Sourcing / Technical Productivity types only (any subset)
     current_price:      Optional[Decimal] = None
     proposed_price:     Optional[Decimal] = None

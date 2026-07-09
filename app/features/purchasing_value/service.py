@@ -2353,9 +2353,10 @@ class PurchasingValueService:
 
             cash_series = None
             if cash_annual:
-                full_cash_ideals = self._day_prorated_ideals(
-                    new_start, duration_months, True, None, cash_annual
-                )
+                # One-shot cash lives only in month 0 of the full duration (see
+                # _one_shot_cash_ideals) — if that month already has actuals
+                # (base_offset > 0), it was preserved and must not be repeated here.
+                full_cash_ideals = self._one_shot_cash_ideals(duration_months, cash_annual)
                 tail_cash_ideals = full_cash_ideals[base_offset : base_offset + months_remaining]
                 cash_series = self._rounded_series(tail_cash_ideals)
 
@@ -2512,6 +2513,16 @@ class PurchasingValueService:
             month_offset += span
         return ideals
 
+    @staticmethod
+    def _one_shot_cash_ideals(duration_months: int, cash_annual: Decimal) -> List[float]:
+        """`cash_impact` is realized once, in the fiscal year of the real start —
+        never spread across the deal's duration. Booking the full amount in the
+        first month (which belongs to exactly one fiscal year) and 0 everywhere
+        else means every later FY's cash total is naturally 0, with no proration."""
+        if duration_months <= 0:
+            return []
+        return [float(cash_annual)] + [0.0] * (duration_months - 1)
+
     async def _generate_monthly_profile(
         self,
         line: FinancialLine,
@@ -2522,17 +2533,13 @@ class PurchasingValueService:
         is_period_total: bool = False,
         windows: Optional[list] = None,
     ) -> None:
-        """Create one MonthlyFinancial row per month. Both expected saving and cash
-        are day-level prorated across every month via _day_prorated_ideals — see
-        that method for the reconciliation contract with the Budgeting page.
+        """Create one MonthlyFinancial row per month. Expected saving is day-level
+        prorated across every month via _day_prorated_ideals — see that method for
+        the reconciliation contract with the Budgeting page.
 
-        `cash_annual` is always treated as a single ONE-TIME total spread across
-        the whole duration (is_period_total=True) — unlike `annual_saving`, which
-        genuinely repeats every 12-month window for as long as the deal holds,
-        `cash_impact` is a single lump-sum estimate for the opportunity's lifetime
-        ("total cash estimate" per the Edit form). Treating it as annual-repeating
-        would multiply it once per 12-month window for any opportunity longer than
-        a year."""
+        `cash_annual`, unlike `annual_saving`, is never spread — it is realized once,
+        booked entirely in the first month (the real start), with every later month
+        (and therefore every later fiscal year) at 0. See _one_shot_cash_ideals."""
         monthlies = self._rounded_series(
             self._day_prorated_ideals(
                 start_date, duration_months, is_period_total, windows, annual_saving
@@ -2540,9 +2547,7 @@ class PurchasingValueService:
         )
         cash_series = (
             self._rounded_series(
-                self._day_prorated_ideals(
-                    start_date, duration_months, True, None, cash_annual
-                )
+                self._one_shot_cash_ideals(duration_months, cash_annual)
             )
             if cash_annual
             else None
