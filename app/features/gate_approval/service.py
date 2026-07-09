@@ -557,6 +557,7 @@ class GateApprovalService:
             # Identity
             opportunity_name=snap.get("opportunity_name"),
             opportunity_type=snap.get("opportunity_type"),
+            description=snap.get("description"),
             phase_from=req.phase_from,
             requested_by=req.requested_by,
             message=req.message,
@@ -869,6 +870,8 @@ class GateApprovalService:
             ("Type", opp.opportunity_type or "—"),
             ("Phase", f"{req.phase_from} → next"),
         ]
+        if opp.description:
+            rows.append(("Description", opp.description))
         if approver_role:
             rows.append(("Your role", f"{approver_role}" + (f" · {committee_level} Committee" if committee_level else "")))
         rows.append(("Owner (Idea)", snap.get("idea_owner") or "—"))

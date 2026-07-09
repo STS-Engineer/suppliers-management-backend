@@ -713,6 +713,7 @@ class PurchasingValueService:
     _STP_SNAPSHOT_FIELDS: tuple = (
         # Identity & status
         "opportunity_name", "opportunity_type", "phase_status", "status",
+        "description",
         "validation_decision", "idea_owner", "project_owner",
         "budget_year", "supplier_id", "plant_id",
         "change_mode",               # Standard | Silent — per-phase value at gate time

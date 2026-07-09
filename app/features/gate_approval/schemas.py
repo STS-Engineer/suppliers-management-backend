@@ -162,6 +162,7 @@ class VoteFormData(BaseModel):
     # Identity & context
     opportunity_name: Optional[str] = None
     opportunity_type: Optional[str] = None
+    description: Optional[str] = None
     phase_from: Optional[str] = None
     requested_by: Optional[str] = None
     message: Optional[str] = None
