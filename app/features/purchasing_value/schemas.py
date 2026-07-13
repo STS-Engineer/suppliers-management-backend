@@ -52,6 +52,42 @@ OPPORTUNITY_TYPES = ["Negotiation", "Sourcing", "Technical Productivity"]
 #   Soft = cost avoidance (an inflationary/future cost is avoided; spend does not drop)
 SAVING_NATURES = ["Hard", "Soft"]
 
+# Entry mode = a sub-option WITHIN an opportunity_type that changes how the saving
+# is captured (Olivier, call 2026-07-10):
+#   Standard = normal STP price×quantity computation
+#   Bonus    = single lump gain entered directly (Negotiation only; duration 1 month,
+#              no quantities/prices, no cash)
+#   Rework   = single lump gain entered directly (Technical Productivity only; e.g.
+#              scrap parts reworked into usable; no incoterms / payment terms / cash)
+ENTRY_MODES = ["Standard", "Bonus", "Rework"]
+# Which entry_mode is allowed on which opportunity_type.
+ENTRY_MODE_TYPE = {"Bonus": "Negotiation", "Rework": "Technical Productivity"}
+
+
+def opp_entry_mode(opp) -> str:
+    """entry_mode of an opportunity, defaulting to 'Standard' (incl. legacy NULL)."""
+    return getattr(opp, "entry_mode", None) or "Standard"
+
+
+def is_direct_gain(opp) -> bool:
+    """Bonus / Rework: a single lump gain entered directly, not derived from a
+    price×quantity grid, realized one-time over a single month."""
+    return opp_entry_mode(opp) in ("Bonus", "Rework")
+
+
+def _validate_entry_mode(value, opportunity_type):
+    """Normalize + validate an entry_mode. "" / "Standard" collapse to None.
+    When opportunity_type is known (create), enforce Bonus↔Negotiation and
+    Rework↔Technical Productivity. Raises ValueError on an invalid combination."""
+    if value in (None, "", "Standard"):
+        return None
+    if value not in ENTRY_MODES:
+        raise ValueError(f"entry_mode must be one of {ENTRY_MODES}")
+    required = ENTRY_MODE_TYPE.get(value)
+    if opportunity_type is not None and required and opportunity_type != required:
+        raise ValueError(f"entry_mode '{value}' is only allowed on {required} opportunities")
+    return value
+
 OPPORTUNITY_STATUSES = [
     "Assigned",                  # just created, Phase 0 not yet started
     "Working on it",             # Phase 0 or Phase 1+ actively in progress
@@ -202,6 +238,27 @@ def compute_stp_financials(opp) -> dict:
     def f(v) -> float:
         return float(v) if v is not None else 0.0
 
+    def rnd0(v):
+        return (0.0 if abs(round(v, 2)) < 0.005 else round(v, 2)) if v is not None else None
+
+    # Bonus / Rework: a single lump gain entered directly in expected_annual_saving,
+    # realized one-time (year N only). No price grid, no cash. ROI still uses the
+    # investment total (a rework can carry a cost) when present.
+    if is_direct_gain(opp):
+        gain = f(opp.expected_annual_saving)
+        total_inv = f(opp.tooling_cost) + f(opp.travel_cost) + f(opp.qualification_cost) + f(opp.other_cost)
+        roi = gain / total_inv * 100 if (gain and total_inv > 0) else None
+        g = rnd0(gain) if gain else None
+        return {
+            "full_year_saving": g,
+            "period_saving": g,
+            "roi_full_year_pct": rnd0(roi),
+            "roi_period_pct": rnd0(roi),
+            "inventory_gap": None,
+            "ap_gap": None,
+            "saving_per_year": [g, None, None, None],
+        }
+
     price_before = [f(opp.current_price), f(opp.current_price_n1),
                     f(opp.current_price_n2), f(opp.current_price_n3)]
     price_after = [f(opp.proposed_price), f(opp.proposed_price_n1),
@@ -232,6 +289,10 @@ def compute_stp_financials(opp) -> dict:
                                opp.annual_quantity_n3, opp.annual_quantity_n4) if q is not None]
     avg_qty = sum(float(q) for q in present_qty) / len(present_qty) if present_qty else None
 
+    # Cash (inventory + AP gap) comes from changes in logistics / payment terms
+    # (transit, TOP days, consignment). It applies to every standard type — including
+    # Negotiation, which can renegotiate payment terms / consignment (decision
+    # 2026-07-13). Bonus / Rework (one-time gains) are already excluded above.
     inventory_gap = ap_gap = None
     if avg_qty is not None and has_base:
         inv_before = 0.0 if opp.consignment_before == "Yes" else (f(opp.transit_days_before) + 14) * avg_qty / 360
@@ -492,6 +553,10 @@ def compute_duration_months(opp) -> Optional[int]:
     (flat -> 12, one change -> 24, ... four-year change -> 48). Returns None when the
     STP base inputs are missing (non-STP opp keeps its manually-entered duration).
     """
+    # Bonus / Rework are one-time gains realized in a single month.
+    if is_direct_gain(opp):
+        return 1
+
     has_base = opp.current_price is not None and opp.proposed_price is not None
     if not (has_base and opp.annual_quantity_n1):
         return None
@@ -518,6 +583,9 @@ class OpportunityCreateRequest(BaseModel):
     saving_nature: Optional[str] = Field(
         None, description="Hard (cost reduction, P&L impact) | Soft (cost avoidance)"
     )
+    entry_mode: Optional[str] = Field(
+        None, description="Standard | Bonus (Negotiation) | Rework (Technical Productivity)"
+    )
     idea_owner: str = Field(..., description="Email of the initial pilot (buyer)")
     description: Optional[str] = None
     plant_id: Optional[int] = None
@@ -541,12 +609,20 @@ class OpportunityCreateRequest(BaseModel):
             raise ValueError(f"saving_nature must be one of {SAVING_NATURES}")
         return v or None
 
+    @model_validator(mode="after")
+    def validate_entry_mode(self) -> "OpportunityCreateRequest":
+        self.entry_mode = _validate_entry_mode(self.entry_mode, self.opportunity_type)
+        return self
+
 
 class OpportunityUpdateRequest(BaseModel):
     """Full Phase-0 editable payload — all fields optional."""
     opportunity_name: Optional[str] = Field(None, min_length=1, max_length=500)
     saving_nature: Optional[str] = Field(
         None, description="Hard (cost reduction, P&L impact) | Soft (cost avoidance)"
+    )
+    entry_mode: Optional[str] = Field(
+        None, description="Standard | Bonus (Negotiation) | Rework (Technical Productivity)"
     )
     description: Optional[str] = None
     # Financial estimates
@@ -582,6 +658,17 @@ class OpportunityUpdateRequest(BaseModel):
         if v not in (None, "") and v not in SAVING_NATURES:
             raise ValueError(f"saving_nature must be one of {SAVING_NATURES}")
         return v or None
+
+    @field_validator("entry_mode")
+    @classmethod
+    def validate_entry_mode(cls, v: Optional[str]) -> Optional[str]:
+        # "" = not provided (no change). "Standard" is kept so the service can clear
+        # the mode; type-consistency (Bonus↔Negotiation…) is enforced in the service.
+        if v == "":
+            return None
+        if v is not None and v not in ENTRY_MODES:
+            raise ValueError(f"entry_mode must be one of {ENTRY_MODES}")
+        return v
     assumptions_summary: Optional[str] = None
     comments: Optional[str] = None
     plant_id: Optional[int] = None
@@ -1026,6 +1113,7 @@ class OpportunityResponse(BaseModel):
     opportunity_name: Optional[str] = None
     opportunity_type: Optional[str] = None
     saving_nature: Optional[str] = None
+    entry_mode: Optional[str] = None
     description: Optional[str] = None
     status: Optional[str] = None
     phase_status: Optional[str] = None

@@ -1806,6 +1806,10 @@ class Opportunity(GovernanceMixin, Base):
     #   "Hard" = real cost reduction (price actually drops → recognized in P&L / EBITDA)
     #   "Soft" = cost avoidance (a future/inflationary cost is avoided; spend does not drop)
     saving_nature: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    # Entry mode = sub-option within opportunity_type. NULL = Standard (STP price×qty).
+    #   "Bonus"  (Negotiation): single lump gain entered directly, one-time, no cash.
+    #   "Rework" (Technical Productivity): single lump gain, one-time, no incoterms/cash.
+    entry_mode: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     status: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     idea_owner: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)

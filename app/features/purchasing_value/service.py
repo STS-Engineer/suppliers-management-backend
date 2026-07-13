@@ -52,6 +52,8 @@ from app.features.purchasing_value.schemas import (
     compute_saving_by_calendar_year,
     compute_saving_to_budget_per_year,
     compute_duration_months,
+    is_direct_gain,
+    ENTRY_MODE_TYPE,
     compute_savings_start_date,
     compute_budget_year_portions,
     auto_payback_score,
@@ -188,6 +190,7 @@ class PurchasingValueService:
             opportunity_name=payload.opportunity_name,
             opportunity_type=payload.opportunity_type,
             saving_nature=payload.saving_nature,
+            entry_mode=payload.entry_mode,
             created_by=created_by,
             idea_owner=payload.idea_owner,
             description=payload.description,
@@ -404,6 +407,18 @@ class PurchasingValueService:
 
         _set_if(opp, "opportunity_name", payload.opportunity_name)
         _set_if(opp, "saving_nature", payload.saving_nature)
+        # entry_mode (Bonus/Rework sub-mode). "Standard" clears it back to normal STP;
+        # None = not provided (no change). Enforce that the mode matches the type.
+        if payload.entry_mode is not None:
+            mode = None if payload.entry_mode == "Standard" else payload.entry_mode
+            required = ENTRY_MODE_TYPE.get(mode) if mode else None
+            if required and opp.opportunity_type != required:
+                raise AppException(
+                    422,
+                    f"entry_mode '{mode}' is only allowed on {required} opportunities.",
+                    "ENTRY_MODE_TYPE_MISMATCH",
+                )
+            opp.entry_mode = mode
         _set_if(opp, "description", payload.description)
         _set_if(opp, "expected_annual_saving", payload.expected_annual_saving)
         _set_if(opp, "cash_impact", payload.cash_impact)
@@ -588,6 +603,23 @@ class PurchasingValueService:
         total = sum(costs)
         if total > 0:
             opp.total_investment = Decimal(str(total))
+
+        # Bonus / Rework: the saving is a single lump gain (entered in
+        # expected_annual_saving), not a price×quantity grid. Clear the grid,
+        # logistics and cash inputs so no stale value lingers or feeds a formula —
+        # the gain is realized one-time over a single month.
+        if is_direct_gain(opp):
+            opp.annual_quantity_n1 = opp.annual_quantity_n2 = None
+            opp.annual_quantity_n3 = opp.annual_quantity_n4 = None
+            opp.current_price = opp.current_price_n1 = None
+            opp.current_price_n2 = opp.current_price_n3 = None
+            opp.proposed_price = opp.proposed_price_n1 = None
+            opp.proposed_price_n2 = opp.proposed_price_n3 = None
+            opp.incoterms_before = opp.incoterms_after = None
+            opp.top_days_before = opp.top_days_after = None
+            opp.transit_days_before = opp.transit_days_after = None
+            opp.consignment_before = opp.consignment_after = None
+            opp.cash_inventory_gap = opp.cash_ap_gap = opp.cash_impact = None
 
         # Completeness of the 4-year price/quantity grid is enforced on the FRONTEND
         # (Phase 0/1 submit guard) for new STP entries — Olivier, call 2026-07-10 — so a
@@ -3331,7 +3363,7 @@ class PurchasingValueService:
     @staticmethod
     def _validate_closed_actions(sujets: list) -> None:
         """Enforce the same close-out rule everywhere an action's status can be
-        set to "closed": a closed_date and at least one attachment are required.
+        set to "closed": a closed_date is required.
         Mirrors the check in update_action_item_status so the bulk plan
         create/update path can't bypass it."""
         for sujet in sujets:
@@ -3343,12 +3375,6 @@ class PurchasingValueService:
                         422,
                         f"Implementation date is required to close action '{action.get('titre', '')}'.",
                         "IMPLEMENTATION_DATE_REQUIRED",
-                    )
-                if not action.get("attachments"):
-                    raise AppException(
-                        422,
-                        f"At least one attachment is required to close action '{action.get('titre', '')}'.",
-                        "ATTACHMENT_REQUIRED",
                     )
 
     @staticmethod
@@ -3635,6 +3661,52 @@ class PurchasingValueService:
         await self.db.flush()
         return attachment
 
+    async def delete_action_evidence(
+        self,
+        action_plan_id: int,
+        sujet_idx: int,
+        action_idx: int,
+        blob_name: str,
+        user_email: str,
+        opportunity_id: Optional[int] = None,
+    ) -> None:
+        """Delete one evidence attachment from a specific action."""
+        plan = await self.get_action_plan(action_plan_id, opportunity_id)
+        data = dict(plan.plan_data or {})
+        sujets = data.get("sujets", [])
+
+        if sujet_idx >= len(sujets):
+            raise AppException(404, "Subject index out of range.", "SUJET_NOT_FOUND")
+        actions = sujets[sujet_idx].get("actions", [])
+        if action_idx >= len(actions):
+            raise AppException(404, "Action index out of range.", "ACTION_NOT_FOUND")
+
+        attachments = actions[action_idx].get("attachments", [])
+        match = next((att for att in attachments if att.get("blob_name") == blob_name), None)
+        if not match:
+            raise AppException(404, "Attachment not found.", "ATTACHMENT_NOT_FOUND")
+
+        try:
+            await delete_blob(blob_name)
+        except Exception as exc:
+            logger.warning("Blob delete failed for %s: %s", blob_name, exc)
+
+        actions[action_idx]["attachments"] = [
+            att for att in attachments if att.get("blob_name") != blob_name
+        ]
+        self._log_action_event(
+            actions[action_idx],
+            "attachment_removed",
+            user_email,
+            filename=match.get("filename"),
+        )
+
+        plan.plan_data = data
+        flag_modified(plan, "plan_data")
+        plan.updated_at = datetime.utcnow()
+        plan.updated_by = user_email
+        await self.db.flush()
+
     async def update_action_item_status(
         self,
         action_plan_id: int,
@@ -3667,12 +3739,6 @@ class PurchasingValueService:
                     422,
                     "Implementation date is required to close an action.",
                     "IMPLEMENTATION_DATE_REQUIRED",
-                )
-            if not actions[action_idx].get("attachments"):
-                raise AppException(
-                    422,
-                    "At least one attachment is required to close an action.",
-                    "ATTACHMENT_REQUIRED",
                 )
             actions[action_idx]["closed_date"] = implementation_date
         else:

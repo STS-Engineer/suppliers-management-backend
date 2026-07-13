@@ -1411,6 +1411,46 @@ async def upload_action_evidence(
         raise
 
 
+@router.delete(
+    "/opportunities/{opportunity_id}/action-plans/{action_plan_id}/evidence",
+    response_model=dict,
+)
+async def delete_action_evidence(
+    opportunity_id: int,
+    action_plan_id: int,
+    sujet_idx: int = Query(..., description="Index of the subject in plan_data.sujets"),
+    action_idx: int = Query(..., description="Index of the action within that subject"),
+    blob_name: str = Query(..., description="Blob storage key of the attachment to delete"),
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, _NON_VIEWER)
+    user_email = (
+        current_user.get("email")
+        or current_user.get("upn")
+        or current_user.get("sub")
+        or "unknown"
+    )
+    try:
+        svc = PurchasingValueService(db)
+        await svc.delete_action_evidence(
+            action_plan_id,
+            sujet_idx,
+            action_idx,
+            blob_name,
+            user_email,
+            opportunity_id,
+        )
+        await db.commit()
+        return {"status": "success", "message": "Attachment deleted"}
+    except AppException:
+        await db.rollback()
+        raise
+    except Exception:
+        await db.rollback()
+        raise
+
+
 @router.patch("/action-plans/{action_plan_id}/item-status", response_model=dict)
 async def update_action_item_status(
     action_plan_id: int,
