@@ -2,6 +2,7 @@
 
 from datetime import date
 from typing import Any, Dict, Iterable, Optional
+import re
 
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -110,10 +111,32 @@ class SiteService:
         def normalize(value: Optional[str]) -> str:
             return str(value or "").strip().lower()
 
+        def split_multi_value(value: Optional[str]) -> list[str]:
+            if not value:
+                return []
+            return [
+                part.strip()
+                for part in re.split(r"[,;\n|]+", str(value))
+                if part and part.strip()
+            ]
+
+        def normalize_multi_value(value: Optional[str]) -> Optional[str]:
+            parts = split_multi_value(value)
+            return ", ".join(parts) if parts else None
+
         def matches_text(value: Optional[str], needle: Optional[str]) -> bool:
             if not needle:
                 return True
             return normalize(needle) in normalize(value)
+
+        def matches_multi_value(value: Optional[str], needle: Optional[str]) -> bool:
+            if not needle:
+                return True
+            key = normalize(needle)
+            parts = split_multi_value(value)
+            if not parts:
+                return False
+            return any(key == normalize(part) or key in normalize(part) for part in parts)
 
         def contacts_match(
             contacts: Iterable[Contact],
@@ -174,11 +197,11 @@ class SiteService:
 
                 if scope and not matches_text(relation.supplier_scope, scope):
                     continue
-                if family and not matches_text(unit.family, family):
+                if family and not matches_multi_value(unit.family, family):
                     continue
-                if sub_family and not matches_text(unit.sub_family, sub_family):
+                if sub_family and not matches_multi_value(unit.sub_family, sub_family):
                     continue
-                if product_line and not matches_text(unit.product_line, product_line):
+                if product_line and not matches_multi_value(unit.product_line, product_line):
                     continue
                 if supplier_name and not (
                     matches_text(group.nom, supplier_name)
@@ -212,12 +235,20 @@ class SiteService:
                     if relation.committee_reviews
                     else None
                 )
+                normalized_unit = supplier_schemas.SupplierUnitResponse.model_validate(unit).model_copy(
+                    update={
+                        "family": normalize_multi_value(unit.family),
+                        "sub_family": normalize_multi_value(unit.sub_family),
+                        "product_line": normalize_multi_value(unit.product_line),
+                        "commodity": normalize_multi_value(unit.commodity),
+                    }
+                )
                 relation_entries.append(
                     schemas.SitePanelRelationResponse(
                         relation=relation_schemas.SupplierRelationSummaryResponse.model_validate(
                             relation
                         ),
-                        unit=supplier_schemas.SupplierUnitResponse.model_validate(unit),
+                        unit=normalized_unit,
                         group=supplier_schemas.SupplierGroupResponse.model_validate(
                             group
                         ),
