@@ -731,6 +731,40 @@ class SupplierRelationService:
         await self.db.refresh(plan)
         return plan
 
+    async def cancel_development_plan(
+        self,
+        relation_id: int,
+        plan_id: int,
+        data: schemas.SupplierDevelopmentPlanCancelRequest,
+    ) -> SupplierDevelopmentPlan:
+        plan = await self.db.get(SupplierDevelopmentPlan, plan_id)
+        if not plan or plan.id_relation != relation_id:
+            raise AppException(
+                f"Supplier development plan with ID {plan_id} not found",
+                status_code=404,
+            )
+
+        current_status = (plan.plan_status or "").strip().lower()
+        if current_status in {"approved", "closed", "cancelled"}:
+            raise AppException(
+                f"Cannot cancel a development plan already in status '{plan.plan_status}'.",
+                status_code=400,
+            )
+
+        plan.plan_status = "Cancelled"
+        if not plan.decision_date:
+            plan.decision_date = date.today()
+        if data.reason and data.reason.strip():
+            existing = (plan.internal_comments or "").strip()
+            note = f"Cancellation reason: {data.reason.strip()}"
+            plan.internal_comments = f"{existing}\n\n{note}" if existing else note
+        plan.updated_at = datetime.now()
+        plan.updated_by = data.changed_by or "SYSTEM"
+        await self.db.flush()
+        await self.db.commit()
+        await self.db.refresh(plan)
+        return plan
+
     async def upload_development_plan_file(
         self,
         relation_id: int,
@@ -4977,7 +5011,7 @@ class SupplierRelationService:
         is_overdue = (
             plan.due_date is not None
             and plan.due_date < today
-            and (plan.plan_status or "").lower() not in {"approved", "closed"}
+            and (plan.plan_status or "").lower() not in {"approved", "closed", "cancelled"}
         )
         days_past_due = (today - plan.due_date).days if is_overdue else None
         return {

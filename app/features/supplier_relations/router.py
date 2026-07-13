@@ -485,6 +485,31 @@ async def update_relation_development_plan(
         raise
 
 
+@router.post("/{relation_id}/development-plans/{plan_id}/cancel", response_model=dict)
+async def cancel_relation_development_plan(
+    relation_id: int,
+    plan_id: int,
+    data: schemas.SupplierDevelopmentPlanCancelRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    _require_profile(current_user, PRIVILEGED)
+    try:
+        service = SupplierRelationService(db)
+        plan = await service.cancel_development_plan(relation_id, plan_id, data)
+        return {
+            "status": "success",
+            "data": schemas.SupplierDevelopmentPlanResponse(
+                **service._serialize_development_plan(plan)
+            ),
+            "message": "Supplier development plan cancelled successfully.",
+        }
+    except AppException:
+        raise
+    except Exception:
+        raise
+
+
 @router.post("/{relation_id}/development-plans/{plan_id}/send-request", response_model=dict)
 async def send_relation_development_plan_request(
     relation_id: int,

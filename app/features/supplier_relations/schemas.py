@@ -127,6 +127,11 @@ class SupplierDevelopmentPlanSendReminder(BaseModel):
     extra_cc_emails: Optional[list[str]] = None
 
 
+class SupplierDevelopmentPlanCancelRequest(BaseModel):
+    changed_by: Optional[str] = None
+    reason: Optional[str] = None
+
+
 class SupplierDevelopmentPlanRevisionRequest(BaseModel):
     changed_by: Optional[str] = None
     custom_message: Optional[str] = None
