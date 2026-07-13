@@ -113,6 +113,33 @@ async def create_opportunity(
         raise
 
 
+@router.post("/opportunities/{opportunity_id}/duplicate", response_model=dict)
+async def duplicate_opportunity(
+    opportunity_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, _NON_VIEWER)
+    try:
+        svc = PurchasingValueService(db)
+        actor_email = (
+            current_user.get("email")
+            or current_user.get("upn")
+            or current_user.get("sub")
+        )
+        dup = await svc.duplicate_opportunity(opportunity_id, created_by=actor_email)
+        await db.commit()
+        # Re-fetch after commit — same pattern as create (avoids stale session cache).
+        fresh_opp = await svc.get_opportunity(dup.opportunity_id)
+        return {"status": "success", "data": opportunity_to_response(fresh_opp)}
+    except AppException:
+        await db.rollback()
+        raise
+    except Exception:
+        await db.rollback()
+        raise
+
+
 @router.get("/opportunities/{opportunity_id}", response_model=dict)
 async def get_opportunity(
     opportunity_id: int,

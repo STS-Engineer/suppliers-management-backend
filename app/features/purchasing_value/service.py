@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import calendar
+import copy
 import logging
 from datetime import datetime, date, timedelta
 from decimal import Decimal
 from math import ceil
 from typing import Optional, List
 
-from sqlalchemy import select
+from sqlalchemy import select, inspect as sa_inspect
 from sqlalchemy.orm import selectinload
 from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -205,6 +206,63 @@ class PurchasingValueService:
             ["projects", "financial_lines", "opp_documents", "budget_years", "plant"],
         )
         return opp
+
+    async def duplicate_opportunity(
+        self, opportunity_id: int, created_by: Optional[str] = None
+    ) -> Opportunity:
+        """Create a fresh Phase-0 draft from an existing opportunity.
+
+        Copies the DEFINITION (type, saving nature, STP prices/quantities/scope,
+        logistics, investment, scores, risks/benefits, reasons) but RESETS identity,
+        workflow status, every date and all execution history. Children (financial
+        lines, budget years, projects, documents, gate requests, snapshots, action
+        plans) are NOT copied — the duplicate starts clean at Phase 0 so it can be
+        re-scoped and re-validated on its own."""
+        src = (
+            await self.db.execute(
+                select(Opportunity).where(Opportunity.opportunity_id == opportunity_id)
+            )
+        ).scalar_one_or_none()
+        if src is None:
+            raise AppException(404, "Opportunity not found.", "OPP_NOT_FOUND")
+
+        # Never carried over — these define a brand-new draft's own lifecycle.
+        RESET = {
+            "opportunity_id", "opportunity_name", "created_at", "created_by",
+            "status", "phase_status", "validation_status", "validation_decision",
+            "budget_year", "budget_confirmed_at", "budget_confirmed_by",
+            "committee_level",
+            "val_date", "planned_start_date", "planned_end_date", "study_start_date",
+            "execution_start_date", "real_start_date",
+            "validation_request_sent_at", "validation_request_sent_by",
+            "pending_stp_revision", "revision_history",
+            # Scope is specific to the source opportunity — the copy must be re-scoped.
+            "scope_in", "scope_out",
+        }
+        data = {}
+        for col in (c.key for c in sa_inspect(Opportunity).mapper.column_attrs):
+            if col in RESET:
+                continue
+            val = getattr(src, col)
+            # Deep-copy JSONB (dict/list) so the two rows never share a mutable object.
+            data[col] = copy.deepcopy(val) if isinstance(val, (dict, list)) else val
+
+        dup = Opportunity(
+            **data,
+            opportunity_name=f"{src.opportunity_name or 'Opportunity'} (copy)",
+            created_by=created_by,
+            status="Assigned",
+            phase_status="Phase 0",
+            validation_status="Empty",
+            validation_decision=None,
+        )
+        self.db.add(dup)
+        await self.db.flush()
+        await self.db.refresh(
+            dup,
+            ["projects", "financial_lines", "opp_documents", "budget_years", "plant"],
+        )
+        return dup
 
     # ------------------------------------------------------------------
     # Update Phase 0 fields
