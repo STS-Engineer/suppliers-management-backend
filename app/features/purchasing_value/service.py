@@ -3534,6 +3534,8 @@ class PurchasingValueService:
         responsible_email: Optional[str] = None,
         status: Optional[str] = None,
         opportunity_id: Optional[int] = None,
+        viewer_email: Optional[str] = None,
+        viewer_role: Optional[str] = None,
     ) -> list[dict]:
         """Flatten all action plan actions across all opportunities into a single list.
 
@@ -3606,10 +3608,62 @@ class PurchasingValueService:
                         "last_escalated_at": action.get("last_escalated_at"),
                         "last_escalated_to": action.get("last_escalated_to"),
                         "last_escalated_by": action.get("last_escalated_by"),
+                        # Whether THIS viewer may close the action / delete its evidence
+                        # (responsible person, a manager role, or a related owner).
+                        "can_manage": self._action_can_manage(
+                            action, plan, opp, viewer_email, viewer_role
+                        ),
                     })
 
         items.sort(key=lambda x: (x["responsible_email"] or "zzz", x["due_date"] or "9999"))
         return items
+
+    # Roles that may manage ANY action (close it, delete its evidence) regardless of
+    # who the responsible person is.
+    _ACTION_MANAGER_ROLES = {"purchasing_manager", "purchasing_director", "vp_conversion"}
+
+    @staticmethod
+    def _action_can_manage(action, plan, opp, user_email, actor_role) -> bool:
+        """Who may close an action or delete its evidence: a manager role, the action's
+        responsible person, or a related owner of the opportunity (purchasing / conversion
+        / project / idea owner, or the plan creator). Everyone else is read-only for
+        these operations (they can still view and upload)."""
+        if actor_role in PurchasingValueService._ACTION_MANAGER_ROLES:
+            return True
+        email = (user_email or "").strip().lower()
+        if not email:
+            return False
+        plan_data = plan.plan_data or {}
+        resp = (
+            action.get("email_responsable")
+            or plan_data.get("email_responsable")
+            or ""
+        ).strip().lower()
+        if email == resp:
+            return True
+        related = set()
+        if opp is not None:
+            for e in (opp.purchasing_owner, opp.conversion_owner,
+                      opp.project_owner, opp.idea_owner):
+                if e:
+                    related.add(e.strip().lower())
+        if plan.created_by:
+            related.add(plan.created_by.strip().lower())
+        return email in related
+
+    async def _assert_action_can_manage(self, plan, action, user_email, actor_role) -> None:
+        opp = (
+            await self.db.execute(
+                select(Opportunity).where(Opportunity.opportunity_id == plan.opportunity_id)
+            )
+        ).scalar_one_or_none()
+        if not self._action_can_manage(action, plan, opp, user_email, actor_role):
+            raise AppException(
+                403,
+                "Only the action's responsible person, a manager, or a related owner "
+                "can close it or delete its evidence.",
+                "ACTION_NOT_AUTHORIZED",
+            )
 
     async def upload_action_evidence(
         self,
@@ -3669,6 +3723,7 @@ class PurchasingValueService:
         blob_name: str,
         user_email: str,
         opportunity_id: Optional[int] = None,
+        actor_role: Optional[str] = None,
     ) -> None:
         """Delete one evidence attachment from a specific action."""
         plan = await self.get_action_plan(action_plan_id, opportunity_id)
@@ -3680,6 +3735,19 @@ class PurchasingValueService:
         actions = sujets[sujet_idx].get("actions", [])
         if action_idx >= len(actions):
             raise AppException(404, "Action index out of range.", "ACTION_NOT_FOUND")
+
+        # Only the responsible / a manager / a related owner may delete evidence.
+        await self._assert_action_can_manage(plan, actions[action_idx], user_email, actor_role)
+
+        # Evidence of a CLOSED action is frozen — deletion would break the audit of a
+        # completed action. Reopen it first if a file really must be removed.
+        if actions[action_idx].get("status") == "closed":
+            raise AppException(
+                409,
+                "This action is closed — its evidence can no longer be deleted. "
+                "Reopen the action first if a file must be removed.",
+                "ACTION_CLOSED_EVIDENCE_LOCKED",
+            )
 
         attachments = actions[action_idx].get("attachments", [])
         match = next((att for att in attachments if att.get("blob_name") == blob_name), None)
@@ -3715,6 +3783,7 @@ class PurchasingValueService:
         status: str,
         implementation_date: Optional[str],
         user_email: str,
+        actor_role: Optional[str] = None,
     ) -> dict:
         """Update the status of a single action inside a plan's JSONB. Sets closed_date when closing."""
         valid_statuses = {"open", "closed", "blocked"}
@@ -3730,6 +3799,9 @@ class PurchasingValueService:
         actions = sujets[sujet_idx].get("actions", [])
         if action_idx >= len(actions):
             raise AppException(404, "Action index out of range.", "ACTION_NOT_FOUND")
+
+        # Only the responsible / a manager / a related owner may change an action's status.
+        await self._assert_action_can_manage(plan, actions[action_idx], user_email, actor_role)
 
         previous_status = actions[action_idx].get("status", "open")
 

@@ -1368,7 +1368,16 @@ async def list_all_action_items(
     Optionally filtered by responsible person, action status, or specific opportunity.
     """
     svc = PurchasingValueService(db)
-    items = await svc.list_all_action_items(responsible_email, status, opportunity_id)
+    viewer_email = (
+        current_user.get("email")
+        or current_user.get("upn")
+        or current_user.get("sub")
+    )
+    items = await svc.list_all_action_items(
+        responsible_email, status, opportunity_id,
+        viewer_email=viewer_email,
+        viewer_role=current_user.get("access_profile"),
+    )
     return {"status": "success", "data": items}
 
 
@@ -1440,6 +1449,7 @@ async def delete_action_evidence(
             blob_name,
             user_email,
             opportunity_id,
+            actor_role=current_user.get("access_profile"),
         )
         await db.commit()
         return {"status": "success", "message": "Attachment deleted"}
@@ -1472,7 +1482,8 @@ async def update_action_item_status(
     try:
         svc = PurchasingValueService(db)
         result = await svc.update_action_item_status(
-            action_plan_id, sujet_idx, action_idx, status, implementation_date, user_email
+            action_plan_id, sujet_idx, action_idx, status, implementation_date, user_email,
+            actor_role=current_user.get("access_profile"),
         )
         await db.commit()
         return {"status": "success", "data": result}
