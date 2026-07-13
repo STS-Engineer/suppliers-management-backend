@@ -5011,7 +5011,7 @@ class SupplierRelationService:
         is_overdue = (
             plan.due_date is not None
             and plan.due_date < today
-            and (plan.plan_status or "").lower() not in {"approved", "closed", "cancelled"}
+            and (plan.plan_status or "").lower() not in {"approved", "closed", "cancelled", "done", "cancel"}
         )
         days_past_due = (today - plan.due_date).days if is_overdue else None
         return {
