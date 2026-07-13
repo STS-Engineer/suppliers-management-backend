@@ -47,6 +47,11 @@ class STPBenefits(BaseModel):
 
 OPPORTUNITY_TYPES = ["Negotiation", "Sourcing", "Technical Productivity"]
 
+# Accounting nature of a saving (orthogonal to the lever in opportunity_type):
+#   Hard = real cost reduction, recognized in P&L / EBITDA (price actually drops)
+#   Soft = cost avoidance (an inflationary/future cost is avoided; spend does not drop)
+SAVING_NATURES = ["Hard", "Soft"]
+
 OPPORTUNITY_STATUSES = [
     "Assigned",                  # just created, Phase 0 not yet started
     "Working on it",             # Phase 0 or Phase 1+ actively in progress
@@ -421,6 +426,88 @@ def compute_saving_by_calendar_year(opp) -> dict:
     return {str(r["fiscal_year"]): r["amount"] for r in rows}
 
 
+def compute_saving_to_budget_per_year(opp) -> list:
+    """"Saving à budgéter" — the year-over-year price DROP, per STP year [N, N+1, N+2, N+3].
+
+    Business rule (Olivier, call 2026-07-10): what actually gets budgeted each year is
+    only the *incremental* new gain vs the previous year, NOT the full run-rate saving
+    reconducted every year:
+      - Year N   = the full first-year saving (price gap × qty, incl. the bonus delta).
+      - Year N+k = (proposed_price_{k-1} − proposed_price_k) × quantity_k.
+
+    So when the negotiated price is flat across years the increment is 0 for N+1..N+3
+    (even if the quantity changes), and the whole opportunity is budgeted in year N only.
+    Negatives are allowed (no clamp) — a price that goes back up simply budgets negative.
+
+    This differs from compute_stp_financials()["saving_per_year"] (the full per-year
+    run-rate, summing to `period_saving` = the "value of opportunity"). Returns a
+    4-element list; entries are None when the base inputs are missing.
+    """
+    fin = compute_stp_financials(opp)
+    per_year = fin["saving_per_year"]  # [full year N, N+1, N+2, N+3]
+
+    def f(v) -> float:
+        return float(v) if v is not None else 0.0
+
+    proposed = [f(opp.proposed_price), f(opp.proposed_price_n1),
+                f(opp.proposed_price_n2), f(opp.proposed_price_n3)]
+    qty = [f(opp.annual_quantity_n1), f(opp.annual_quantity_n2),
+           f(opp.annual_quantity_n3), f(opp.annual_quantity_n4)]
+
+    def rnd(v):
+        return (0.0 if abs(round(v, 2)) < 0.005 else round(v, 2)) if v is not None else None
+
+    to_budget = [None, None, None, None]
+    if per_year[0] is not None:
+        to_budget[0] = per_year[0]  # full year-N saving (already rounded)
+        for i in range(1, 4):
+            to_budget[i] = rnd((proposed[i - 1] - proposed[i]) * qty[i])
+    return to_budget
+
+
+def compute_saving_to_budget_by_year(opp) -> dict:
+    """"Saving à budgéter" allocated to each calendar year (Jan–Dec), start-date aware.
+
+    Reuses compute_budget_year_portions() but feeds it the INCREMENTAL per-year windows
+    (compute_saving_to_budget_per_year) instead of the full run-rate savings, so a
+    mid-year start still splits each 12-month window across calendar years (half/half),
+    while a flat price collapses the whole budget onto year N. This is the value that
+    drives the per-fiscal-year budget rows.
+    """
+    per_year = compute_saving_to_budget_per_year(opp)
+    duration = getattr(opp, "duration_months", None)
+    rows = compute_budget_year_portions(
+        per_year, compute_savings_start_date(opp), int(duration) if duration else None
+    )
+    return {str(r["fiscal_year"]): r["amount"] for r in rows}
+
+
+def compute_duration_months(opp) -> Optional[int]:
+    """Derive the budgeting duration from whether the negotiated price changes.
+
+    Coherence rule (Olivier, call 2026-07-10): a price that stays flat cannot be
+    budgeted beyond its first 12-month window, so:
+      - flat proposed price across N..N+3            -> 12 months
+      - price still changing up to year N+k          -> (k + 1) × 12 months
+    (flat -> 12, one change -> 24, ... four-year change -> 48). Returns None when the
+    STP base inputs are missing (non-STP opp keeps its manually-entered duration).
+    """
+    has_base = opp.current_price is not None and opp.proposed_price is not None
+    if not (has_base and opp.annual_quantity_n1):
+        return None
+
+    def f(v) -> float:
+        return float(v) if v is not None else 0.0
+
+    proposed = [f(opp.proposed_price), f(opp.proposed_price_n1),
+                f(opp.proposed_price_n2), f(opp.proposed_price_n3)]
+    last_change = 0
+    for i in range(1, 4):
+        if abs(proposed[i] - proposed[i - 1]) >= 0.005:
+            last_change = i
+    return (last_change + 1) * 12
+
+
 # ---------------------------------------------------------------------------
 # Opportunity schemas
 # ---------------------------------------------------------------------------
@@ -428,6 +515,9 @@ def compute_saving_by_calendar_year(opp) -> dict:
 class OpportunityCreateRequest(BaseModel):
     opportunity_name: str = Field(..., min_length=1, max_length=500)
     opportunity_type: str = Field(..., description="Negotiation|Sourcing|Technical Productivity")
+    saving_nature: Optional[str] = Field(
+        None, description="Hard (cost reduction, P&L impact) | Soft (cost avoidance)"
+    )
     idea_owner: str = Field(..., description="Email of the initial pilot (buyer)")
     description: Optional[str] = None
     plant_id: Optional[int] = None
@@ -444,10 +534,20 @@ class OpportunityCreateRequest(BaseModel):
             raise ValueError(f"opportunity_type must be one of {OPPORTUNITY_TYPES}")
         return v
 
+    @field_validator("saving_nature")
+    @classmethod
+    def validate_saving_nature(cls, v: Optional[str]) -> Optional[str]:
+        if v not in (None, "") and v not in SAVING_NATURES:
+            raise ValueError(f"saving_nature must be one of {SAVING_NATURES}")
+        return v or None
+
 
 class OpportunityUpdateRequest(BaseModel):
     """Full Phase-0 editable payload — all fields optional."""
     opportunity_name: Optional[str] = Field(None, min_length=1, max_length=500)
+    saving_nature: Optional[str] = Field(
+        None, description="Hard (cost reduction, P&L impact) | Soft (cost avoidance)"
+    )
     description: Optional[str] = None
     # Financial estimates
     expected_annual_saving: Optional[Decimal] = Field(None, ge=0)
@@ -475,6 +575,13 @@ class OpportunityUpdateRequest(BaseModel):
                     f"Example: for USD enter 0.920000 (meaning 1 {self.currency} = 0.92 EUR)."
                 )
         return self
+
+    @field_validator("saving_nature")
+    @classmethod
+    def validate_saving_nature(cls, v: Optional[str]) -> Optional[str]:
+        if v not in (None, "") and v not in SAVING_NATURES:
+            raise ValueError(f"saving_nature must be one of {SAVING_NATURES}")
+        return v or None
     assumptions_summary: Optional[str] = None
     comments: Optional[str] = None
     plant_id: Optional[int] = None
@@ -793,6 +900,7 @@ class FinancialLineResponse(BaseModel):
     real_start_date: Optional[date] = None
     duration_months: Optional[Decimal] = None
     cumulated_real_saving: Optional[Decimal] = None
+    cumulated_real_saving_ltd: Optional[Decimal] = None
     delta_vs_expected_ytd: Optional[Decimal] = None
     delta_vs_budget_ytd: Optional[Decimal] = None
     status: Optional[str] = None
@@ -917,6 +1025,7 @@ class OpportunityResponse(BaseModel):
     opportunity_id: int
     opportunity_name: Optional[str] = None
     opportunity_type: Optional[str] = None
+    saving_nature: Optional[str] = None
     description: Optional[str] = None
     status: Optional[str] = None
     phase_status: Optional[str] = None
@@ -1002,6 +1111,11 @@ class OpportunityResponse(BaseModel):
     saving_year_n2: Optional[Decimal] = None
     saving_year_n3: Optional[Decimal] = None
     saving_by_year: Optional[Dict[str, Decimal]] = None
+    # Computed in opportunity_to_response (not ORM columns):
+    #  - value_of_opportunity: total multi-year gain (= period_saving, the "value of opportunity")
+    #  - saving_to_budget_by_year: incremental year-over-year price drop, per calendar year (what is budgeted)
+    value_of_opportunity: Optional[Decimal] = None
+    saving_to_budget_by_year: Optional[Dict[str, Decimal]] = None
     cash_inventory_gap: Optional[Decimal] = None
     cash_ap_gap: Optional[Decimal] = None
     secondary_plants: Optional[str] = None
@@ -1043,6 +1157,13 @@ def opportunity_to_response(opp) -> OpportunityResponse:
     if opp.plant is not None:
         data.plant_name = opp.plant.site_name
         data.plant_city = opp.plant.city
+    # "Value of opportunity" = total multi-year gain (period_saving); "saving à budgéter"
+    # = the incremental year-over-year drop that actually feeds the budget rows.
+    data.value_of_opportunity = opp.period_saving
+    stb = compute_saving_to_budget_by_year(opp)
+    data.saving_to_budget_by_year = (
+        {k: Decimal(str(v)) for k, v in stb.items()} if stb else None
+    )
     return data
 
 

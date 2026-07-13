@@ -394,12 +394,17 @@ class PurchasingKpiService:
             for o in all_opps
             if o.validation_decision == "Go"
         ]
+        # Conversion is a LIFETIME concept (did the opp ever realize any saving?),
+        # so test the monthly actuals directly. line.cumulated_real_saving is now
+        # scoped to the current calendar year (see _recalculate_ytd) and would wrongly
+        # drop opps whose only actuals are in a prior year.
         converted_opps = [
             o
             for o in validated_opps
             if any(
-                _n(line.cumulated_real_saving) > 0
+                m.actual_saving is not None and _n(m.actual_saving) > 0
                 for line in lines_by_opp.get(o.opportunity_id, [])
+                for m in line.monthly_financials
             )
         ]
         conversion_rate_pct = _pct(len(converted_opps), len(validated_opps))
@@ -950,6 +955,58 @@ class PurchasingKpiService:
                 }
             )
 
+        # ── BY SAVING NATURE (Hard = P&L impact / Soft = cost avoidance) ──
+
+        nature_map: dict[str, dict] = {}
+        for opp in all_opps:
+            n = opp.saving_nature or "Unclassified"
+            if n not in nature_map:
+                nature_map[n] = {
+                    "saving_nature": n,
+                    "opp_count": 0,
+                    "validated_count": 0,
+                    "expected_annual": 0.0,
+                    "actual_ytd": 0.0,
+                    "expected_ytd": 0.0,
+                    "eoy_forecast": 0.0,
+                }
+            nature_map[n]["opp_count"] += 1
+            if opp.validation_decision == "Go":
+                nature_map[n]["validated_count"] += 1
+
+            for line in kpi_lines_by_opp.get(opp.opportunity_id, []):
+                nature_map[n]["expected_annual"] += _n(line.expected_annual_saving) * _rate(line)
+                nature_map[n]["eoy_forecast"] += _eoy(line) * _rate(line)
+                line_ytd = ytd_rows_for([line])
+                nature_map[n]["actual_ytd"] += sum(
+                    _n(r.actual_saving) for r in line_ytd if r.actual_saving is not None
+                ) * _rate(line)
+                nature_map[n]["expected_ytd"] += sum(
+                    _n(r.expected_saving) for r in line_ytd
+                ) * _rate(line)
+
+        # Stable order: Hard, Soft, then Unclassified last
+        _nature_order = {"Hard": 0, "Soft": 1, "Unclassified": 2}
+        by_saving_nature = []
+        for d in sorted(
+            nature_map.values(),
+            key=lambda x: (_nature_order.get(x["saving_nature"], 3), -x["expected_annual"]),
+        ):
+            by_saving_nature.append(
+                {
+                    **d,
+                    "expected_annual": round(d["expected_annual"], 2),
+                    "actual_ytd": round(d["actual_ytd"], 2),
+                    "expected_ytd": round(d["expected_ytd"], 2),
+                    "delta_ytd": round(d["actual_ytd"] - d["expected_ytd"], 2),
+                    "eoy_forecast": round(d["eoy_forecast"], 2),
+                    "ytd_rate_pct": _pct(d["actual_ytd"], d["expected_ytd"]),
+                    "eoy_vs_expected_pct": _pct(d["eoy_forecast"], d["expected_annual"])
+                    if d["expected_annual"]
+                    else None,
+                }
+            )
+
         # ── ALERTS ───────────────────────────────────────────────────────
 
         late_projects = [
@@ -1188,6 +1245,7 @@ class PurchasingKpiService:
             "by_plant": by_plant,
             "by_supplier": by_supplier,
             "by_type": by_type,
+            "by_saving_nature": by_saving_nature,
             "by_buyer": by_buyer,
             "late_projects": late_projects,
             "missing_updates": missing_updates[:10],

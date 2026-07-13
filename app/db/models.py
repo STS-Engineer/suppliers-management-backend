@@ -1802,6 +1802,10 @@ class Opportunity(GovernanceMixin, Base):
     created_by: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
     opportunity_name: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     opportunity_type: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    # Accounting nature of the saving, orthogonal to opportunity_type (the lever):
+    #   "Hard" = real cost reduction (price actually drops → recognized in P&L / EBITDA)
+    #   "Soft" = cost avoidance (a future/inflationary cost is avoided; spend does not drop)
+    saving_nature: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     status: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     idea_owner: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
@@ -2193,7 +2197,12 @@ class FinancialLine(GovernanceMixin, Base):
     duration_months: Mapped[Optional[Decimal]] = mapped_column(
         Numeric(6, 2), nullable=True
     )
+    # Realized savings of the CURRENT calendar year only (YTD basis, Monday-aligned)
     cumulated_real_saving: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(18, 2), nullable=True
+    )
+    # Life-to-date realized savings across ALL years (inception-to-date, total value)
+    cumulated_real_saving_ltd: Mapped[Optional[Decimal]] = mapped_column(
         Numeric(18, 2), nullable=True
     )
     delta_vs_expected_ytd: Mapped[Optional[Decimal]] = mapped_column(

@@ -49,6 +49,8 @@ from app.features.purchasing_value.schemas import (
     compute_priority,
     compute_stp_financials,
     compute_saving_by_calendar_year,
+    compute_saving_to_budget_per_year,
+    compute_duration_months,
     compute_savings_start_date,
     compute_budget_year_portions,
     auto_payback_score,
@@ -184,6 +186,7 @@ class PurchasingValueService:
         opp = Opportunity(
             opportunity_name=payload.opportunity_name,
             opportunity_type=payload.opportunity_type,
+            saving_nature=payload.saving_nature,
             created_by=created_by,
             idea_owner=payload.idea_owner,
             description=payload.description,
@@ -342,6 +345,7 @@ class PurchasingValueService:
         old_expected_saving = opp.expected_annual_saving
 
         _set_if(opp, "opportunity_name", payload.opportunity_name)
+        _set_if(opp, "saving_nature", payload.saving_nature)
         _set_if(opp, "description", payload.description)
         _set_if(opp, "expected_annual_saving", payload.expected_annual_saving)
         _set_if(opp, "cash_impact", payload.cash_impact)
@@ -527,6 +531,13 @@ class PurchasingValueService:
         if total > 0:
             opp.total_investment = Decimal(str(total))
 
+        # Completeness of the 4-year price/quantity grid is enforced on the FRONTEND
+        # (Phase 0/1 submit guard) for new STP entries — Olivier, call 2026-07-10 — so a
+        # buyer fills every year before saving. The backend stays permissive here so
+        # legacy/partial data, single-year deals and programmatic flows (revise-baseline,
+        # gate decisions, STP revision) keep working; the negative-saving guard below
+        # still blocks corrupt price grids.
+
         # STP financials — exact formulas from Excel "format STP rev 1.2" (D51/D52/F51/F52/D55/D56)
         stp_fin = compute_stp_financials(opp)
         # D4 — guard: price_after > price_before inverts the saving to a cost increase.
@@ -560,6 +571,13 @@ class PurchasingValueService:
             setattr(opp, attr, Decimal(str(yr)) if yr is not None else None)
         # Calendar-year prorated estimate (start-date-aware) — {"2026": ..., ...}
         opp.saving_by_year = compute_saving_by_calendar_year(opp) or None
+        # Duration is derived from whether the negotiated price still changes: a flat
+        # price cannot be budgeted beyond 12 months; each further year of price change
+        # extends it by 12 (Olivier, call 2026-07-10). Only override for STP opps that
+        # carry the price/qty base — non-STP opps keep their manual duration.
+        derived_duration = compute_duration_months(opp)
+        if derived_duration is not None:
+            opp.duration_months = derived_duration
         if stp_fin["roi_full_year_pct"] is not None:
             opp.roi_percent = Decimal(str(stp_fin["roi_full_year_pct"]))
         if stp_fin["roi_period_pct"] is not None:
@@ -1660,9 +1678,13 @@ class PurchasingValueService:
 
         duration = int(opp.duration_months or 0)
         anchor = compute_savings_start_date(opp)
-        per_year = compute_stp_financials(opp)["saving_per_year"]
+        # Budget the INCREMENTAL year-over-year price drop ("saving à budgéter"), not the
+        # full run-rate saving reconducted every year (Olivier, call 2026-07-10). A flat
+        # price collapses the whole budget onto year N; a falling price adds each year's
+        # extra drop. compute_budget_year_portions still handles mid-year start prorata.
+        per_year = compute_saving_to_budget_per_year(opp)
         if any(v is not None for v in per_year):
-            windows = per_year  # STP escalating per-year savings
+            windows = per_year  # STP incremental per-year savings to budget
         elif opp.expected_annual_saving is not None:
             n_years = max(1, ceil(duration / 12)) if duration else 1
             windows = [float(opp.expected_annual_saving)] * n_years
@@ -2023,6 +2045,17 @@ class PurchasingValueService:
                     "fx_rate_to_eur": float(opp.fx_rate_to_eur) if opp.fx_rate_to_eur is not None else 1.0,
                     "applicable_amount_eur": round(float(r.applicable_amount) * fx, 2)
                     if r.applicable_amount is not None and not fx_missing
+                    else None,
+                    # "Value of Opportunity" = total multi-year gain, shown alongside
+                    # the per-year "à budgéter" so a 0 / small budget year (flat price)
+                    # is understandable in context. New STP opps carry it in
+                    # period_saving; SB12-imported opps have period_saving=None and store
+                    # the total in expected_annual_saving instead -> fall back to it.
+                    "value_of_opportunity_eur": round(
+                        float(opp.period_saving if opp.period_saving is not None
+                              else opp.expected_annual_saving) * fx, 2)
+                    if (opp.period_saving is not None or opp.expected_annual_saving is not None)
+                    and not fx_missing
                     else None,
                     "fx_missing": fx_missing,
                     "portion_kind": r.portion_kind,
@@ -3780,10 +3813,20 @@ class PurchasingValueService:
     async def _recalculate_ytd(self, financial_line_id: int) -> None:
         """Recalculate monthly cumulated fields AND push totals back to FinancialLine.
 
-        delta_vs_expected_ytd = sum(actual) - sum(expected) for past months where
-        actual_saving IS NOT NULL. Months with no data entered are excluded so that
-        "not yet entered" is not silently treated as zero savings.
-        cumulated_real_saving = total actuals entered (all time).
+        Aligned with the Monday SB12 board (calendar-year pilotage — finance &
+        purchasing steer per calendar year Jan–Dec):
+        - The cumulated columns reset at each January so every calendar year
+          accumulates independently (matches Monday's per-year monthly grid).
+        - cumulated_real_saving = Σ of the CURRENT calendar year's actuals only
+          (not lifetime), matching Monday's "Cum. Real Sav." = Σ of the 12 year
+          columns.
+        - cumulated_real_saving_ltd = Σ of ALL actuals across every year
+          (life-to-date / inception-to-date), for total-value & conversion views.
+        - delta_vs_expected_ytd = Σ(actual) − Σ(expected) over the elapsed months
+          of the CURRENT calendar year. Expected counts for EVERY elapsed month;
+          a month with no actual entered contributes 0 realized, so a late/unentered
+          month surfaces as a shortfall instead of silently disappearing.
+        Cash cumulation is left all-time (out of scope; cash redesign deferred).
         """
         result = await self.db.execute(
             select(MonthlyFinancial)
@@ -3791,30 +3834,48 @@ class PurchasingValueService:
             .order_by(MonthlyFinancial.period_month)
         )
         rows = list(result.scalars().all())
-        today_first = date.today().replace(day=1)
+        today = date.today()
+        today_first = today.replace(day=1)
+        current_year = today.year
 
         cum_exp = Decimal("0")
         cum_act = Decimal("0")
+        year_cursor = None
+
+        cy_real = Decimal("0")   # current calendar-year realized (YTD basis)
+        ltd_real = Decimal("0")  # life-to-date realized (all years, never reset)
         ytd_exp = Decimal("0")
         ytd_act = Decimal("0")
 
         for row in rows:
+            pm = row.period_month
+            # Reset the cumulative columns at each calendar-year boundary.
+            if pm and pm.year != year_cursor:
+                year_cursor = pm.year
+                cum_exp = Decimal("0")
+                cum_act = Decimal("0")
+
             cum_exp += row.expected_saving or Decimal("0")
             row.cumulated_expected = cum_exp
             if row.actual_saving is not None:
                 cum_act += row.actual_saving
+                ltd_real += row.actual_saving
                 row.delta_vs_expected = row.actual_saving - (row.expected_saving or Decimal("0"))
             else:
                 row.delta_vs_expected = None
             # Always write cumulated_actual so gap rows don't show stale values
             row.cumulated_actual = cum_act if cum_act else None
 
-            # YTD delta: only count months where actual data was entered
-            if row.period_month and row.period_month <= today_first and row.actual_saving is not None:
-                ytd_exp += row.expected_saving or Decimal("0")
-                ytd_act += row.actual_saving
+            # Current calendar-year metrics
+            if pm and pm.year == current_year:
+                if row.actual_saving is not None:
+                    cy_real += row.actual_saving
+                # YTD: every elapsed month counts its expected; missing actual = 0
+                if pm <= today_first:
+                    ytd_exp += row.expected_saving or Decimal("0")
+                    ytd_act += row.actual_saving or Decimal("0")
 
-        # Also accumulate cash actuals (Gap 3)
+        # Also accumulate cash actuals (Gap 3) — kept all-time (out of scope)
         cum_cash = Decimal("0")
         for row in rows:
             if row.cash_actual is not None:
@@ -3829,7 +3890,8 @@ class PurchasingValueService:
         )
         line = line_result.scalar_one_or_none()
         if line is not None:
-            line.cumulated_real_saving = cum_act
+            line.cumulated_real_saving = cy_real
+            line.cumulated_real_saving_ltd = ltd_real
             line.delta_vs_expected_ytd = ytd_act - ytd_exp
 
         await self.db.flush()
