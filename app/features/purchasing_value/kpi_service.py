@@ -122,9 +122,14 @@ class PurchasingKpiService:
         # Completed lines continue to generate realized savings after project closure
         # and must be included for KPI totals, monthly chart, by_plant, and by_type
         # to tell a consistent story.
+        # Cancelled opportunities (opp.status == "Cancelled") must never contribute to
+        # any forward-looking KPI, even when phase_status is still "Phase 3" (e.g. imports
+        # that set phase uniformly). This mirrors the Budgeting page's explicit cancelled
+        # guard (service.py list_budget_years) so the two pages stay consistent.
         kpi_lines = [
             line for line in all_lines
             if line.status in ("Active", "Completed") and _line_overlaps_fy(line)
+            and not (line.opportunity is not None and line.opportunity.status == "Cancelled")
         ]
         # Keep active_lines (Active-only) for alert detection (missing updates, escalation)
         # where Completed lines are no longer actionable.
@@ -230,7 +235,11 @@ class PurchasingKpiService:
             # budget_status_by_opp still records their status for the EOY-by-status chart
             # (which visualises the historical breakdown), but they are excluded from all
             # financial aggregates that drive KPI comparisons.
-            is_inactive = o.phase_status in INACTIVE_PHASES or o.phase_status is None
+            is_inactive = (
+                o.phase_status in INACTIVE_PHASES
+                or o.phase_status is None
+                or o.status == "Cancelled"
+            )
             for by in (o.budget_years or []):
                 if by.fiscal_year == current_year:
                     status = by.budget_status or "Empty"
@@ -249,7 +258,7 @@ class PurchasingKpiService:
         for o in all_opps:
             # Exclude Closed and Stuck — a Closed opp is terminated, a Stuck opp is
             # not progressing. Neither should inflate the "pipeline to commit" total.
-            if o.phase_status in INACTIVE_PHASES or o.phase_status is None:
+            if o.phase_status in INACTIVE_PHASES or o.phase_status is None or o.status == "Cancelled":
                 continue
             for by in (o.budget_years or []):
                 if by.fiscal_year == current_year and (by.budget_status or "") == "Opportunity":
@@ -500,6 +509,14 @@ class PurchasingKpiService:
         ]
         on_time_projects = [p for p in active_projects if p.status == "On time"]
         project_on_time_rate_pct = _pct(len(on_time_projects), len(active_projects))
+
+        # Cadence automatique (règle Monday "Action Status") : une ligne est "Late" si son
+        # réalisé cumulé est en retard sur l'attendu YTD (delta_vs_expected_ytd < 0). Dérivée
+        # du delta déjà stocké — affichage/KPI seulement, ne déclenche aucune escalade.
+        _paced_lines = [ln for ln in kpi_lines if ln.delta_vs_expected_ytd is not None]
+        pacing_late_count = sum(1 for ln in _paced_lines if _n(ln.delta_vs_expected_ytd) < 0)
+        pacing_on_time_count = len(_paced_lines) - pacing_late_count
+        pacing_on_time_pct = _pct(pacing_on_time_count, len(_paced_lines))
 
         # Reference month for update coverage:
         #   past FY  → last month of that FY
@@ -1217,6 +1234,10 @@ class PurchasingKpiService:
                 "phase0_decided_count": len(phase0_decided),
                 "phase0_go_count": len(phase0_go),
                 "project_on_time_rate_pct": project_on_time_rate_pct,
+                # Cadence dérivée (règle Monday Action Status) — affichage/KPI seulement
+                "pacing_on_time_pct": pacing_on_time_pct,
+                "pacing_late_count": pacing_late_count,
+                "pacing_on_time_count": pacing_on_time_count,
                 "monthly_update_pct": monthly_update_pct,
                 # Portfolio quality
                 "avg_priority_score": avg_priority,

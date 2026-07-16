@@ -7,7 +7,6 @@ import copy
 import logging
 from datetime import datetime, date, timedelta
 from decimal import Decimal
-from math import ceil
 from typing import Optional, List
 
 from sqlalchemy import select, inspect as sa_inspect
@@ -1776,8 +1775,12 @@ class PurchasingValueService:
         if any(v is not None for v in per_year):
             windows = per_year  # STP incremental per-year savings to budget
         elif opp.expected_annual_saving is not None:
-            n_years = max(1, ceil(duration / 12)) if duration else 1
-            windows = [float(opp.expected_annual_saving)] * n_years
+            # Sans prix STP, on ne "reconduit" PAS l'annuel chaque année : une économie
+            # récurrente à prix plat est budgétée UNE fois (année de démarrage), cohérent
+            # avec l'incrémental ci-dessus (décision "saving à budgéter", Olivier 2026-07-10)
+            # et avec les imports Monday (année N pleine, exercices suivants = 0). Reconduire
+            # double-compterait un deal pluriannuel sur plusieurs budgets.
+            windows = [float(opp.expected_annual_saving)]
         else:
             windows = []
         portions = compute_budget_year_portions(windows, anchor, duration or None)

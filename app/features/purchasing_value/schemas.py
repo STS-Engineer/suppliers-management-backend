@@ -5,7 +5,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Dict, Optional, List, Literal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, computed_field, field_validator, model_validator
 
 
 # ---------------------------------------------------------------------------
@@ -1013,6 +1013,16 @@ class FinancialLineResponse(BaseModel):
     recovery_baseline_gap: Optional[Decimal] = None
     recovery_baseline_set_at: Optional[datetime] = None
     monthly_financials: List[MonthlyFinancialResponse] = Field(default_factory=list)
+
+    @computed_field
+    @property
+    def pacing_status(self) -> Optional[str]:
+        """Cadence automatique (règle Monday Action Status) : 'Late' si le réalisé
+        cumulé est en retard sur l'attendu YTD (delta_vs_expected_ytd < 0), sinon
+        'On time'. Dérivé — n'écrase pas le statut manuel du projet."""
+        if self.delta_vs_expected_ytd is None:
+            return None
+        return "Late" if self.delta_vs_expected_ytd < 0 else "On time"
 
     class Config:
         from_attributes = True
