@@ -1106,6 +1106,7 @@ class BudgetYearResponse(BaseModel):
     portion_kind: Optional[str] = None
     suggested_status: Optional[str] = None
     budget_status: Optional[str] = None
+    is_additional: Optional[bool] = None
     status_locked_at: Optional[datetime] = None
     status_locked_by: Optional[str] = None
     delta_reason: Optional[List[str]] = None
