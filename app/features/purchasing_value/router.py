@@ -182,7 +182,7 @@ async def delete_opportunity(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
-    _require(current_user, ["vp_conversion"])
+    _require(current_user, _PRIVILEGED)
     try:
         svc = PurchasingValueService(db)
         actor_email = (
@@ -1562,3 +1562,4 @@ async def escalate_action_item(
         await db.rollback()
         raise
     return {"status": "success", "data": result}
+
