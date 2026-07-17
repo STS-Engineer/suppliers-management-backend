@@ -1757,10 +1757,18 @@ class PurchasingValueService:
             .all()
         )
 
+        # Fiscal years with an officially closed budget. A closed year is a frozen
+        # historical commitment: _sync must never mutate OR delete its rows — not even
+        # unlocked ones. Fetched up-front so the eligibility-cleanup path below and the
+        # recompute loop share the same guard. (A director closed FY2026 after the SB12
+        # import; a later Create-Budget save re-synced these opps and, before this guard,
+        # rewrote the closed baseline from 1,105,760 to 901,528.)
+        closed_fys = await self._closed_fiscal_years()
+
         # If opp is not budget-eligible, clean up any unlocked rows and stop.
         if not self._is_budget_eligible(opp):
             for row in existing_rows:
-                if row.status_locked_at is None:
+                if row.status_locked_at is None and row.fiscal_year not in closed_fys:
                     await self.db.delete(row)
             await self.db.flush()
             return
@@ -1785,7 +1793,6 @@ class PurchasingValueService:
             windows = []
         portions = compute_budget_year_portions(windows, anchor, duration or None)
         status = self._validation_status(opp)
-        closed_fys = await self._closed_fiscal_years()
 
         existing = {by.fiscal_year: by for by in existing_rows}
         seen = set()
@@ -1829,8 +1836,9 @@ class PurchasingValueService:
                 # the next save erased the imported baseline (e.g. 1,105,760 -> 901,528).
                 # Freeze the whole committed row when locked; refresh only the advisory
                 # suggested_status. (Mirrors the "never mutate a locked row" rule already
-                # applied to stale rows below.)
-                if row.status_locked_at is None:
+                # applied to stale rows below.) A row in an officially CLOSED fiscal year
+                # is likewise frozen even if unlocked — a closed budget is immutable.
+                if row.status_locked_at is None and fy not in closed_fys:
                     row.applicable_amount = amt
                     row.portion_kind = p["kind"]
                     row.budget_status = default_status
@@ -1855,7 +1863,11 @@ class PurchasingValueService:
         # leave it exactly as-is rather than zeroing it out; a stale locked row
         # is a signal for Finance to review, not a value the sync should touch.
         for fy, row in existing.items():
-            if fy not in seen and row.status_locked_at is None:
+            if (
+                fy not in seen
+                and row.status_locked_at is None
+                and fy not in closed_fys
+            ):
                 await self.db.delete(row)
 
         await self.db.flush()
