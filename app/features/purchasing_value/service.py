@@ -1820,14 +1820,21 @@ class PurchasingValueService:
             )
             row = existing.get(fy)
             if row is not None:
-                row.applicable_amount = amt
-                row.portion_kind = p["kind"]
-                row.suggested_status = status
-                # Preserve a manual Create-Budget decision (locked); otherwise the row
-                # defaults per `default_status` above until the director commits it
-                # to "Budgeted" or sets it to "Empty".
+                # A LOCKED row is a frozen commitment — a director Create-Budget
+                # decision OR an imported baseline (e.g. SB12, status_locked_by set at
+                # import). Its committed figures (applicable_amount, portion_kind,
+                # budget_status) must never be silently recomputed. Previously only
+                # budget_status was protected while applicable_amount/portion_kind were
+                # overwritten unconditionally (this line), so an incremental re-sync on
+                # the next save erased the imported baseline (e.g. 1,105,760 -> 901,528).
+                # Freeze the whole committed row when locked; refresh only the advisory
+                # suggested_status. (Mirrors the "never mutate a locked row" rule already
+                # applied to stale rows below.)
                 if row.status_locked_at is None:
+                    row.applicable_amount = amt
+                    row.portion_kind = p["kind"]
                     row.budget_status = default_status
+                row.suggested_status = status
                 status_by_fy[fy] = row.budget_status
             else:
                 new_row = OpportunityBudgetYear(
