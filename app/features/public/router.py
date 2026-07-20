@@ -51,6 +51,9 @@ class PublicPlantEntry(BaseModel):
     final_grade: Optional[str] = None
     supplier_status: Optional[str] = None
     supplier_scope: Optional[str] = None
+    # Relation-level strategic mention: strategic / monopolistic / rfq only /
+    # exit / need group validation (may be comma-combined).
+    strategic_mention: Optional[str] = None
     last_evaluation_date: Optional[str] = None
     annual_spend_value: Optional[float] = None
     # 11 criteria from latest evaluation (all stored as String in DB)
@@ -145,7 +148,8 @@ async def get_public_supplier_directory(
     """
     Public supplier directory — no login required.
     Returns only suppliers that are active and on the panel
-    (panel_decision = 'panel_add' or 'panel_add_committee_validated').
+    (panel_decision in PANEL_ACTIVE_DECISIONS: panel_add,
+    panel_add_exec_committee, panel_add_committee_validated).
     """
 
     stmt = (
@@ -368,6 +372,7 @@ async def get_public_supplier_directory(
                     final_grade=r.final_grade,
                     supplier_status=r.supplier_status,
                     supplier_scope=r.supplier_scope,
+                    strategic_mention=r.strategic_mention,
                     last_evaluation_date=_to_date_str(r.last_evaluation_date),
                     annual_spend_value=_to_float(r.annual_spend_value),
                     lta=pld.lta if pld else None,
