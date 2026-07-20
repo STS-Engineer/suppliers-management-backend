@@ -113,6 +113,17 @@ def compute_next_evaluation_date(eval_date: date, frequency: str) -> date:
     return eval_date + timedelta(days=FREQUENCY_DAYS.get(frequency, 365))
 
 
+def _has_eval_evidence(relation: SupplierSiteRelation) -> bool:
+    """True when the relation carries any scorecard result (grade / class / final
+    grade / score) — i.e. it was evaluated even if the date wasn't recorded."""
+    return bool(
+        (relation.operational_grade or "").strip()
+        or (relation.final_grade or "").strip()
+        or relation.class_value is not None
+        or relation.last_eval_score is not None
+    )
+
+
 def infer_frequency(relation: SupplierSiteRelation) -> str:
     """Fall back to scope-based frequency if not explicitly set."""
     if (
@@ -161,7 +172,8 @@ async def get_evaluations_due(db: AsyncSession) -> List[Dict[str, Any]]:
         "NEVER_EVALUATED": 0,
         "OVERDUE": 1,
         "DUE_SOON": 2,
-        "UP_TO_DATE": 3,
+        "MISSING_DATE": 3,
+        "UP_TO_DATE": 4,
     }
 
     for rel, unit, site in rows:
@@ -170,7 +182,10 @@ async def get_evaluations_due(db: AsyncSession) -> List[Dict[str, Any]]:
         frequency = infer_frequency(rel)
 
         if last is None:
-            status = "NEVER_EVALUATED"
+            # A grade/class/score means the relation WAS evaluated — the date is
+            # just missing (common in the Monday import). Only treat it as never
+            # evaluated when there's no scorecard evidence at all.
+            status = "MISSING_DATE" if _has_eval_evidence(rel) else "NEVER_EVALUATED"
         elif nxt and nxt < today:
             status = "OVERDUE"
         elif nxt and nxt <= due_threshold:
@@ -345,7 +360,7 @@ async def generate_prefilled_template(db: AsyncSession, due_only: bool = False) 
         last = rel.last_evaluation_date
         nxt = rel.next_evaluation_date
         if last is None:
-            return "NEVER_EVALUATED"
+            return "MISSING_DATE" if _has_eval_evidence(rel) else "NEVER_EVALUATED"
         if nxt and nxt < today:
             return "OVERDUE"
         if nxt and nxt <= due_threshold:
@@ -356,10 +371,16 @@ async def generate_prefilled_template(db: AsyncSession, due_only: bool = False) 
         rows = [
             (rel, unit, site)
             for rel, unit, site in all_rows
-            if _eval_status(rel) in ("OVERDUE", "DUE_SOON", "NEVER_EVALUATED")
+            if _eval_status(rel)
+            in ("OVERDUE", "DUE_SOON", "NEVER_EVALUATED", "MISSING_DATE")
         ]
-        # Sort: OVERDUE first, then DUE_SOON, then NEVER_EVALUATED
-        _priority = {"OVERDUE": 0, "DUE_SOON": 1, "NEVER_EVALUATED": 2}
+        # Sort: OVERDUE first, then DUE_SOON, NEVER_EVALUATED, MISSING_DATE
+        _priority = {
+            "OVERDUE": 0,
+            "DUE_SOON": 1,
+            "NEVER_EVALUATED": 2,
+            "MISSING_DATE": 3,
+        }
         rows.sort(key=lambda x: _priority.get(_eval_status(x[0]), 99))
     else:
         rows = list(all_rows)
@@ -382,11 +403,13 @@ async def generate_prefilled_template(db: AsyncSession, due_only: bool = False) 
         "OVERDUE": "⚠ Overdue",
         "DUE_SOON": "⏳ Due soon",
         "NEVER_EVALUATED": "— Never evaluated",
+        "MISSING_DATE": "✎ Missing eval date",
     }
     STATUS_COLOR = {
         "OVERDUE": "FEE2E2",       # red-100
         "DUE_SOON": "FEF3C7",      # amber-100
         "NEVER_EVALUATED": "F1F5F9",  # slate-100
+        "MISSING_DATE": "CFFAFE",  # cyan-100
     }
 
     if due_only:

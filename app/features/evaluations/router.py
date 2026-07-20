@@ -141,6 +141,7 @@ async def get_due_evaluations(
 
     summary = {
         "NEVER_EVALUATED": sum(1 for x in items if x["eval_status"] == "NEVER_EVALUATED"),
+        "MISSING_DATE":    sum(1 for x in items if x["eval_status"] == "MISSING_DATE"),
         "OVERDUE":         sum(1 for x in items if x["eval_status"] == "OVERDUE"),
         "DUE_SOON":        sum(1 for x in items if x["eval_status"] == "DUE_SOON"),
         "UP_TO_DATE":      sum(1 for x in items if x["eval_status"] == "UP_TO_DATE"),
