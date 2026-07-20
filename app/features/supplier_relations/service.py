@@ -370,6 +370,34 @@ class SupplierRelationService:
         )
         unit_certifications = list((await self.db.execute(unit_certs_stmt)).scalars().all())
 
+        # Certificate files attached at unit level (document_type='Certificate') -- e.g.
+        # migrated cert PDFs that were never linked to a specific certification row.
+        unit_cert_docs_stmt = (
+            select(Document)
+            .where(Document.id_supplier_unit == relation.id_supplier_unit)
+            .where(Document.document_type == "Certificate")
+            .where(Document.is_deleted.is_(False))
+            .order_by(Document.uploaded_at.desc().nullslast())
+        )
+        unit_cert_docs = list((await self.db.execute(unit_cert_docs_stmt)).scalars().all())
+
+        def _doc_payload(d: Document) -> dict:
+            return {
+                "id_document": d.id_document,
+                "document_name": d.document_name,
+                "original_file_name": d.original_file_name,
+                "mime_type": d.mime_type,
+                "file_url": get_fresh_doc_url(d.file_url) if d.file_url else None,
+                "uploaded_at": d.uploaded_at.isoformat() if d.uploaded_at else None,
+            }
+
+        # Group certificate files by the certification they belong to; the rest
+        # (id_certification NULL) are unit-level files not tied to a specific cert.
+        docs_by_cert: dict[int, list[dict]] = {}
+        for d in unit_cert_docs:
+            if d.id_certification is not None:
+                docs_by_cert.setdefault(d.id_certification, []).append(_doc_payload(d))
+
         # Documents attached to this relation (eval reference + LTA + criterion evidence)
         eval_docs = await self.list_relation_documents_by_type(
             relation_id, ["evaluation_reference", "lta_agreement", "evaluation_criterion_evidence"]
@@ -451,8 +479,17 @@ class SupplierRelationService:
                     "certificate_name": c.certificate_name,
                     "start_date": c.start_date.isoformat() if c.start_date else None,
                     "end_date": c.end_date.isoformat() if c.end_date else None,
+                    "file_name": c.file_name,
+                    "file_url": get_fresh_doc_url(c.file_url) if c.file_url else None,
+                    # Full file history for this cert (renewals), newest first.
+                    "files": docs_by_cert.get(c.id_certification, []),
                 }
                 for c in unit_certifications
+            ],
+            # Certificate files NOT linked to a specific certification (unit-level /
+            # unmatched migrated files) -- shown as a separate fallback list.
+            "unit_certificate_documents": [
+                _doc_payload(d) for d in unit_cert_docs if d.id_certification is None
             ],
             # Documents (evaluation reference + LTA)
             "evaluation_documents": [

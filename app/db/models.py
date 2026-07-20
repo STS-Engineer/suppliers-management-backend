@@ -644,6 +644,12 @@ class SupplierCertification(GovernanceMixin, Base):
     supplier_unit: Mapped[Optional["SupplierUnit"]] = relationship(
         back_populates="certifications"
     )
+    # File history for this certification (renewals: one cert -> many files).
+    # file_url/file_name above stay as the denormalized "latest file" pointer.
+    documents: Mapped[List["Document"]] = relationship(
+        back_populates="certification",
+        foreign_keys="Document.id_certification",
+    )
 
 
 class SupplierAgreement(GovernanceMixin, Base):
@@ -768,6 +774,11 @@ class Document(TimestampMixin, GovernanceMixin, Base):
     id_group: Mapped[Optional[int]] = mapped_column(
         ForeignKey("supplier_group.id_group", ondelete="SET NULL"), nullable=True
     )
+    id_certification: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("supplier_certification.id_certification", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     document_type: Mapped[str] = mapped_column(String(100), nullable=False)
     document_name: Mapped[str] = mapped_column(String(255), nullable=False)
     original_file_name: Mapped[Optional[str]] = mapped_column(
@@ -810,6 +821,9 @@ class Document(TimestampMixin, GovernanceMixin, Base):
     )
     group: Mapped[Optional["SupplierGroup"]] = relationship(
         back_populates="documents", foreign_keys=[id_group]
+    )
+    certification: Mapped[Optional["SupplierCertification"]] = relationship(
+        back_populates="documents", foreign_keys=[id_certification]
     )
     assessment_templates: Mapped[List["AssessmentTemplate"]] = relationship(
         back_populates="document"

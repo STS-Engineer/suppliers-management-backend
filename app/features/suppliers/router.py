@@ -1,6 +1,7 @@
 """Suppliers router."""
 
 from typing import Optional
+from datetime import date
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import DBAPIError
@@ -50,6 +51,19 @@ def _require_vp_conversion(current_user: dict = Depends(get_current_user)) -> di
         raise HTTPException(
             status_code=403,
             detail="VP Conversion role required for supplier validation.",
+        )
+    return current_user
+
+
+# Only these roles may create/modify/delete certifications and their files.
+_CERT_MANAGER_PROFILES = {"vp_conversion", "purchasing_director"}
+
+
+def _require_cert_manager(current_user: dict = Depends(get_current_user)) -> dict:
+    if current_user.get("access_profile") not in _CERT_MANAGER_PROFILES:
+        raise HTTPException(
+            status_code=403,
+            detail="Only VP Conversion or Purchasing Director can modify certifications.",
         )
     return current_user
 
@@ -1306,10 +1320,9 @@ async def add_certification_to_unit(
     unit_id: int,
     data: schemas.SupplierCertificationCreate,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(_require_cert_manager),
 ):
     """Add a certification to a supplier unit."""
-    _block_viewer(current_user)
     try:
         service = SupplierService(db)
         cert = await service.create_certification_for_unit(unit_id, data)
@@ -1342,10 +1355,9 @@ async def patch_certification(
     cert_id: int,
     data: schemas.SupplierCertificationUpdate,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(_require_cert_manager),
 ):
     """Update a certification's dates, type, or document. Quality certs cascade to evaluations."""
-    _block_viewer(current_user)
     try:
         service = SupplierService(db)
         # Capture the cert's standard_type BEFORE the patch: if it was "quality" and is
@@ -1378,11 +1390,10 @@ async def delete_certification(
     unit_id: int,
     cert_id: int,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(_require_cert_manager),
 ):
     """Soft-delete a certification. If it was a quality cert, re-derive the
     quality_certification criterion on all affected relations."""
-    _block_viewer(current_user)
     try:
         service = SupplierService(db)
         cert = await service.soft_delete_certification(
@@ -1415,15 +1426,18 @@ async def upload_certification_file(
     cert_id: int,
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(_require_cert_manager),
 ):
-    """Upload or replace the document file for a certification."""
-    _block_viewer(current_user)
-    from app.shared.utils.blob_storage import (
-        upload_certification_document,
-        _extract_blob_name,
-        delete_blob,
-    )
+    """Add a file to a certification.
+
+    Files are kept as history (renewals): each upload creates a new Document row
+    linked to the certification, marks the previous current file as superseded,
+    and updates supplier_certification.file_url as the 'latest file' pointer.
+    The old blob is NOT deleted, so prior certificates stay downloadable.
+    """
+    from app.shared.utils.blob_storage import upload_certification_document
+    from app.db.models import Document
+    from sqlalchemy import select as _select
 
     try:
         service = SupplierService(db)
@@ -1435,16 +1449,40 @@ async def upload_certification_file(
                 f"Certification {cert_id} not found for unit {unit_id}", status_code=404
             )
 
-        # Delete old blob if present
-        if cert.file_url:
-            old_blob = _extract_blob_name(cert.file_url)
-            if old_blob:
-                try:
-                    await delete_blob(old_blob)
-                except Exception:
-                    pass
-
         result = await upload_certification_document(file, unit_id, cert_id)
+
+        new_doc = Document(
+            id_supplier_unit=unit_id,
+            id_certification=cert_id,
+            document_type="Certificate",
+            document_name=result["filename"],
+            original_file_name=result["filename"],
+            file_url=result["file_url"],
+            mime_type=result.get("mimetype"),
+            file_size=result["size"],
+            storage_provider="azure",
+            storage_object_key=result.get("blob_name"),
+            uploaded_by=_resolve_actor(current_user),
+        )
+        db.add(new_doc)
+        await db.flush()
+
+        # Chain the previous current file (if any) to the new one for history.
+        if cert.file_url:
+            prev = (
+                await db.execute(
+                    _select(Document)
+                    .where(Document.id_certification == cert_id)
+                    .where(Document.file_url == cert.file_url)
+                    .where(Document.id_document != new_doc.id_document)
+                    .where(Document.is_deleted.is_(False))
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if prev is not None:
+                prev.superseded_by_document_id = new_doc.id_document
+
+        # Latest-file pointer on the cert row.
         await service.repo.update_certification(
             cert_id,
             {
@@ -1460,6 +1498,82 @@ async def upload_certification_file(
             "data": schemas.SupplierCertificationResponse.model_validate(updated),
             "message": f"File '{result['filename']}' uploaded successfully.",
         }
+    except AppException:
+        raise
+    except Exception:
+        raise
+
+
+@router.delete(
+    "/units/{unit_id}/certifications/{cert_id}/file/{document_id}",
+    response_model=dict,
+)
+async def delete_certification_file(
+    unit_id: int,
+    cert_id: int,
+    document_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(_require_cert_manager),
+):
+    """Soft-delete one file from a certification's history. If it was the current
+    (latest) file, the cert's file_url is repointed to the next most recent
+    remaining file (or cleared). The blob itself is retained."""
+    from app.db.models import Document
+    from app.core.exceptions import AppException
+    from datetime import datetime as _dt
+    from sqlalchemy import select as _select
+
+    try:
+        service = SupplierService(db)
+        cert = await service.repo.find_certification_by_id(cert_id)
+        if not cert or cert.id_supplier_unit != unit_id:
+            raise AppException(
+                f"Certification {cert_id} not found for unit {unit_id}", status_code=404
+            )
+
+        doc = (
+            await db.execute(
+                _select(Document)
+                .where(Document.id_document == document_id)
+                .where(Document.id_certification == cert_id)
+                .where(Document.is_deleted.is_(False))
+            )
+        ).scalar_one_or_none()
+        if doc is None:
+            raise AppException(
+                f"File {document_id} not found for certification {cert_id}",
+                status_code=404,
+            )
+
+        was_current = bool(cert.file_url and doc.file_url == cert.file_url)
+        doc.is_deleted = True
+        doc.deleted_at = _dt.utcnow()
+        doc.deleted_by = _resolve_actor(current_user)
+        await db.flush()
+
+        if was_current:
+            nxt = (
+                await db.execute(
+                    _select(Document)
+                    .where(Document.id_certification == cert_id)
+                    .where(Document.is_deleted.is_(False))
+                    .order_by(
+                        Document.uploaded_at.desc().nullslast(),
+                        Document.id_document.desc(),
+                    )
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            await service.repo.update_certification(
+                cert_id,
+                {
+                    "file_url": nxt.file_url if nxt else None,
+                    "file_name": (nxt.original_file_name or nxt.document_name) if nxt else None,
+                    "file_size": nxt.file_size if nxt else None,
+                },
+            )
+        await db.commit()
+        return {"status": "success", "message": "File removed from certification."}
     except AppException:
         raise
     except Exception:
@@ -1662,6 +1776,25 @@ async def sync_quality_certifications(
             "synced_units": synced_units,
             "recomputed_evaluations": total_affected,
         }
+    except Exception:
+        raise
+
+
+@router.get("/dashboard", response_model=dict)
+async def get_supplier_dashboard(
+    fiscal_year: Optional[int] = Query(None, ge=2000, le=2100),
+    expiring_days: int = Query(90, ge=1, le=365),
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Supplier monitoring dashboard focused on spend, risk, and panel structure."""
+    try:
+        service = SupplierService(db)
+        result = await service.get_supplier_dashboard(
+            fiscal_year=fiscal_year,
+            expiring_days=expiring_days,
+        )
+        return {"status": "success", "data": result}
     except Exception:
         raise
 
