@@ -1693,16 +1693,19 @@ class PurchasingValueService:
 
     def _is_budget_eligible(self, opp: Opportunity) -> bool:
         """Option A eligibility, extended:
-        - Phase 3 / Phase 4 / Closed with a confirmed real_start_date (savings
-          timing is known), OR
+        - Phase 3 / Phase 4 / Closed — always eligible, EVEN without a confirmed
+          real_start_date. An opp can be gated into Phase 3 before the real
+          deployment start is known; it must still surface on the Budgeting page
+          so the value can be entered there (real_start_date is captured either
+          on the opportunity form or inline in Budgeting). compute_savings_start_date()'s
+          fallback chain (real_start_date -> planned_start_date -> study+weeks
+          estimate) pro-rates using planned_start_date until real_start_date is
+          set, after which the anchor switches automatically on the next
+          _sync_budget_years run, OR
         - Phase 2 with execution_start_date entered — execution has started so
           the opportunity is firm enough to budget, even though savings haven't
-          begun yet. compute_savings_start_date()'s existing fallback chain
-          (real_start_date -> planned_start_date -> study+weeks estimate) will
-          pro-rate these using planned_start_date since real_start_date is None;
-          once Phase 3 sets real_start_date, the anchor switches automatically
-          on the next _sync_budget_years run."""
-        if opp.phase_status in self._BUDGET_ELIGIBLE_PHASES and opp.real_start_date is not None:
+          begun yet."""
+        if opp.phase_status in self._BUDGET_ELIGIBLE_PHASES:
             return True
         if opp.phase_status == "Phase 2" and opp.execution_start_date is not None:
             return True
@@ -2018,8 +2021,9 @@ class PurchasingValueService:
         budgeting page.
 
         Budget eligibility filter (Option A, extended) — see _is_budget_eligible:
-        Phase 3 / Phase 4 / Completed opportunities with a confirmed real_start_date,
-        plus Phase 2 opportunities with execution_start_date already entered.
+        all Phase 3 / Phase 4 / Completed opportunities (real_start_date optional —
+        it can be entered inline here), plus Phase 2 opportunities with
+        execution_start_date already entered.
         """
         result = await self.db.execute(
             select(OpportunityBudgetYear)

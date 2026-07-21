@@ -341,6 +341,26 @@ class GateApprovalService:
         is_negotiation = opp.opportunity_type == "Negotiation"
         tier: Optional[str] = None
 
+        # Required-field guard at the gate (not at save — saving is intentionally
+        # permissive). Mirrors the frontend committee checklist:
+        #  - Phase 3/4: the real deployment start (real_start_date) must be recorded
+        #    before a review can be requested — savings are flowing, so the timing
+        #    must be firm. (Fill it on the opportunity form or inline in Budgeting.)
+        #  - Non-Negotiation types: the execution start date must be entered from the
+        #    first committee phase onward (Negotiation has no execution/tooling phase).
+        gate_missing: list[str] = []
+        if opp.phase_status in ("Phase 3", "Phase 4") and opp.real_start_date is None:
+            gate_missing.append("Deployment Start Date (Real Savings Start)")
+        if not is_negotiation and opp.execution_start_date is None:
+            gate_missing.append("Execution Start Date")
+        if gate_missing:
+            raise AppException(
+                422,
+                "Cannot request approval — fill these required fields first: "
+                f"{', '.join(gate_missing)}.",
+                "MISSING_REQUIRED_FIELDS",
+            )
+
         if is_negotiation:
             # No committee tier for Negotiation — a single approver (Purchasing
             # Director or VP Conversion) decides every phase. Other roles
