@@ -353,6 +353,21 @@ class GateApprovalService:
             gate_missing.append("Deployment Start Date (Real Savings Start)")
         if not is_negotiation and opp.execution_start_date is None:
             gate_missing.append("Execution Start Date")
+        # "Proposed New Supplier — After" becomes mandatory from Phase 1: the field
+        # is a panel dropdown that writes proposed_supplier_id (the Phase 0 free-text
+        # candidate lives in proposed_supplier_name and is optional). Negotiation/Cash
+        # skip PLD scoring, so they carry no proposed supplier link.
+        if opp.opportunity_type not in ("Negotiation", "Cash") and opp.proposed_supplier_id is None:
+            gate_missing.append("Proposed New Supplier — After (from panel)")
+        # Purchasing Owner + Conversion Owner become mandatory from Phase 2: the
+        # Purchasing Owner receives tracking/escalation alerts and the Conversion
+        # Owner enters the monthly actuals that start flowing in execution — the
+        # opportunity can't be tracked past Phase 2 without them. All types.
+        if opp.phase_status in ("Phase 2", "Phase 3", "Phase 4"):
+            if not opp.purchasing_owner:
+                gate_missing.append("Purchasing Owner")
+            if not opp.conversion_owner:
+                gate_missing.append("Conversion Owner")
         if gate_missing:
             raise AppException(
                 422,
