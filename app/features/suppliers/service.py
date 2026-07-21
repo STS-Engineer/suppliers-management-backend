@@ -27,8 +27,8 @@ from app.db.models import (
     OperationalEvaluationInput,
     PldClassEvaluationInput,
     ScoreCard,
-    SupplierActionPlan,
-    SupplierAgreement,
+    # SupplierActionPlan,  # DEAD TABLE — commented out in app.db.models
+    # SupplierAgreement,   # DEAD TABLE — commented out in app.db.models
     SupplierCarbonFootprint,
     SupplierSpendByYear,
 )
@@ -233,7 +233,7 @@ class SupplierService:
             class_breakdown[class_key] = class_breakdown.get(class_key, 0) + 1
             status_breakdown[status_label] = status_breakdown.get(status_label, 0) + 1
 
-        active_relation_ids = [row["id_relation"] for row in relation_rows]
+        # active_relation_ids = [row["id_relation"] for row in relation_rows]  # only fed dead KPIs
         active_unit_ids = list(supplier_ids)
 
         async def _safe_count(stmt, missing_table: str) -> int:
@@ -266,54 +266,12 @@ class SupplierService:
                 SupplierCertification.end_date <= expiring_before,
             )
         )
-        agreements_expiring_stmt = (
-            select(func.count(func.distinct(SupplierAgreement.id_relation)))
-            .where(
-                SupplierAgreement.is_deleted.is_(False),
-                SupplierAgreement.id_relation.in_(active_relation_ids or [-1]),
-                SupplierAgreement.end_date.is_not(None),
-                SupplierAgreement.end_date >= today,
-                SupplierAgreement.end_date <= expiring_before,
-            )
-        )
-
-        closed_statuses = ("closed", "completed", "cancelled", "done", "resolved")
-        overdue_actions_stmt = (
-            select(func.count(SupplierActionPlan.id_action_plan))
-            .where(
-                SupplierActionPlan.is_deleted.is_(False),
-                SupplierActionPlan.id_relation.in_(active_relation_ids or [-1]),
-                SupplierActionPlan.due_date.is_not(None),
-                SupplierActionPlan.due_date < today,
-                or_(
-                    SupplierActionPlan.status.is_(None),
-                    func.lower(SupplierActionPlan.status).not_in(closed_statuses),
-                ),
-            )
-        )
-        open_actions_stmt = (
-            select(func.count(SupplierActionPlan.id_action_plan))
-            .where(
-                SupplierActionPlan.is_deleted.is_(False),
-                SupplierActionPlan.id_relation.in_(active_relation_ids or [-1]),
-                or_(
-                    SupplierActionPlan.status.is_(None),
-                    func.lower(SupplierActionPlan.status).not_in(closed_statuses),
-                ),
-            )
-        )
+        # DEAD TABLES supplier_agreement / supplier_action_plan removed — their
+        # KPI counts (agreements_expiring, overdue/open action plans) were never
+        # consumed by the frontend. Only the live certification KPI remains.
 
         certs_expiring = await _safe_count(
             certs_expiring_stmt, "supplier_certification"
-        )
-        agreements_expiring = await _safe_count(
-            agreements_expiring_stmt, "supplier_agreement"
-        )
-        overdue_actions = await _safe_count(
-            overdue_actions_stmt, "supplier_action_plan"
-        )
-        open_actions = await _safe_count(
-            open_actions_stmt, "supplier_action_plan"
         )
 
         def _sorted_buckets(
@@ -395,9 +353,6 @@ class SupplierService:
                 "monopolistic_spend": round(monopolistic_spend, 2),
                 "monopolistic_spend_pct": monopolistic_spend_pct,
                 "certifications_expiring_count": certs_expiring,
-                "agreements_expiring_count": agreements_expiring,
-                "open_action_plans_count": open_actions,
-                "overdue_action_plans_count": overdue_actions,
             },
             "top_suppliers": top_suppliers,
             "spend_by_site": spend_by_site_rows,

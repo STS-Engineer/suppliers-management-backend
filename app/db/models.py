@@ -391,9 +391,9 @@ class SupplierSiteRelation(GovernanceMixin, Base):
     status_history: Mapped[List["SupplierStatusHistory"]] = relationship(
         back_populates="relation", cascade="all, delete-orphan", passive_deletes=True
     )
-    agreements: Mapped[List["SupplierAgreement"]] = relationship(
-        back_populates="relation", cascade="all, delete-orphan", passive_deletes=True
-    )
+#     agreements: Mapped[List["SupplierAgreement"]] = relationship(
+#         back_populates="relation", cascade="all, delete-orphan", passive_deletes=True
+#     )
     documents: Mapped[List["Document"]] = relationship(
         back_populates="relation",
         foreign_keys="Document.id_relation",
@@ -426,22 +426,22 @@ class SupplierSiteRelation(GovernanceMixin, Base):
     contacts_via_junction: Mapped[List["ContactSiteRelation"]] = relationship(
         back_populates="relation", cascade="all, delete-orphan", passive_deletes=True
     )
-    assessments: Mapped[List["SupplierAssessment"]] = relationship(
-        back_populates="relation"
-    )
-    input_otd: Mapped[List["InputOtdMonthly"]] = relationship(back_populates="relation")
-    input_quality_claims: Mapped[List["InputQualityClaims"]] = relationship(
-        back_populates="relation"
-    )
-    input_delivery_spend: Mapped[List["InputDeliverySpend"]] = relationship(
-        back_populates="relation"
-    )
-    scorecard_kpi_details: Mapped[List["ScorecardKpiDetail"]] = relationship(
-        back_populates="relation"
-    )
-    action_plans: Mapped[List["SupplierActionPlan"]] = relationship(
-        back_populates="relation"
-    )
+#     assessments: Mapped[List["SupplierAssessment"]] = relationship(
+#         back_populates="relation"
+#     )
+#     input_otd: Mapped[List["InputOtdMonthly"]] = relationship(back_populates="relation")
+#     input_quality_claims: Mapped[List["InputQualityClaims"]] = relationship(
+#         back_populates="relation"
+#     )
+#     input_delivery_spend: Mapped[List["InputDeliverySpend"]] = relationship(
+#         back_populates="relation"
+#     )
+#     scorecard_kpi_details: Mapped[List["ScorecardKpiDetail"]] = relationship(
+#         back_populates="relation"
+#     )
+#     action_plans: Mapped[List["SupplierActionPlan"]] = relationship(
+#         back_populates="relation"
+#     )
     development_plans: Mapped[List["SupplierDevelopmentPlan"]] = relationship(
         back_populates="relation", cascade="all, delete-orphan", passive_deletes=True
     )
@@ -652,37 +652,38 @@ class SupplierCertification(GovernanceMixin, Base):
     )
 
 
-class SupplierAgreement(GovernanceMixin, Base):
-    __tablename__ = "supplier_agreement"
-
-    id_agreement: Mapped[int] = mapped_column(
-        Integer, primary_key=True, autoincrement=True
-    )
-    id_relation: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("supplier_site_relation.id_relation", ondelete="CASCADE"),
-        nullable=True,
-    )
-    agreement_type: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
-    agreement_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    amount_value: Mapped[Optional[Decimal]] = mapped_column(
-        Numeric(18, 2), nullable=True
-    )
-    amount_currency: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
-    location_value: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
-    start_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
-    end_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
-    comments: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    value_unit: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
-    agreement_description: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-    agreement_value: Mapped[Optional[float]] = mapped_column(
-        Numeric(18, 6), nullable=True
-    )
-
-    relation: Mapped[Optional["SupplierSiteRelation"]] = relationship(
-        back_populates="agreements"
-    )
-
-
+# ===== DEAD TABLE (unused in backend; retained commented for possible future use) =====
+# class SupplierAgreement(GovernanceMixin, Base):
+#     __tablename__ = "supplier_agreement"
+#
+#     id_agreement: Mapped[int] = mapped_column(
+#         Integer, primary_key=True, autoincrement=True
+#     )
+#     id_relation: Mapped[Optional[int]] = mapped_column(
+#         ForeignKey("supplier_site_relation.id_relation", ondelete="CASCADE"),
+#         nullable=True,
+#     )
+#     agreement_type: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+#     agreement_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+#     amount_value: Mapped[Optional[Decimal]] = mapped_column(
+#         Numeric(18, 2), nullable=True
+#     )
+#     amount_currency: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+#     location_value: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+#     start_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+#     end_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+#     comments: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+#     value_unit: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+#     agreement_description: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+#     agreement_value: Mapped[Optional[float]] = mapped_column(
+#         Numeric(18, 6), nullable=True
+#     )
+#
+#     relation: Mapped[Optional["SupplierSiteRelation"]] = relationship(
+#         back_populates="agreements"
+#     )
+#
+#
 # ---------------------------------------------------------------------------
 # Domain 1 — Contacts
 # ---------------------------------------------------------------------------
@@ -801,7 +802,8 @@ class Document(TimestampMixin, GovernanceMixin, Base):
         String(50), server_default="Uploaded", nullable=False
     )
     comments: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    file_hash_sha256: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    # DEAD COLUMN (never read/written by any code or migration; always NULL). Retained commented.
+    # file_hash_sha256: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     storage_provider: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     storage_object_key: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     id_development_plan: Mapped[Optional[int]] = mapped_column(
@@ -825,15 +827,15 @@ class Document(TimestampMixin, GovernanceMixin, Base):
     certification: Mapped[Optional["SupplierCertification"]] = relationship(
         back_populates="documents", foreign_keys=[id_certification]
     )
-    assessment_templates: Mapped[List["AssessmentTemplate"]] = relationship(
-        back_populates="document"
-    )
-    assessments: Mapped[List["SupplierAssessment"]] = relationship(
-        back_populates="document"
-    )
-    import_batches: Mapped[List["ImportBatch"]] = relationship(
-        back_populates="document"
-    )
+#     assessment_templates: Mapped[List["AssessmentTemplate"]] = relationship(
+#         back_populates="document"
+#     )
+#     assessments: Mapped[List["SupplierAssessment"]] = relationship(
+#         back_populates="document"
+#     )
+#     import_batches: Mapped[List["ImportBatch"]] = relationship(
+#         back_populates="document"
+#     )
     superseded_by_document: Mapped[Optional["Document"]] = relationship(
         "Document",
         remote_side="Document.id_document",
@@ -878,12 +880,12 @@ class EvaluationCycle(TimestampMixin, GovernanceMixin, Base):
     relation: Mapped["SupplierSiteRelation"] = relationship(
         back_populates="evaluation_cycles"
     )
-    approvals: Mapped[List["ApprovalWorkflow"]] = relationship(
-        back_populates="cycle", cascade="all, delete-orphan", passive_deletes=True
-    )
-    escalations: Mapped[List["Escalation"]] = relationship(
-        back_populates="cycle", cascade="all, delete-orphan", passive_deletes=True
-    )
+#     approvals: Mapped[List["ApprovalWorkflow"]] = relationship(
+#         back_populates="cycle", cascade="all, delete-orphan", passive_deletes=True
+#     )
+#     escalations: Mapped[List["Escalation"]] = relationship(
+#         back_populates="cycle", cascade="all, delete-orphan", passive_deletes=True
+#     )
     score_cards: Mapped[List["ScoreCard"]] = relationship(back_populates="cycle")
     classifications: Mapped[List["Classification"]] = relationship(
         back_populates="cycle"
@@ -897,22 +899,22 @@ class EvaluationCycle(TimestampMixin, GovernanceMixin, Base):
     impact_inputs: Mapped[List["ImpactEvaluationInput"]] = relationship(
         back_populates="cycle"
     )
-    kpi_details: Mapped[List["ScorecardKpiDetail"]] = relationship(
-        back_populates="cycle"
-    )
-    input_otd: Mapped[List["InputOtdMonthly"]] = relationship(back_populates="cycle")
-    input_quality_claims: Mapped[List["InputQualityClaims"]] = relationship(
-        back_populates="cycle"
-    )
-    input_delivery_spend: Mapped[List["InputDeliverySpend"]] = relationship(
-        back_populates="cycle"
-    )
-    assessments: Mapped[List["SupplierAssessment"]] = relationship(
-        back_populates="cycle"
-    )
-    action_plans: Mapped[List["SupplierActionPlan"]] = relationship(
-        back_populates="cycle"
-    )
+#     kpi_details: Mapped[List["ScorecardKpiDetail"]] = relationship(
+#         back_populates="cycle"
+#     )
+#     input_otd: Mapped[List["InputOtdMonthly"]] = relationship(back_populates="cycle")
+#     input_quality_claims: Mapped[List["InputQualityClaims"]] = relationship(
+#         back_populates="cycle"
+#     )
+#     input_delivery_spend: Mapped[List["InputDeliverySpend"]] = relationship(
+#         back_populates="cycle"
+#     )
+#     assessments: Mapped[List["SupplierAssessment"]] = relationship(
+#         back_populates="cycle"
+#     )
+#     action_plans: Mapped[List["SupplierActionPlan"]] = relationship(
+#         back_populates="cycle"
+#     )
 
     def __repr__(self) -> str:
         return (
@@ -921,64 +923,66 @@ class EvaluationCycle(TimestampMixin, GovernanceMixin, Base):
         )
 
 
-class ApprovalWorkflow(TimestampMixin, GovernanceMixin, Base):
-    __tablename__ = "approval_workflow"
-    __table_args__ = (Index("idx_approval_cycle", "id_cycle"),)
+# ===== DEAD TABLE (unused in backend; not present in DB unless noted; retained commented for possible future use) =====
+# class ApprovalWorkflow(TimestampMixin, GovernanceMixin, Base):
+#     __tablename__ = "approval_workflow"
+#     __table_args__ = (Index("idx_approval_cycle", "id_cycle"),)
+#
+#     id_approval: Mapped[int] = mapped_column(
+#         Integer, primary_key=True, autoincrement=True
+#     )
+#     id_cycle: Mapped[Optional[int]] = mapped_column(
+#         ForeignKey("evaluation_cycle.id_cycle", ondelete="CASCADE"), nullable=True
+#     )
+#     object_type: Mapped[str] = mapped_column(String(100), nullable=False)
+#     object_id: Mapped[int] = mapped_column(Integer, nullable=False)
+#     approval_step: Mapped[int] = mapped_column(Integer, nullable=False)
+#     approver_role: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+#     approver_name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+#     approver_email: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+#     # FIX: removed extra quotes from server_default
+#     decision: Mapped[str] = mapped_column(
+#         String(50), server_default="Pending", nullable=False
+#     )
+#     decision_date: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+#     comments: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+#
+#     cycle: Mapped[Optional["EvaluationCycle"]] = relationship(
+#         back_populates="approvals"
+#     )
 
-    id_approval: Mapped[int] = mapped_column(
-        Integer, primary_key=True, autoincrement=True
-    )
-    id_cycle: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("evaluation_cycle.id_cycle", ondelete="CASCADE"), nullable=True
-    )
-    object_type: Mapped[str] = mapped_column(String(100), nullable=False)
-    object_id: Mapped[int] = mapped_column(Integer, nullable=False)
-    approval_step: Mapped[int] = mapped_column(Integer, nullable=False)
-    approver_role: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
-    approver_name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
-    approver_email: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
-    # FIX: removed extra quotes from server_default
-    decision: Mapped[str] = mapped_column(
-        String(50), server_default="Pending", nullable=False
-    )
-    decision_date: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
-    comments: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
-    cycle: Mapped[Optional["EvaluationCycle"]] = relationship(
-        back_populates="approvals"
-    )
-
-
-class Escalation(TimestampMixin, GovernanceMixin, Base):
-    __tablename__ = "escalation"
-    __table_args__ = (Index("idx_escalation_cycle", "id_cycle"),)
-
-    id_escalation: Mapped[int] = mapped_column(
-        Integer, primary_key=True, autoincrement=True
-    )
-    id_cycle: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("evaluation_cycle.id_cycle", ondelete="CASCADE"), nullable=True
-    )
-    object_type: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
-    object_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    escalation_reason: Mapped[str] = mapped_column(Text, nullable=False)
-    escalated_by: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
-    escalated_to_role: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
-    escalated_to_name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
-    escalation_date: Mapped[Optional[datetime]] = mapped_column(
-        DateTime, server_default=func.current_timestamp(), nullable=True
-    )
-    due_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
-    # FIX: removed extra quotes from server_default
-    status: Mapped[str] = mapped_column(
-        String(50), server_default="Open", nullable=False
-    )
-    resolution_comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
-
-    cycle: Mapped[Optional["EvaluationCycle"]] = relationship(
-        back_populates="escalations"
-    )
+# ===== DEAD TABLE (unused in backend; not present in DB unless noted; retained commented for possible future use) =====
+# class Escalation(TimestampMixin, GovernanceMixin, Base):
+#     __tablename__ = "escalation"
+#     __table_args__ = (Index("idx_escalation_cycle", "id_cycle"),)
+#
+#     id_escalation: Mapped[int] = mapped_column(
+#         Integer, primary_key=True, autoincrement=True
+#     )
+#     id_cycle: Mapped[Optional[int]] = mapped_column(
+#         ForeignKey("evaluation_cycle.id_cycle", ondelete="CASCADE"), nullable=True
+#     )
+#     object_type: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+#     object_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+#     escalation_reason: Mapped[str] = mapped_column(Text, nullable=False)
+#     escalated_by: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+#     escalated_to_role: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+#     escalated_to_name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+#     escalation_date: Mapped[Optional[datetime]] = mapped_column(
+#         DateTime, server_default=func.current_timestamp(), nullable=True
+#     )
+#     due_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+#     # FIX: removed extra quotes from server_default
+#     status: Mapped[str] = mapped_column(
+#         String(50), server_default="Open", nullable=False
+#     )
+#     resolution_comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+#     resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+#
+#     cycle: Mapped[Optional["EvaluationCycle"]] = relationship(
+#         back_populates="escalations"
+#     )
 
 
 class ScoreCard(AuditMixin, GovernanceMixin, Base):
@@ -1004,9 +1008,9 @@ class ScoreCard(AuditMixin, GovernanceMixin, Base):
     cycle: Mapped[Optional["EvaluationCycle"]] = relationship(
         back_populates="score_cards"
     )
-    kpi_details: Mapped[List["ScorecardKpiDetail"]] = relationship(
-        back_populates="score_card", cascade="all, delete-orphan", passive_deletes=True
-    )
+#     kpi_details: Mapped[List["ScorecardKpiDetail"]] = relationship(
+#         back_populates="score_card", cascade="all, delete-orphan", passive_deletes=True
+#     )
 
     def __repr__(self) -> str:
         return (
@@ -1221,47 +1225,48 @@ class ImpactEvaluationInput(AuditMixin, GovernanceMixin, Base):
     )
 
 
-class ScorecardKpiDetail(TimestampMixin, GovernanceMixin, Base):
-    __tablename__ = "scorecard_kpi_detail"
-    __table_args__ = (Index("idx_scorecard_kpi_cycle", "id_cycle"),)
-
-    id_kpi_detail: Mapped[int] = mapped_column(
-        Integer, primary_key=True, autoincrement=True
-    )
-    id_score_card: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("score_card.id_score_card", ondelete="CASCADE"), nullable=True
-    )
-    id_cycle: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("evaluation_cycle.id_cycle", ondelete="SET NULL"), nullable=True
-    )
-    id_document: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("document.id_document", ondelete="SET NULL"), nullable=True
-    )
-    id_relation: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("supplier_site_relation.id_relation", ondelete="SET NULL"),
-        nullable=True,
-    )
-    kpi_name: Mapped[str] = mapped_column(String(150), nullable=False)
-    kpi_category: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
-    kpi_value: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 4), nullable=True)
-    kpi_unit: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
-    kpi_score: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
-    weight: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
-    weighted_score: Mapped[Optional[Decimal]] = mapped_column(
-        Numeric(5, 2), nullable=True
-    )
-    source_dataset: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
-    comments: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-
-    score_card: Mapped[Optional["ScoreCard"]] = relationship(
-        back_populates="kpi_details"
-    )
-    cycle: Mapped[Optional["EvaluationCycle"]] = relationship(
-        back_populates="kpi_details"
-    )
-    relation: Mapped[Optional["SupplierSiteRelation"]] = relationship(
-        back_populates="scorecard_kpi_details"
-    )
+# ===== DEAD TABLE (unused in backend; not present in DB unless noted; retained commented for possible future use) =====
+# class ScorecardKpiDetail(TimestampMixin, GovernanceMixin, Base):
+#     __tablename__ = "scorecard_kpi_detail"
+#     __table_args__ = (Index("idx_scorecard_kpi_cycle", "id_cycle"),)
+#
+#     id_kpi_detail: Mapped[int] = mapped_column(
+#         Integer, primary_key=True, autoincrement=True
+#     )
+#     id_score_card: Mapped[Optional[int]] = mapped_column(
+#         ForeignKey("score_card.id_score_card", ondelete="CASCADE"), nullable=True
+#     )
+#     id_cycle: Mapped[Optional[int]] = mapped_column(
+#         ForeignKey("evaluation_cycle.id_cycle", ondelete="SET NULL"), nullable=True
+#     )
+#     id_document: Mapped[Optional[int]] = mapped_column(
+#         ForeignKey("document.id_document", ondelete="SET NULL"), nullable=True
+#     )
+#     id_relation: Mapped[Optional[int]] = mapped_column(
+#         ForeignKey("supplier_site_relation.id_relation", ondelete="SET NULL"),
+#         nullable=True,
+#     )
+#     kpi_name: Mapped[str] = mapped_column(String(150), nullable=False)
+#     kpi_category: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+#     kpi_value: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 4), nullable=True)
+#     kpi_unit: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+#     kpi_score: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+#     weight: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+#     weighted_score: Mapped[Optional[Decimal]] = mapped_column(
+#         Numeric(5, 2), nullable=True
+#     )
+#     source_dataset: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+#     comments: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+#
+#     score_card: Mapped[Optional["ScoreCard"]] = relationship(
+#         back_populates="kpi_details"
+#     )
+#     cycle: Mapped[Optional["EvaluationCycle"]] = relationship(
+#         back_populates="kpi_details"
+#     )
+#     relation: Mapped[Optional["SupplierSiteRelation"]] = relationship(
+#         back_populates="scorecard_kpi_details"
+#     )
 
 
 class PldScoringRules(Base):
@@ -1271,7 +1276,8 @@ class PldScoringRules(Base):
     criteria_type: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     score: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2), nullable=True)
     min_value: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    max_value: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    # DEAD COLUMN (seeded = min_value duplicate; runtime only matches min_value). Retained commented.
+    # max_value: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     is_active: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
 
@@ -1281,143 +1287,146 @@ class PldScoringRules(Base):
 # ---------------------------------------------------------------------------
 
 
-class InputOtdMonthly(TimestampMixin, GovernanceMixin, Base):
-    __tablename__ = "input_otd_monthly"
-    __table_args__ = (Index("idx_input_otd_monthly_cycle", "id_cycle"),)
-
-    id_otd: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    id_cycle: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("evaluation_cycle.id_cycle", ondelete="SET NULL"), nullable=True
-    )
-    id_document: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("document.id_document", ondelete="SET NULL"), nullable=True
-    )
-    id_relation: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("supplier_site_relation.id_relation", ondelete="SET NULL"),
-        nullable=True,
-    )
-    supplier_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
-    supplier_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    month_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
-    otd_raw_value: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
-    otd_percent: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
-    comments: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    plant: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
-    # FIX: BigInteger to match import_batch.id_import_batch PK type
-    id_import_batch: Mapped[Optional[int]] = mapped_column(
-        BigInteger,
-        ForeignKey("import_batch.id_import_batch", ondelete="SET NULL"),
-        nullable=True,
-    )
-    source_row_number: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    source_row_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
-
-    cycle: Mapped[Optional["EvaluationCycle"]] = relationship(
-        back_populates="input_otd"
-    )
-    relation: Mapped[Optional["SupplierSiteRelation"]] = relationship(
-        back_populates="input_otd"
-    )
-    import_batch: Mapped[Optional["ImportBatch"]] = relationship(
-        back_populates="input_otd_rows"
-    )
-
-
-class InputQualityClaims(TimestampMixin, GovernanceMixin, Base):
-    __tablename__ = "input_quality_claims"
-    __table_args__ = (Index("idx_input_quality_claims_cycle", "id_cycle"),)
-
-    id_quality_claim: Mapped[int] = mapped_column(
-        Integer, primary_key=True, autoincrement=True
-    )
-    id_cycle: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("evaluation_cycle.id_cycle", ondelete="SET NULL"), nullable=True
-    )
-    id_document: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("document.id_document", ondelete="SET NULL"), nullable=True
-    )
-    id_relation: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("supplier_site_relation.id_relation", ondelete="SET NULL"),
-        nullable=True,
-    )
-    claimed_part_reference: Mapped[Optional[str]] = mapped_column(
-        String(150), nullable=True
-    )
-    claim_number: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
-    claim_opening_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
-    claim_closing_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
-    claim_status: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
-    supplier_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
-    supplier_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    comments: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    plant: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
-    # FIX: BigInteger to match import_batch.id_import_batch PK type
-    id_import_batch: Mapped[Optional[int]] = mapped_column(
-        BigInteger,
-        ForeignKey("import_batch.id_import_batch", ondelete="SET NULL"),
-        nullable=True,
-    )
-    source_row_number: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    source_row_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
-
-    cycle: Mapped[Optional["EvaluationCycle"]] = relationship(
-        back_populates="input_quality_claims"
-    )
-    relation: Mapped[Optional["SupplierSiteRelation"]] = relationship(
-        back_populates="input_quality_claims"
-    )
-    import_batch: Mapped[Optional["ImportBatch"]] = relationship(
-        back_populates="input_quality_claim_rows"
-    )
+# ===== DEAD TABLE (unused in backend; not present in DB unless noted; retained commented for possible future use) =====
+# class InputOtdMonthly(TimestampMixin, GovernanceMixin, Base):
+#     __tablename__ = "input_otd_monthly"
+#     __table_args__ = (Index("idx_input_otd_monthly_cycle", "id_cycle"),)
+#
+#     id_otd: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+#     id_cycle: Mapped[Optional[int]] = mapped_column(
+#         ForeignKey("evaluation_cycle.id_cycle", ondelete="SET NULL"), nullable=True
+#     )
+#     id_document: Mapped[Optional[int]] = mapped_column(
+#         ForeignKey("document.id_document", ondelete="SET NULL"), nullable=True
+#     )
+#     id_relation: Mapped[Optional[int]] = mapped_column(
+#         ForeignKey("supplier_site_relation.id_relation", ondelete="SET NULL"),
+#         nullable=True,
+#     )
+#     supplier_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+#     supplier_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+#     month_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+#     otd_raw_value: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+#     otd_percent: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+#     comments: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+#     plant: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+#     # FIX: BigInteger to match import_batch.id_import_batch PK type
+#     id_import_batch: Mapped[Optional[int]] = mapped_column(
+#         BigInteger,
+#         ForeignKey("import_batch.id_import_batch", ondelete="SET NULL"),
+#         nullable=True,
+#     )
+#     source_row_number: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+#     source_row_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+#
+#     cycle: Mapped[Optional["EvaluationCycle"]] = relationship(
+#         back_populates="input_otd"
+#     )
+#     relation: Mapped[Optional["SupplierSiteRelation"]] = relationship(
+#         back_populates="input_otd"
+#     )
+#     import_batch: Mapped[Optional["ImportBatch"]] = relationship(
+#         back_populates="input_otd_rows"
+#     )
 
 
-class InputDeliverySpend(TimestampMixin, GovernanceMixin, Base):
-    __tablename__ = "input_delivery_spend"
-    __table_args__ = (Index("idx_input_delivery_spend_cycle", "id_cycle"),)
+# ===== DEAD TABLE (unused in backend; not present in DB unless noted; retained commented for possible future use) =====
+# class InputQualityClaims(TimestampMixin, GovernanceMixin, Base):
+#     __tablename__ = "input_quality_claims"
+#     __table_args__ = (Index("idx_input_quality_claims_cycle", "id_cycle"),)
+#
+#     id_quality_claim: Mapped[int] = mapped_column(
+#         Integer, primary_key=True, autoincrement=True
+#     )
+#     id_cycle: Mapped[Optional[int]] = mapped_column(
+#         ForeignKey("evaluation_cycle.id_cycle", ondelete="SET NULL"), nullable=True
+#     )
+#     id_document: Mapped[Optional[int]] = mapped_column(
+#         ForeignKey("document.id_document", ondelete="SET NULL"), nullable=True
+#     )
+#     id_relation: Mapped[Optional[int]] = mapped_column(
+#         ForeignKey("supplier_site_relation.id_relation", ondelete="SET NULL"),
+#         nullable=True,
+#     )
+#     claimed_part_reference: Mapped[Optional[str]] = mapped_column(
+#         String(150), nullable=True
+#     )
+#     claim_number: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+#     claim_opening_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+#     claim_closing_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+#     claim_status: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+#     supplier_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+#     supplier_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+#     comments: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+#     plant: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+#     # FIX: BigInteger to match import_batch.id_import_batch PK type
+#     id_import_batch: Mapped[Optional[int]] = mapped_column(
+#         BigInteger,
+#         ForeignKey("import_batch.id_import_batch", ondelete="SET NULL"),
+#         nullable=True,
+#     )
+#     source_row_number: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+#     source_row_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+#
+#     cycle: Mapped[Optional["EvaluationCycle"]] = relationship(
+#         back_populates="input_quality_claims"
+#     )
+#     relation: Mapped[Optional["SupplierSiteRelation"]] = relationship(
+#         back_populates="input_quality_claims"
+#     )
+#     import_batch: Mapped[Optional["ImportBatch"]] = relationship(
+#         back_populates="input_quality_claim_rows"
+#     )
 
-    id_delivery_spend: Mapped[int] = mapped_column(
-        Integer, primary_key=True, autoincrement=True
-    )
-    id_cycle: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("evaluation_cycle.id_cycle", ondelete="SET NULL"), nullable=True
-    )
-    id_document: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("document.id_document", ondelete="SET NULL"), nullable=True
-    )
-    id_relation: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("supplier_site_relation.id_relation", ondelete="SET NULL"),
-        nullable=True,
-    )
-    part_reference: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
-    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    delivery_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
-    quantity: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 4), nullable=True)
-    purchase_price_delivery: Mapped[Optional[Decimal]] = mapped_column(
-        Numeric(18, 4), nullable=True
-    )
-    currency: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
-    supplier_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
-    supplier_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    bad_parts: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 4), nullable=True)
-    plant: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
-    # FIX: BigInteger to match import_batch.id_import_batch PK type
-    id_import_batch: Mapped[Optional[int]] = mapped_column(
-        BigInteger,
-        ForeignKey("import_batch.id_import_batch", ondelete="SET NULL"),
-        nullable=True,
-    )
-    source_row_number: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    source_row_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
 
-    cycle: Mapped[Optional["EvaluationCycle"]] = relationship(
-        back_populates="input_delivery_spend"
-    )
-    relation: Mapped[Optional["SupplierSiteRelation"]] = relationship(
-        back_populates="input_delivery_spend"
-    )
-    import_batch: Mapped[Optional["ImportBatch"]] = relationship(
-        back_populates="input_delivery_spend_rows"
-    )
+# ===== DEAD TABLE (unused in backend; not present in DB unless noted; retained commented for possible future use) =====
+# class InputDeliverySpend(TimestampMixin, GovernanceMixin, Base):
+#     __tablename__ = "input_delivery_spend"
+#     __table_args__ = (Index("idx_input_delivery_spend_cycle", "id_cycle"),)
+#
+#     id_delivery_spend: Mapped[int] = mapped_column(
+#         Integer, primary_key=True, autoincrement=True
+#     )
+#     id_cycle: Mapped[Optional[int]] = mapped_column(
+#         ForeignKey("evaluation_cycle.id_cycle", ondelete="SET NULL"), nullable=True
+#     )
+#     id_document: Mapped[Optional[int]] = mapped_column(
+#         ForeignKey("document.id_document", ondelete="SET NULL"), nullable=True
+#     )
+#     id_relation: Mapped[Optional[int]] = mapped_column(
+#         ForeignKey("supplier_site_relation.id_relation", ondelete="SET NULL"),
+#         nullable=True,
+#     )
+#     part_reference: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+#     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+#     delivery_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+#     quantity: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 4), nullable=True)
+#     purchase_price_delivery: Mapped[Optional[Decimal]] = mapped_column(
+#         Numeric(18, 4), nullable=True
+#     )
+#     currency: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+#     supplier_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+#     supplier_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+#     bad_parts: Mapped[Optional[Decimal]] = mapped_column(Numeric(18, 4), nullable=True)
+#     plant: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+#     # FIX: BigInteger to match import_batch.id_import_batch PK type
+#     id_import_batch: Mapped[Optional[int]] = mapped_column(
+#         BigInteger,
+#         ForeignKey("import_batch.id_import_batch", ondelete="SET NULL"),
+#         nullable=True,
+#     )
+#     source_row_number: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+#     source_row_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+#
+#     cycle: Mapped[Optional["EvaluationCycle"]] = relationship(
+#         back_populates="input_delivery_spend"
+#     )
+#     relation: Mapped[Optional["SupplierSiteRelation"]] = relationship(
+#         back_populates="input_delivery_spend"
+#     )
+#     import_batch: Mapped[Optional["ImportBatch"]] = relationship(
+#         back_populates="input_delivery_spend_rows"
+#     )
 
 
 # ---------------------------------------------------------------------------
@@ -1425,165 +1434,169 @@ class InputDeliverySpend(TimestampMixin, GovernanceMixin, Base):
 # ---------------------------------------------------------------------------
 
 
-class AssessmentTemplate(TimestampMixin, GovernanceMixin, Base):
-    __tablename__ = "assessment_template"
-
-    id_template: Mapped[int] = mapped_column(
-        Integer, primary_key=True, autoincrement=True
-    )
-    template_name: Mapped[str] = mapped_column(String(255), nullable=False)
-    # FIX: removed extra quotes from server_default
-    template_type: Mapped[str] = mapped_column(
-        String(100), server_default="SELF_ASSESSMENT", nullable=False
-    )
-    version: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
-    # FIX: removed extra quotes from server_default
-    status: Mapped[str] = mapped_column(
-        String(50), server_default="Active", nullable=False
-    )
-    id_document: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("document.id_document", ondelete="SET NULL"), nullable=True
-    )
-    created_by: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
-    comments: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-
-    document: Mapped[Optional["Document"]] = relationship(
-        back_populates="assessment_templates"
-    )
-    field_mappings: Mapped[List["AssessmentTemplateFieldMapping"]] = relationship(
-        back_populates="template", cascade="all, delete-orphan", passive_deletes=True
-    )
-    assessments: Mapped[List["SupplierAssessment"]] = relationship(
-        back_populates="template"
-    )
-
-    def __repr__(self) -> str:
-        return (
-            f"<AssessmentTemplate id={self.id_template} "
-            f"name={self.template_name!r} v={self.version!r}>"
-        )
-
-
-class AssessmentTemplateFieldMapping(TimestampMixin, GovernanceMixin, Base):
-    __tablename__ = "assessment_template_field_mapping"
-
-    id_mapping: Mapped[int] = mapped_column(
-        Integer, primary_key=True, autoincrement=True
-    )
-    id_template: Mapped[int] = mapped_column(
-        ForeignKey("assessment_template.id_template", ondelete="CASCADE"),
-        nullable=False,
-    )
-    sheet_name: Mapped[str] = mapped_column(String(150), nullable=False)
-    field_code: Mapped[str] = mapped_column(String(150), nullable=False)
-    field_label: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    cell_reference: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
-    column_reference: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
-    data_type: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
-    target_table: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
-    target_column: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
-    is_required: Mapped[bool] = mapped_column(
-        Boolean, server_default="false", nullable=False
-    )
-
-    template: Mapped["AssessmentTemplate"] = relationship(
-        back_populates="field_mappings"
-    )
-    answers: Mapped[List["SupplierAssessmentAnswer"]] = relationship(
-        back_populates="mapping"
-    )
-
-    def __repr__(self) -> str:
-        return (
-            f"<FieldMapping id={self.id_mapping} "
-            f"field={self.field_code!r} sheet={self.sheet_name!r}>"
-        )
+# ===== DEAD TABLE (unused in backend; not present in DB unless noted; retained commented for possible future use) =====
+# class AssessmentTemplate(TimestampMixin, GovernanceMixin, Base):
+#     __tablename__ = "assessment_template"
+#
+#     id_template: Mapped[int] = mapped_column(
+#         Integer, primary_key=True, autoincrement=True
+#     )
+#     template_name: Mapped[str] = mapped_column(String(255), nullable=False)
+#     # FIX: removed extra quotes from server_default
+#     template_type: Mapped[str] = mapped_column(
+#         String(100), server_default="SELF_ASSESSMENT", nullable=False
+#     )
+#     version: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+#     # FIX: removed extra quotes from server_default
+#     status: Mapped[str] = mapped_column(
+#         String(50), server_default="Active", nullable=False
+#     )
+#     id_document: Mapped[Optional[int]] = mapped_column(
+#         ForeignKey("document.id_document", ondelete="SET NULL"), nullable=True
+#     )
+#     created_by: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+#     comments: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+#
+#     document: Mapped[Optional["Document"]] = relationship(
+#         back_populates="assessment_templates"
+#     )
+#     field_mappings: Mapped[List["AssessmentTemplateFieldMapping"]] = relationship(
+#         back_populates="template", cascade="all, delete-orphan", passive_deletes=True
+#     )
+#     assessments: Mapped[List["SupplierAssessment"]] = relationship(
+#         back_populates="template"
+#     )
+#
+#     def __repr__(self) -> str:
+#         return (
+#             f"<AssessmentTemplate id={self.id_template} "
+#             f"name={self.template_name!r} v={self.version!r}>"
+#         )
 
 
-class SupplierAssessment(TimestampMixin, GovernanceMixin, Base):
-    __tablename__ = "supplier_assessment"
-
-    id_assessment: Mapped[int] = mapped_column(
-        Integer, primary_key=True, autoincrement=True
-    )
-    id_relation: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("supplier_site_relation.id_relation", ondelete="SET NULL"),
-        nullable=True,
-    )
-    id_template: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("assessment_template.id_template", ondelete="SET NULL"),
-        nullable=True,
-    )
-    id_document: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("document.id_document", ondelete="SET NULL"), nullable=True
-    )
-    id_cycle: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("evaluation_cycle.id_cycle", ondelete="SET NULL"), nullable=True
-    )
-    assessment_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
-    submitted_by: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
-    # FIX: removed extra quotes from server_default
-    status: Mapped[str] = mapped_column(
-        String(50), server_default="Received", nullable=False
-    )
-    final_score: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
-    final_grade: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
-    final_class: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    comments: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-
-    relation: Mapped[Optional["SupplierSiteRelation"]] = relationship(
-        back_populates="assessments"
-    )
-    template: Mapped[Optional["AssessmentTemplate"]] = relationship(
-        back_populates="assessments"
-    )
-    document: Mapped[Optional["Document"]] = relationship(back_populates="assessments")
-    cycle: Mapped[Optional["EvaluationCycle"]] = relationship(
-        back_populates="assessments"
-    )
-    answers: Mapped[List["SupplierAssessmentAnswer"]] = relationship(
-        back_populates="assessment", cascade="all, delete-orphan", passive_deletes=True
-    )
-
-    def __repr__(self) -> str:
-        return (
-            f"<SupplierAssessment id={self.id_assessment} "
-            f"status={self.status!r} score={self.final_score}>"
-        )
+# ===== DEAD TABLE (unused in backend; not present in DB unless noted; retained commented for possible future use) =====
+# class AssessmentTemplateFieldMapping(TimestampMixin, GovernanceMixin, Base):
+#     __tablename__ = "assessment_template_field_mapping"
+#
+#     id_mapping: Mapped[int] = mapped_column(
+#         Integer, primary_key=True, autoincrement=True
+#     )
+#     id_template: Mapped[int] = mapped_column(
+#         ForeignKey("assessment_template.id_template", ondelete="CASCADE"),
+#         nullable=False,
+#     )
+#     sheet_name: Mapped[str] = mapped_column(String(150), nullable=False)
+#     field_code: Mapped[str] = mapped_column(String(150), nullable=False)
+#     field_label: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+#     cell_reference: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+#     column_reference: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+#     data_type: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+#     target_table: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+#     target_column: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+#     is_required: Mapped[bool] = mapped_column(
+#         Boolean, server_default="false", nullable=False
+#     )
+#
+#     template: Mapped["AssessmentTemplate"] = relationship(
+#         back_populates="field_mappings"
+#     )
+#     answers: Mapped[List["SupplierAssessmentAnswer"]] = relationship(
+#         back_populates="mapping"
+#     )
+#
+#     def __repr__(self) -> str:
+#         return (
+#             f"<FieldMapping id={self.id_mapping} "
+#             f"field={self.field_code!r} sheet={self.sheet_name!r}>"
+#         )
 
 
-class SupplierAssessmentAnswer(TimestampMixin, GovernanceMixin, Base):
-    __tablename__ = "supplier_assessment_answer"
+# ===== DEAD TABLE (unused in backend; not present in DB unless noted; retained commented for possible future use) =====
+# class SupplierAssessment(TimestampMixin, GovernanceMixin, Base):
+#     __tablename__ = "supplier_assessment"
+#
+#     id_assessment: Mapped[int] = mapped_column(
+#         Integer, primary_key=True, autoincrement=True
+#     )
+#     id_relation: Mapped[Optional[int]] = mapped_column(
+#         ForeignKey("supplier_site_relation.id_relation", ondelete="SET NULL"),
+#         nullable=True,
+#     )
+#     id_template: Mapped[Optional[int]] = mapped_column(
+#         ForeignKey("assessment_template.id_template", ondelete="SET NULL"),
+#         nullable=True,
+#     )
+#     id_document: Mapped[Optional[int]] = mapped_column(
+#         ForeignKey("document.id_document", ondelete="SET NULL"), nullable=True
+#     )
+#     id_cycle: Mapped[Optional[int]] = mapped_column(
+#         ForeignKey("evaluation_cycle.id_cycle", ondelete="SET NULL"), nullable=True
+#     )
+#     assessment_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+#     submitted_by: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+#     # FIX: removed extra quotes from server_default
+#     status: Mapped[str] = mapped_column(
+#         String(50), server_default="Received", nullable=False
+#     )
+#     final_score: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+#     final_grade: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+#     final_class: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+#     comments: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+#
+#     relation: Mapped[Optional["SupplierSiteRelation"]] = relationship(
+#         back_populates="assessments"
+#     )
+#     template: Mapped[Optional["AssessmentTemplate"]] = relationship(
+#         back_populates="assessments"
+#     )
+#     document: Mapped[Optional["Document"]] = relationship(back_populates="assessments")
+#     cycle: Mapped[Optional["EvaluationCycle"]] = relationship(
+#         back_populates="assessments"
+#     )
+#     answers: Mapped[List["SupplierAssessmentAnswer"]] = relationship(
+#         back_populates="assessment", cascade="all, delete-orphan", passive_deletes=True
+#     )
+#
+#     def __repr__(self) -> str:
+#         return (
+#             f"<SupplierAssessment id={self.id_assessment} "
+#             f"status={self.status!r} score={self.final_score}>"
+#         )
 
-    id_answer: Mapped[int] = mapped_column(
-        Integer, primary_key=True, autoincrement=True
-    )
-    id_assessment: Mapped[int] = mapped_column(
-        ForeignKey("supplier_assessment.id_assessment", ondelete="CASCADE"),
-        nullable=False,
-    )
-    id_mapping: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("assessment_template_field_mapping.id_mapping", ondelete="SET NULL"),
-        nullable=True,
-    )
-    field_code: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
-    field_label: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    raw_value: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    normalized_value: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    score: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
-    is_valid: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
-    validation_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
-    assessment: Mapped["SupplierAssessment"] = relationship(back_populates="answers")
-    mapping: Mapped[Optional["AssessmentTemplateFieldMapping"]] = relationship(
-        back_populates="answers"
-    )
-
-    def __repr__(self) -> str:
-        return (
-            f"<AssessmentAnswer id={self.id_answer} "
-            f"field={self.field_code!r} valid={self.is_valid}>"
-        )
+# ===== DEAD TABLE (unused in backend; not present in DB unless noted; retained commented for possible future use) =====
+# class SupplierAssessmentAnswer(TimestampMixin, GovernanceMixin, Base):
+#     __tablename__ = "supplier_assessment_answer"
+#
+#     id_answer: Mapped[int] = mapped_column(
+#         Integer, primary_key=True, autoincrement=True
+#     )
+#     id_assessment: Mapped[int] = mapped_column(
+#         ForeignKey("supplier_assessment.id_assessment", ondelete="CASCADE"),
+#         nullable=False,
+#     )
+#     id_mapping: Mapped[Optional[int]] = mapped_column(
+#         ForeignKey("assessment_template_field_mapping.id_mapping", ondelete="SET NULL"),
+#         nullable=True,
+#     )
+#     field_code: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+#     field_label: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+#     raw_value: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+#     normalized_value: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+#     score: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+#     is_valid: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+#     validation_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+#
+#     assessment: Mapped["SupplierAssessment"] = relationship(back_populates="answers")
+#     mapping: Mapped[Optional["AssessmentTemplateFieldMapping"]] = relationship(
+#         back_populates="answers"
+#     )
+#
+#     def __repr__(self) -> str:
+#         return (
+#             f"<AssessmentAnswer id={self.id_answer} "
+#             f"field={self.field_code!r} valid={self.is_valid}>"
+#         )
 
 
 # ---------------------------------------------------------------------------
@@ -1625,178 +1638,182 @@ class AuditEvent(Base):
     )
 
 
-class ImportBatch(Base):
-    __tablename__ = "import_batch"
-    __table_args__ = (
-        Index("idx_import_batch_document", "id_document"),
-        Index("idx_import_batch_uuid", "batch_uuid", unique=True),
-    )
-
-    id_import_batch: Mapped[int] = mapped_column(
-        BigInteger, primary_key=True, autoincrement=True
-    )
-    batch_uuid: Mapped[Optional[str]] = mapped_column(
-        UUID(as_uuid=False), server_default=func.gen_random_uuid(), nullable=False
-    )
-    source_name: Mapped[str] = mapped_column(String(200), nullable=False)
-    source_type: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
-    id_document: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("document.id_document", ondelete="SET NULL"), nullable=True
-    )
-    uploaded_by: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
-    uploaded_at: Mapped[datetime] = mapped_column(
-        DateTime, server_default=func.current_timestamp(), nullable=False
-    )
-    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
-    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
-    # FIX: removed extra quotes from server_default
-    status: Mapped[str] = mapped_column(
-        String(50), server_default="Pending", nullable=False
-    )
-    records_total: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    records_inserted: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    records_rejected: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    file_hash_sha256: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
-    validation_summary: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
-    error_details: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
-    comments: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-
-    document: Mapped[Optional["Document"]] = relationship(
-        back_populates="import_batches"
-    )
-    input_otd_rows: Mapped[List["InputOtdMonthly"]] = relationship(
-        back_populates="import_batch"
-    )
-    input_quality_claim_rows: Mapped[List["InputQualityClaims"]] = relationship(
-        back_populates="import_batch"
-    )
-    input_delivery_spend_rows: Mapped[List["InputDeliverySpend"]] = relationship(
-        back_populates="import_batch"
-    )
-
-
-class SupplierActionPlan(GovernanceMixin, Base):
-    """
-    FIX: now inherits GovernanceMixin instead of duplicating columns inline.
-    The fix migration adds the missing deleted_at, deleted_by, row_version columns.
-    The manually declared updated_at, updated_by, is_deleted are removed in favour
-    of the mixin which also provides deleted_at, deleted_by, row_version.
-    """
-
-    __tablename__ = "supplier_action_plan"
-    __table_args__ = (
-        Index("idx_action_plan_relation", "id_relation"),
-        Index("idx_action_plan_cycle", "id_cycle"),
-        Index("idx_action_plan_status", "status"),
-    )
-
-    id_action_plan: Mapped[int] = mapped_column(
-        BigInteger, primary_key=True, autoincrement=True
-    )
-    id_relation: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("supplier_site_relation.id_relation", ondelete="SET NULL"),
-        nullable=True,
-    )
-    id_cycle: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("evaluation_cycle.id_cycle", ondelete="SET NULL"), nullable=True
-    )
-    id_document: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("document.id_document", ondelete="SET NULL"), nullable=True
-    )
-    trigger_type: Mapped[str] = mapped_column(String(100), nullable=False)
-    trigger_reference: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    problem_statement: Mapped[str] = mapped_column(Text, nullable=False)
-    containment_action: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    root_cause: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    corrective_action: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    preventive_action: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    owner: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
-    supplier_owner: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
-    due_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
-    # FIX: removed extra quotes from server_default
-    status: Mapped[str] = mapped_column(
-        String(50), server_default="Open", nullable=False
-    )
-    effectiveness_check_required: Mapped[bool] = mapped_column(
-        Boolean, server_default="true", nullable=False
-    )
-    effectiveness_result: Mapped[Optional[str]] = mapped_column(
-        String(100), nullable=True
-    )
-    closed_by: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
-    closed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
-    created_by: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime, server_default=func.current_timestamp(), nullable=False
-    )
-
-    relation: Mapped[Optional["SupplierSiteRelation"]] = relationship(
-        back_populates="action_plans"
-    )
-    cycle: Mapped[Optional["EvaluationCycle"]] = relationship(
-        back_populates="action_plans"
-    )
-    document: Mapped[Optional["Document"]] = relationship()
-    tasks: Mapped[List["SupplierActionPlanTask"]] = relationship(
-        back_populates="action_plan", cascade="all, delete-orphan", passive_deletes=True
-    )
+# ===== DEAD TABLE (unused in backend; not present in DB unless noted; retained commented for possible future use) =====
+# class ImportBatch(Base):
+#     __tablename__ = "import_batch"
+#     __table_args__ = (
+#         Index("idx_import_batch_document", "id_document"),
+#         Index("idx_import_batch_uuid", "batch_uuid", unique=True),
+#     )
+#
+#     id_import_batch: Mapped[int] = mapped_column(
+#         BigInteger, primary_key=True, autoincrement=True
+#     )
+#     batch_uuid: Mapped[Optional[str]] = mapped_column(
+#         UUID(as_uuid=False), server_default=func.gen_random_uuid(), nullable=False
+#     )
+#     source_name: Mapped[str] = mapped_column(String(200), nullable=False)
+#     source_type: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+#     id_document: Mapped[Optional[int]] = mapped_column(
+#         ForeignKey("document.id_document", ondelete="SET NULL"), nullable=True
+#     )
+#     uploaded_by: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+#     uploaded_at: Mapped[datetime] = mapped_column(
+#         DateTime, server_default=func.current_timestamp(), nullable=False
+#     )
+#     started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+#     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+#     # FIX: removed extra quotes from server_default
+#     status: Mapped[str] = mapped_column(
+#         String(50), server_default="Pending", nullable=False
+#     )
+#     records_total: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+#     records_inserted: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+#     records_rejected: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+#     file_hash_sha256: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+#     validation_summary: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+#     error_details: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+#     comments: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+#
+#     document: Mapped[Optional["Document"]] = relationship(
+#         back_populates="import_batches"
+#     )
+#     input_otd_rows: Mapped[List["InputOtdMonthly"]] = relationship(
+#         back_populates="import_batch"
+#     )
+#     input_quality_claim_rows: Mapped[List["InputQualityClaims"]] = relationship(
+#         back_populates="import_batch"
+#     )
+#     input_delivery_spend_rows: Mapped[List["InputDeliverySpend"]] = relationship(
+#         back_populates="import_batch"
+#     )
 
 
-class SupplierActionPlanTask(Base):
-    __tablename__ = "supplier_action_plan_task"
+# ===== DEAD TABLE (unused in backend; retained commented for possible future use) =====
+# class SupplierActionPlan(GovernanceMixin, Base):
+#     """
+#     FIX: now inherits GovernanceMixin instead of duplicating columns inline.
+#     The fix migration adds the missing deleted_at, deleted_by, row_version columns.
+#     The manually declared updated_at, updated_by, is_deleted are removed in favour
+#     of the mixin which also provides deleted_at, deleted_by, row_version.
+#     """
+#
+#     __tablename__ = "supplier_action_plan"
+#     __table_args__ = (
+#         Index("idx_action_plan_relation", "id_relation"),
+#         Index("idx_action_plan_cycle", "id_cycle"),
+#         Index("idx_action_plan_status", "status"),
+#     )
+#
+#     id_action_plan: Mapped[int] = mapped_column(
+#         BigInteger, primary_key=True, autoincrement=True
+#     )
+#     id_relation: Mapped[Optional[int]] = mapped_column(
+#         ForeignKey("supplier_site_relation.id_relation", ondelete="SET NULL"),
+#         nullable=True,
+#     )
+#     id_cycle: Mapped[Optional[int]] = mapped_column(
+#         ForeignKey("evaluation_cycle.id_cycle", ondelete="SET NULL"), nullable=True
+#     )
+#     id_document: Mapped[Optional[int]] = mapped_column(
+#         ForeignKey("document.id_document", ondelete="SET NULL"), nullable=True
+#     )
+#     trigger_type: Mapped[str] = mapped_column(String(100), nullable=False)
+#     trigger_reference: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+#     problem_statement: Mapped[str] = mapped_column(Text, nullable=False)
+#     containment_action: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+#     root_cause: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+#     corrective_action: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+#     preventive_action: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+#     owner: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+#     supplier_owner: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+#     due_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+#     # FIX: removed extra quotes from server_default
+#     status: Mapped[str] = mapped_column(
+#         String(50), server_default="Open", nullable=False
+#     )
+#     effectiveness_check_required: Mapped[bool] = mapped_column(
+#         Boolean, server_default="true", nullable=False
+#     )
+#     effectiveness_result: Mapped[Optional[str]] = mapped_column(
+#         String(100), nullable=True
+#     )
+#     closed_by: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+#     closed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+#     created_by: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+#     created_at: Mapped[datetime] = mapped_column(
+#         DateTime, server_default=func.current_timestamp(), nullable=False
+#     )
+#
+#     relation: Mapped[Optional["SupplierSiteRelation"]] = relationship(
+#         back_populates="action_plans"
+#     )
+#     cycle: Mapped[Optional["EvaluationCycle"]] = relationship(
+#         back_populates="action_plans"
+#     )
+#     document: Mapped[Optional["Document"]] = relationship()
+# #     tasks: Mapped[List["SupplierActionPlanTask"]] = relationship(
+# #         back_populates="action_plan", cascade="all, delete-orphan", passive_deletes=True
+# #     )
+#
+#
+# ===== DEAD TABLE (unused in backend; not present in DB unless noted; retained commented for possible future use) =====
+# class SupplierActionPlanTask(Base):
+#     __tablename__ = "supplier_action_plan_task"
+#
+#     id_task: Mapped[int] = mapped_column(
+#         BigInteger, primary_key=True, autoincrement=True
+#     )
+#     id_action_plan: Mapped[int] = mapped_column(
+#         ForeignKey("supplier_action_plan.id_action_plan", ondelete="CASCADE"),
+#         nullable=False,
+#     )
+#     task_description: Mapped[str] = mapped_column(Text, nullable=False)
+#     task_owner: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+#     due_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+#     # FIX: removed extra quotes from server_default
+#     status: Mapped[str] = mapped_column(
+#         String(50), server_default="Open", nullable=False
+#     )
+#     completion_evidence_document_id: Mapped[Optional[int]] = mapped_column(
+#         ForeignKey("document.id_document", ondelete="SET NULL"), nullable=True
+#     )
+#     completed_by: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+#     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+#     comments: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+#
+#     action_plan: Mapped["SupplierActionPlan"] = relationship(back_populates="tasks")
+#     completion_evidence_document: Mapped[Optional["Document"]] = relationship()
 
-    id_task: Mapped[int] = mapped_column(
-        BigInteger, primary_key=True, autoincrement=True
-    )
-    id_action_plan: Mapped[int] = mapped_column(
-        ForeignKey("supplier_action_plan.id_action_plan", ondelete="CASCADE"),
-        nullable=False,
-    )
-    task_description: Mapped[str] = mapped_column(Text, nullable=False)
-    task_owner: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
-    due_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
-    # FIX: removed extra quotes from server_default
-    status: Mapped[str] = mapped_column(
-        String(50), server_default="Open", nullable=False
-    )
-    completion_evidence_document_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("document.id_document", ondelete="SET NULL"), nullable=True
-    )
-    completed_by: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
-    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
-    comments: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
-    action_plan: Mapped["SupplierActionPlan"] = relationship(back_populates="tasks")
-    completion_evidence_document: Mapped[Optional["Document"]] = relationship()
-
-
-class UserRoleAssignment(Base):
-    __tablename__ = "user_role_assignment"
-    __table_args__ = (
-        UniqueConstraint(
-            "user_email",
-            "role_name",
-            "scope_type",
-            "scope_id",
-            name="uq_user_role_scope",
-        ),
-    )
-
-    id_user_role: Mapped[int] = mapped_column(
-        BigInteger, primary_key=True, autoincrement=True
-    )
-    user_email: Mapped[str] = mapped_column(String(200), nullable=False)
-    role_name: Mapped[str] = mapped_column(String(150), nullable=False)
-    scope_type: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
-    scope_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
-    valid_from: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
-    valid_to: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
-    is_active: Mapped[bool] = mapped_column(
-        Boolean, server_default="true", nullable=False
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime, server_default=func.current_timestamp(), nullable=False
-    )
+# ===== DEAD TABLE (unused in backend; not present in DB unless noted; retained commented for possible future use) =====
+# class UserRoleAssignment(Base):
+#     __tablename__ = "user_role_assignment"
+#     __table_args__ = (
+#         UniqueConstraint(
+#             "user_email",
+#             "role_name",
+#             "scope_type",
+#             "scope_id",
+#             name="uq_user_role_scope",
+#         ),
+#     )
+#
+#     id_user_role: Mapped[int] = mapped_column(
+#         BigInteger, primary_key=True, autoincrement=True
+#     )
+#     user_email: Mapped[str] = mapped_column(String(200), nullable=False)
+#     role_name: Mapped[str] = mapped_column(String(150), nullable=False)
+#     scope_type: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+#     scope_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+#     valid_from: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+#     valid_to: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+#     is_active: Mapped[bool] = mapped_column(
+#         Boolean, server_default="true", nullable=False
+#     )
+#     created_at: Mapped[datetime] = mapped_column(
+#         DateTime, server_default=func.current_timestamp(), nullable=False
+#     )
 
 
 # ---------------------------------------------------------------------------
@@ -2463,36 +2480,36 @@ __all__ = [
     "SupplierStatusHistory",
     "SupplierDevelopmentPlan",
     "SupplierCertification",
-    "SupplierAgreement",
+# "SupplierAgreement",  # DEAD TABLE — commented out
     "Contact",
     "ContactSiteRelation",
     "Document",
     # Domain 2 — Evaluation
     "EvaluationCycle",
-    "ApprovalWorkflow",
-    "Escalation",
+#     "ApprovalWorkflow",
+#     "Escalation",
     "ScoreCard",
     "Classification",
     "PldClassEvaluationInput",
     "PldClassCriteriaDetail",
     "OperationalEvaluationInput",
     "ImpactEvaluationInput",
-    "ScorecardKpiDetail",
+#     "ScorecardKpiDetail",
     "PldScoringRules",
-    "InputOtdMonthly",
-    "InputQualityClaims",
-    "InputDeliverySpend",
+#     "InputOtdMonthly",
+#     "InputQualityClaims",
+#     "InputDeliverySpend",
     # Domain 3 — Assessment
-    "AssessmentTemplate",
-    "AssessmentTemplateFieldMapping",
-    "SupplierAssessment",
-    "SupplierAssessmentAnswer",
+#     "AssessmentTemplate",
+#     "AssessmentTemplateFieldMapping",
+#     "SupplierAssessment",
+#     "SupplierAssessmentAnswer",
     # Domain 3b — Governance / IATF Evidence
     "AuditEvent",
-    "ImportBatch",
-    "SupplierActionPlan",
-    "SupplierActionPlanTask",
-    "UserRoleAssignment",
+#     "ImportBatch",
+# "SupplierActionPlan",  # DEAD TABLE — commented out
+#     "SupplierActionPlanTask",
+#     "UserRoleAssignment",
     # Domain 4 — Opportunity / Financial
     "Opportunity",
     "Project",

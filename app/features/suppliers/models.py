@@ -8,7 +8,7 @@ from app.db.models import (
     AvocarbonSite,
     Contact,
     ContactSiteRelation,
-    SupplierAgreement,
+    # SupplierAgreement,  # DEAD TABLE — commented out in app.db.models
     SupplierCertification,
     SupplierGroup,
     SupplierSiteRelation,
@@ -23,7 +23,7 @@ __all__ = [
     "SupplierSiteRelation",
     "SupplierStatusHistory",
     "SupplierCertification",
-    "SupplierAgreement",
+    # "SupplierAgreement",  # DEAD TABLE — commented out
     "Contact",
     "ContactSiteRelation",
 ]
