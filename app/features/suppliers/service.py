@@ -1,11 +1,11 @@
 """Suppliers service layer."""
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import List, Optional, Dict, Any
 
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import selectinload
-from sqlalchemy.exc import ProgrammingError
+from sqlalchemy.exc import DBAPIError, ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.features.suppliers.models import (
@@ -27,7 +27,10 @@ from app.db.models import (
     OperationalEvaluationInput,
     PldClassEvaluationInput,
     ScoreCard,
+    SupplierActionPlan,
+    SupplierAgreement,
     SupplierCarbonFootprint,
+    SupplierSpendByYear,
 )
 from app.features.suppliers import schemas
 from app.core.exceptions import AppException
@@ -56,6 +59,353 @@ class SupplierService:
             "total": total,
             "skip": skip,
             "limit": limit
+        }
+
+    async def get_supplier_dashboard(
+        self,
+        fiscal_year: Optional[int] = None,
+        expiring_days: int = 90,
+    ) -> Dict[str, Any]:
+        """Return a lightweight supplier-monitoring dashboard."""
+
+        today = date.today()
+        dashboard_year = fiscal_year or (
+            today.year + 1 if today.month == 12 else today.year
+        )
+        expiring_before = today + timedelta(days=expiring_days)
+
+        spend_for_year = (
+            select(
+                SupplierSpendByYear.id_relation.label("id_relation"),
+                SupplierSpendByYear.spend_value.label("spend_value"),
+            )
+            .where(SupplierSpendByYear.fiscal_year == dashboard_year)
+            .subquery()
+        )
+
+        base_stmt = (
+            select(
+                SupplierSiteRelation.id_relation,
+                SupplierSiteRelation.buyer_owner,
+                SupplierSiteRelation.annual_spend_value,
+                SupplierSiteRelation.final_grade,
+                SupplierSiteRelation.class_value,
+                SupplierSiteRelation.supplier_status,
+                SupplierSiteRelation.global_status,
+                SupplierUnit.id_supplier_unit,
+                SupplierUnit.supplier_name,
+                SupplierUnit.family,
+                SupplierUnit.strategique,
+                SupplierUnit.monopolistique,
+                AvocarbonSite.id_site,
+                AvocarbonSite.site_name,
+                spend_for_year.c.spend_value.label("year_spend_value"),
+            )
+            .join(
+                SupplierUnit,
+                SupplierUnit.id_supplier_unit == SupplierSiteRelation.id_supplier_unit,
+            )
+            .join(SupplierGroup, SupplierGroup.id_group == SupplierUnit.id_group)
+            .outerjoin(AvocarbonSite, AvocarbonSite.id_site == SupplierSiteRelation.id_site)
+            .outerjoin(
+                spend_for_year,
+                spend_for_year.c.id_relation == SupplierSiteRelation.id_relation,
+            )
+            .where(
+                SupplierSiteRelation.is_deleted.is_(False),
+                SupplierSiteRelation.is_active.is_(True),
+                SupplierUnit.is_deleted.is_(False),
+                SupplierUnit.is_active.is_(True),
+                SupplierGroup.is_deleted.is_(False),
+                SupplierGroup.is_active.is_(True),
+            )
+        )
+        relation_rows = (await self.db.execute(base_stmt)).mappings().all()
+
+        def _num(value: Any) -> float:
+            if value is None:
+                return 0.0
+            if isinstance(value, Decimal):
+                return float(value)
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return 0.0
+
+        def _clean_label(value: Any, fallback: str) -> str:
+            text_value = str(value).strip() if value is not None else ""
+            return text_value or fallback
+
+        total_spend = 0.0
+        spend_covered_relations = 0
+        strategic_spend = 0.0
+        monopolistic_spend = 0.0
+        supplier_ids: set[int] = set()
+        site_ids: set[int] = set()
+        strategic_supplier_ids: set[int] = set()
+        monopolistic_supplier_ids: set[int] = set()
+
+        spend_by_supplier: dict[str, dict[str, Any]] = {}
+        spend_by_site: dict[str, dict[str, Any]] = {}
+        spend_by_family: dict[str, dict[str, Any]] = {}
+        spend_by_buyer: dict[str, dict[str, Any]] = {}
+        grade_breakdown: dict[str, int] = {}
+        class_breakdown: dict[str, int] = {}
+        status_breakdown: dict[str, int] = {}
+
+        for row in relation_rows:
+            supplier_id = row["id_supplier_unit"]
+            site_id = row["id_site"]
+            supplier_name = _clean_label(row["supplier_name"], "Unknown supplier")
+            site_name = _clean_label(row["site_name"], "Unassigned site")
+            family = _clean_label(row["family"], "Unclassified")
+            buyer_owner = _clean_label(row["buyer_owner"], "Unassigned")
+            final_grade = _clean_label(row["final_grade"], "Unrated")
+            status_label = _clean_label(
+                row["supplier_status"] or row["global_status"],
+                "Unspecified",
+            )
+            class_value = row["class_value"]
+
+            supplier_ids.add(supplier_id)
+            if site_id is not None:
+                site_ids.add(site_id)
+            if row["strategique"]:
+                strategic_supplier_ids.add(supplier_id)
+            if row["monopolistique"]:
+                monopolistic_supplier_ids.add(supplier_id)
+
+            spend_value = _num(
+                row["year_spend_value"]
+                if row["year_spend_value"] is not None
+                else row["annual_spend_value"]
+            )
+            if spend_value > 0:
+                spend_covered_relations += 1
+                total_spend += spend_value
+                if row["strategique"]:
+                    strategic_spend += spend_value
+                if row["monopolistique"]:
+                    monopolistic_spend += spend_value
+
+                supplier_bucket = spend_by_supplier.setdefault(
+                    supplier_name,
+                    {
+                        "supplier_name": supplier_name,
+                        "spend": 0.0,
+                        "site_names": set(),
+                        "buyer_owner": buyer_owner,
+                        "family": family,
+                        "strategic": bool(row["strategique"]),
+                        "monopolistic": bool(row["monopolistique"]),
+                    },
+                )
+                supplier_bucket["spend"] += spend_value
+                supplier_bucket["site_names"].add(site_name)
+
+                site_bucket = spend_by_site.setdefault(
+                    site_name,
+                    {"site_name": site_name, "spend": 0.0, "supplier_names": set()},
+                )
+                site_bucket["spend"] += spend_value
+                site_bucket["supplier_names"].add(supplier_name)
+
+                family_bucket = spend_by_family.setdefault(
+                    family,
+                    {"family": family, "spend": 0.0, "supplier_names": set()},
+                )
+                family_bucket["spend"] += spend_value
+                family_bucket["supplier_names"].add(supplier_name)
+
+                buyer_bucket = spend_by_buyer.setdefault(
+                    buyer_owner,
+                    {
+                        "buyer_owner": buyer_owner,
+                        "spend": 0.0,
+                        "supplier_names": set(),
+                    },
+                )
+                buyer_bucket["spend"] += spend_value
+                buyer_bucket["supplier_names"].add(supplier_name)
+
+            grade_breakdown[final_grade] = grade_breakdown.get(final_grade, 0) + 1
+            class_key = str(class_value) if class_value is not None else "Unclassified"
+            class_breakdown[class_key] = class_breakdown.get(class_key, 0) + 1
+            status_breakdown[status_label] = status_breakdown.get(status_label, 0) + 1
+
+        active_relation_ids = [row["id_relation"] for row in relation_rows]
+        active_unit_ids = list(supplier_ids)
+
+        async def _safe_count(stmt, missing_table: str) -> int:
+            try:
+                return int((await self.db.execute(stmt)).scalar() or 0)
+            except (ProgrammingError, DBAPIError) as exc:
+                message = str(exc).lower()
+                orig_name = getattr(
+                    getattr(exc, "orig", None), "__class__", type(None)
+                ).__name__
+                missing_table_markers = (
+                    f'relation "{missing_table}" does not exist',
+                    f"relation \"{missing_table}\" n'existe pas",
+                    missing_table,
+                )
+                if (
+                    orig_name == "UndefinedTableError"
+                    or any(marker in message for marker in missing_table_markers)
+                ):
+                    return 0
+                raise
+
+        certs_expiring_stmt = (
+            select(func.count(func.distinct(SupplierCertification.id_supplier_unit)))
+            .where(
+                SupplierCertification.is_deleted.is_(False),
+                SupplierCertification.id_supplier_unit.in_(active_unit_ids or [-1]),
+                SupplierCertification.end_date.is_not(None),
+                SupplierCertification.end_date >= today,
+                SupplierCertification.end_date <= expiring_before,
+            )
+        )
+        agreements_expiring_stmt = (
+            select(func.count(func.distinct(SupplierAgreement.id_relation)))
+            .where(
+                SupplierAgreement.is_deleted.is_(False),
+                SupplierAgreement.id_relation.in_(active_relation_ids or [-1]),
+                SupplierAgreement.end_date.is_not(None),
+                SupplierAgreement.end_date >= today,
+                SupplierAgreement.end_date <= expiring_before,
+            )
+        )
+
+        closed_statuses = ("closed", "completed", "cancelled", "done", "resolved")
+        overdue_actions_stmt = (
+            select(func.count(SupplierActionPlan.id_action_plan))
+            .where(
+                SupplierActionPlan.is_deleted.is_(False),
+                SupplierActionPlan.id_relation.in_(active_relation_ids or [-1]),
+                SupplierActionPlan.due_date.is_not(None),
+                SupplierActionPlan.due_date < today,
+                or_(
+                    SupplierActionPlan.status.is_(None),
+                    func.lower(SupplierActionPlan.status).not_in(closed_statuses),
+                ),
+            )
+        )
+        open_actions_stmt = (
+            select(func.count(SupplierActionPlan.id_action_plan))
+            .where(
+                SupplierActionPlan.is_deleted.is_(False),
+                SupplierActionPlan.id_relation.in_(active_relation_ids or [-1]),
+                or_(
+                    SupplierActionPlan.status.is_(None),
+                    func.lower(SupplierActionPlan.status).not_in(closed_statuses),
+                ),
+            )
+        )
+
+        certs_expiring = await _safe_count(
+            certs_expiring_stmt, "supplier_certification"
+        )
+        agreements_expiring = await _safe_count(
+            agreements_expiring_stmt, "supplier_agreement"
+        )
+        overdue_actions = await _safe_count(
+            overdue_actions_stmt, "supplier_action_plan"
+        )
+        open_actions = await _safe_count(
+            open_actions_stmt, "supplier_action_plan"
+        )
+
+        def _sorted_buckets(
+            buckets: dict[str, dict[str, Any]],
+            set_field: str,
+            count_field: str,
+            label_field: str,
+            limit: int = 8,
+        ) -> list[dict[str, Any]]:
+            items: list[dict[str, Any]] = []
+            for item in buckets.values():
+                names = item.pop(set_field)
+                item[count_field] = len(names)
+                items.append(item)
+            items.sort(key=lambda x: (-x["spend"], str(x[label_field]).lower()))
+            return items[:limit]
+
+        top_suppliers = _sorted_buckets(
+            spend_by_supplier, "site_names", "site_count", "supplier_name", limit=10
+        )
+        spend_by_site_rows = _sorted_buckets(
+            spend_by_site, "supplier_names", "supplier_count", "site_name", limit=8
+        )
+        spend_by_family_rows = _sorted_buckets(
+            spend_by_family, "supplier_names", "supplier_count", "family", limit=8
+        )
+        spend_by_buyer_rows = _sorted_buckets(
+            spend_by_buyer, "supplier_names", "supplier_count", "buyer_owner", limit=8
+        )
+
+        grade_rows = [
+            {"grade": grade, "count": count}
+            for grade, count in sorted(
+                grade_breakdown.items(), key=lambda item: (-item[1], item[0])
+            )
+        ]
+        class_rows = [
+            {"class_value": class_value, "count": count}
+            for class_value, count in sorted(
+                class_breakdown.items(), key=lambda item: (-item[1], item[0])
+            )
+        ]
+        status_rows = [
+            {"status": status, "count": count}
+            for status, count in sorted(
+                status_breakdown.items(), key=lambda item: (-item[1], item[0])
+            )
+        ]
+
+        strategic_spend_pct = (
+            round((strategic_spend / total_spend) * 100, 1) if total_spend else 0.0
+        )
+        monopolistic_spend_pct = (
+            round((monopolistic_spend / total_spend) * 100, 1)
+            if total_spend
+            else 0.0
+        )
+        spend_coverage_pct = (
+            round((spend_covered_relations / len(relation_rows)) * 100, 1)
+            if relation_rows
+            else 0.0
+        )
+
+        return {
+            "fiscal_year": dashboard_year,
+            "computed_at": datetime.utcnow().isoformat(),
+            "currency": "EUR",
+            "summary": {
+                "active_suppliers_count": len(supplier_ids),
+                "active_relations_count": len(relation_rows),
+                "active_sites_count": len(site_ids),
+                "strategic_suppliers_count": len(strategic_supplier_ids),
+                "monopolistic_suppliers_count": len(monopolistic_supplier_ids),
+                "current_year_spend": round(total_spend, 2),
+                "spend_relations_covered_count": spend_covered_relations,
+                "spend_coverage_pct": spend_coverage_pct,
+                "strategic_spend": round(strategic_spend, 2),
+                "strategic_spend_pct": strategic_spend_pct,
+                "monopolistic_spend": round(monopolistic_spend, 2),
+                "monopolistic_spend_pct": monopolistic_spend_pct,
+                "certifications_expiring_count": certs_expiring,
+                "agreements_expiring_count": agreements_expiring,
+                "open_action_plans_count": open_actions,
+                "overdue_action_plans_count": overdue_actions,
+            },
+            "top_suppliers": top_suppliers,
+            "spend_by_site": spend_by_site_rows,
+            "spend_by_family": spend_by_family_rows,
+            "spend_by_buyer": spend_by_buyer_rows,
+            "grade_breakdown": grade_rows,
+            "class_breakdown": class_rows,
+            "status_breakdown": status_rows,
         }
     
     async def get_supplier_group(self, group_id: int) -> Optional[SupplierGroup]:
@@ -1285,7 +1635,7 @@ class SupplierService:
         return {"items": items, "total": total, "total_all": total_all, "skip": skip, "limit": limit}
 
     async def update_carbon_footprint(self, fp_id: int, data: dict) -> Optional[SupplierCarbonFootprint]:
-        from datetime import datetime as _dt
+        from datetime import date, datetime, timedelta as _dt
         stmt = (
             select(SupplierCarbonFootprint)
             .options(selectinload(SupplierCarbonFootprint.supplier_unit))
