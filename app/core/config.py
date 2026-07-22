@@ -75,12 +75,20 @@ class Settings(BaseSettings):
     SQLALCHEMY_ECHO: bool = False
 
     FRONTEND_BASE_URL: str = (
-        "https://avo-supplier-management.azurewebsites.net/"  # "http://localhost:5173"
+        "https://avo-supplier-management.azurewebsites.net/"  # "http://localhost:5173/"
+        # "http://localhost:5173/"  # "https://avo-supplier-management.azurewebsites.net/"
     )
 
     # Auth flows
     OTP_EXPIRE_MINUTES: int = 15
     ACTIVATION_LINK_EXPIRE_HOURS: int = 48
+
+    # Gate-approval link lifetime in hours. 0 (default) = links never expire,
+    # so the approval panel can validate at its own pace. Set a positive value
+    # to re-enable a time-to-live on the one-time approval links. This gates
+    # both the expiry stamped on new links AND its enforcement, so lowering it
+    # to 0 immediately reactivates any link that had already expired.
+    GATE_APPROVAL_LINK_EXPIRE_HOURS: int = 0
     # Comma-separated list of access_profile values that may approve account requests.
     APPROVER_ROLES: str = (
         "purchasing_manager,purchasing_director,vp_conversion,supplier_owner"
