@@ -30,10 +30,19 @@ from app.features.purchasing_value.stp_pdf import generate_stp_pdf
 from app.features.purchasing_value.full_report_pdf import generate_full_report_pdf
 from app.shared.utils.email.email_service import get_email_service
 
-TOKEN_TTL_HOURS = 72
-
 # STP dossier only exists for these opportunity types (Negotiation/Cash have no STP format)
 STP_ELIGIBLE_TYPES = {"Sourcing", "Technical Productivity"}
+
+
+def _link_ttl_hours() -> int:
+    """Configured lifetime (hours) of an approval link. 0 = never expires."""
+    return settings.GATE_APPROVAL_LINK_EXPIRE_HOURS
+
+
+def _token_expiry(now: datetime) -> Optional[datetime]:
+    """Expiry timestamp to stamp on a new link, or None when expiry is disabled."""
+    ttl = _link_ttl_hours()
+    return now + timedelta(hours=ttl) if ttl else None
 
 
 @contextmanager
@@ -201,7 +210,7 @@ class GateApprovalService:
             opp.validation_request_sent_by = requested_by
 
         email_svc = get_email_service()
-        expires_at = now + timedelta(hours=TOKEN_TTL_HOURS)
+        expires_at = _token_expiry(now)
 
         approver_roles: dict[str, str] = {}
 
@@ -458,7 +467,7 @@ class GateApprovalService:
         opp.validation_request_sent_by = requested_by
 
         email_svc = get_email_service()
-        expires_at = now + timedelta(hours=TOKEN_TTL_HOURS)
+        expires_at = _token_expiry(now)
 
         # Attach the STP dossier at Phase 1 (Sourcing / Technical Productivity only,
         # mirrors the Phase 0 gate), and the Full Opportunity Report at Phase 3/4
@@ -677,7 +686,10 @@ class GateApprovalService:
             raise AppException(404, "Approval link not found.", "VOTE_NOT_FOUND")
         if vote.decision is not None:
             raise AppException(409, "Decision already recorded.", "ALREADY_DECIDED")
-        if vote.token_expires_at and datetime.utcnow() > vote.token_expires_at:
+        # Gate enforcement on the CURRENT config (not the stored stamp): when
+        # expiry is disabled (_link_ttl_hours() == 0), even links that carry an
+        # old expiry timestamp are accepted again — no DB backfill needed.
+        if _link_ttl_hours() and vote.token_expires_at and datetime.utcnow() > vote.token_expires_at:
             raise AppException(410, "This approval link has expired.", "TOKEN_EXPIRED")
 
         # Load the parent request (for phase context + snapshot)
@@ -948,6 +960,11 @@ class GateApprovalService:
             "who will lead this project through Phase 1 and beyond.</p>"
             if is_plant_manager else ""
         )
+        ttl = _link_ttl_hours()
+        link_validity_note = (
+            f"This link expires in {ttl} hours and can be used only once."
+            if ttl else "This link stays valid until you respond and can be used only once."
+        )
         return f"""
 <div style="font-family:Inter,Arial,sans-serif;max-width:560px;margin:0 auto;padding:24px">
   <h2 style="color:#1e40af;font-size:18px;margin-bottom:4px">Gate Approval Required</h2>
@@ -964,7 +981,7 @@ class GateApprovalService:
      text-decoration:none;padding:12px 28px;border-radius:10px;font-size:14px;
      font-weight:600;margin-top:8px">Open Approval Form →</a>
   <p style="font-size:11px;color:#94a3b8;margin-top:20px">
-    This link expires in 72 hours and can be used only once.
+    {link_validity_note}
   </p>
 </div>"""
 

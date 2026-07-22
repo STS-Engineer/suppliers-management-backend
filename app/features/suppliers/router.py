@@ -68,6 +68,18 @@ def _require_cert_manager(current_user: dict = Depends(get_current_user)) -> dic
     return current_user
 
 
+def _require_non_viewer(current_user: dict = Depends(get_current_user)) -> dict:
+    """Allow any writer (everyone except the read-only viewer role).
+
+    Uploading a certificate document is part of onboarding / adding a unit,
+    which every purchaser can do — so it follows the same permission as
+    creating the certification row itself, not the stricter cert-manager rule
+    used for editing/deleting existing certifications.
+    """
+    _block_viewer(current_user)
+    return current_user
+
+
 def _raise_clearer_unit_persistence_error(exc: Exception) -> None:
     if not isinstance(exc, DBAPIError):
         return
@@ -765,6 +777,12 @@ async def create_unit_complete(
                 "unit": schemas.SupplierUnitResponse.model_validate(unit),
                 "contacts_count": len(created_contacts),
                 "certifications_count": len(created_certs),
+                # Returned in creation order so the client can attach the
+                # uploaded certificate document to each row afterwards.
+                "certifications": [
+                    schemas.SupplierCertificationResponse.model_validate(c)
+                    for c in created_certs
+                ],
             },
             "message": f"Unit '{unit.supplier_name}' created with {len(created_contacts)} contact(s) and {len(created_certs)} certification(s)",
         }
@@ -1426,7 +1444,7 @@ async def upload_certification_file(
     cert_id: int,
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
-    current_user: dict = Depends(_require_cert_manager),
+    current_user: dict = Depends(_require_non_viewer),
 ):
     """Add a file to a certification.
 
