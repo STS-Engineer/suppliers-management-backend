@@ -503,6 +503,33 @@ class AuthService:
         await self.db.refresh(identity)
         return self._to_access_identity_response(identity)
 
+    async def delete_access_identity(
+        self,
+        identity_id: int,
+        actor_email: str | None = None,
+    ) -> None:
+        identity = await self._get_identity_by_id(identity_id)
+        if not identity:
+            raise NotFoundError("Access identity", identity_id)
+        # Guard against locking yourself out — deactivate instead of self-delete.
+        if actor_email and identity.email.strip().lower() == actor_email.strip().lower():
+            raise ConflictError("You cannot delete your own account.")
+        # Keep an audit record of the removal. identity_id is left null (the row is
+        # about to disappear); the email + details preserve who was deleted.
+        await self._log_audit(
+            "account_deleted",
+            email=identity.email,
+            identity_id=None,
+            actor_email=actor_email,
+            details={
+                "id_identity": identity.id_identity,
+                "full_name": identity.full_name,
+                "access_profile": identity.access_profile,
+            },
+        )
+        await self.db.delete(identity)
+        await self.db.commit()
+
     async def change_password(
         self,
         current_user: dict,

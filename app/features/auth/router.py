@@ -236,6 +236,23 @@ async def update_access_identity(
     }
 
 
+@router.delete("/access-identities/{identity_id}", response_model=dict)
+async def delete_access_identity(
+    identity_id: int,
+    approver: dict = Depends(_require_approver),
+    db: AsyncSession = Depends(get_db),
+):
+    service = AuthService(db)
+    await service.delete_access_identity(
+        identity_id,
+        actor_email=approver.get("email") or approver.get("sub"),
+    )
+    return {
+        "status": "success",
+        "message": "Access identity deleted successfully.",
+    }
+
+
 @router.post("/change-password", response_model=dict)
 async def change_password(
     data: schemas.ChangePasswordRequest,
