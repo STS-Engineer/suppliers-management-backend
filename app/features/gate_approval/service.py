@@ -780,15 +780,21 @@ class GateApprovalService:
             return  # Still waiting for others
 
         now = datetime.utcnow()
-        decisions = {v.decision for v in decided}
+        decisions = [v.decision for v in decided]
         plant_vote = next((v for v in decided if v.is_plant_manager), None)
         last_decider = decided[-1].approver_email if decided else req.requested_by
 
-        if "Rejected" in decisions:
+        # Consensus rules:
+        #  - No Go (opportunity cancelled) ONLY when EVERY voter rejects — a
+        #    single rejection is not enough to kill the opportunity.
+        #  - Go when every voter approves.
+        #  - Any other mix (at least one Needs Review, or a non-unanimous
+        #    rejection) falls back to Review → the opportunity goes to
+        #    "Needs Rework" so the buyer/PM can address the concerns and
+        #    re-submit, rather than being terminated.
+        if decisions and all(d == "Rejected" for d in decisions):
             consensus = "No Go"
-        elif "Needs Review" in decisions:
-            consensus = "Review"
-        else:
+        elif all(d == "Approved" for d in decisions):
             # Guard: Go requires a PM email for project-based opportunity types —
             # but only at the Phase 0 gate, where the PM is first designated.
             # Phase 1-3 gates advance an opportunity that already has
@@ -807,6 +813,11 @@ class GateApprovalService:
                 # plant manager re-votes or re-request is made with PM assigned
                 return
             consensus = "Go"
+        else:
+            # Mixed panel — at least one Needs Review, or some (but not all)
+            # rejections. Send the opportunity back for rework rather than
+            # cancelling it.
+            consensus = "Review"
 
         if consensus == "Go":
             pm_email = plant_vote.project_manager_email if plant_vote else None
@@ -819,7 +830,7 @@ class GateApprovalService:
             gate_payload = GateDecisionRequest(
                 decision="No Go",
                 decided_by=last_decider,
-                comments="Gate rejected by approval panel.",
+                comments="Gate rejected unanimously by approval panel.",
             )
         else:  # Review
             gate_payload = GateDecisionRequest(
