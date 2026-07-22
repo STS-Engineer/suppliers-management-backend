@@ -1215,6 +1215,12 @@ class OpportunityResponse(BaseModel):
     #  - saving_to_budget_by_year: incremental year-over-year price drop, per calendar year (what is budgeted)
     value_of_opportunity: Optional[Decimal] = None
     saving_to_budget_by_year: Optional[Dict[str, Decimal]] = None
+    # Reminder aggregates for the current pending gate request (computed in
+    # opportunity_to_response): how many reminder emails were sent in total and
+    # how many approvers still haven't recorded a decision. Null when there is
+    # no pending gate request.
+    reminders_sent: Optional[int] = None
+    pending_approvers: Optional[int] = None
     cash_inventory_gap: Optional[Decimal] = None
     cash_ap_gap: Optional[Decimal] = None
     secondary_plants: Optional[str] = None
@@ -1263,6 +1269,16 @@ def opportunity_to_response(opp) -> OpportunityResponse:
     data.saving_to_budget_by_year = (
         {k: Decimal(str(v)) for k, v in stb.items()} if stb else None
     )
+    # Reminder aggregate across the open (Pending) gate request(s), so the board
+    # card can show how many reminders were sent and how many approvers are still
+    # pending without loading the full gate-approval status.
+    pending_reqs = [
+        r for r in (opp.gate_approval_requests or []) if r.status == "Pending"
+    ]
+    if pending_reqs:
+        votes = [v for r in pending_reqs for v in (r.votes or [])]
+        data.reminders_sent = sum(int(v.reminder_count or 0) for v in votes)
+        data.pending_approvers = sum(1 for v in votes if v.decision is None)
     return data
 
 
