@@ -2131,6 +2131,10 @@ class GateApprovalVote(GovernanceMixin, Base):
     project_manager_email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     decided_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     ip_address: Mapped[Optional[str]] = mapped_column(String(45), nullable=True)
+    # Reminder audit trail — how many times this pending approver was nudged and
+    # when the last reminder went out. Stamped by GateApprovalService.send_reminders.
+    reminder_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    last_reminded_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_by: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
 

@@ -756,6 +756,99 @@ class GateApprovalService:
         return result.scalars().all()
 
     # ------------------------------------------------------------------
+    # Send reminder emails to approvers who have not yet decided
+    # ------------------------------------------------------------------
+    async def send_reminders(self, opportunity_id: int, requested_by: str) -> dict:
+        """Re-send the approval email — reusing each approver's *existing* link —
+        to every voter on the opportunity's open (Pending) gate request(s) who
+        has not yet recorded a decision. No new tokens are created, so the
+        original ``/approve/{token}`` links stay valid and anyone who already
+        voted is left alone."""
+        pv_svc = PurchasingValueService(self.db)
+        opp = await pv_svc.get_opportunity(opportunity_id)
+
+        result = await self.db.execute(
+            select(GateApprovalRequest)
+            .where(
+                GateApprovalRequest.opportunity_id == opportunity_id,
+                GateApprovalRequest.status == "Pending",
+            )
+            .options(selectinload(GateApprovalRequest.votes))
+        )
+        pending_requests = result.scalars().all()
+        if not pending_requests:
+            raise AppException(
+                400,
+                "No pending approval request to remind — this opportunity is not awaiting validation.",
+                "NO_PENDING_REQUEST",
+            )
+
+        email_svc = get_email_service()
+        now = datetime.utcnow()
+        reminded: list[str] = []
+
+        # Re-attach the same dossier the original request carried, keyed on the
+        # opportunity's current phase (mirrors the create_* attachment logic).
+        attach_bytes: Optional[bytes] = None
+        attach_prefix = ""
+        if opp.phase_status == "Phase 0" and opp.opportunity_type in STP_ELIGIBLE_TYPES:
+            attach_bytes = generate_stp_pdf(opp, phase=0)
+            attach_prefix = "STP_Phase0"
+        elif opp.phase_status == "Phase 1" and opp.opportunity_type in STP_ELIGIBLE_TYPES:
+            attach_bytes = generate_stp_pdf(opp, phase=1)
+            attach_prefix = "STP_Phase1"
+        elif opp.phase_status in ("Phase 3", "Phase 4"):
+            attach_bytes = generate_full_report_pdf(opp)
+            attach_prefix = "FullReport"
+
+        with _pdf_attachment(attach_bytes, attach_prefix, opp.opportunity_name) as (attach_path, attach_filename):
+            for req in pending_requests:
+                tier = req.committee_level
+                subject_suffix = f", {tier} Committee)" if tier else ")"
+                for vote in req.votes:
+                    # Skip anyone who already voted (or has no address to reach).
+                    if vote.decision is not None or not vote.approver_email:
+                        continue
+                    link = f"{settings.frontend_base_url}/approve/{vote.access_token}"
+                    pm_note_applies = vote.is_plant_manager and opp.phase_status in ("Assigned", "Phase 0")
+                    html = self._build_email_html(
+                        opp, req, link, req.message,
+                        is_plant_manager=pm_note_applies,
+                        approver_role=vote.approver_role,
+                        committee_level=tier,
+                    )
+                    try:
+                        email_svc.send_sync(
+                            subject=f"[Reminder] Gate Approval — {opp.opportunity_name} ({opp.phase_status}{subject_suffix}",
+                            recipients=[vote.approver_email],
+                            body_html=html,
+                            attachment_path=attach_path,
+                            attachment_filename=attach_filename,
+                        )
+                    except Exception:
+                        pass  # Non-blocking — a failed reminder must not error the request
+                    await self._notify_by_email(
+                        vote.approver_email,
+                        "gate_approval_requested",
+                        f"Reminder: gate approval pending — {opp.opportunity_name}",
+                        f"A decision is still needed for the {opp.phase_status} gate.",
+                        link,
+                    )
+                    # Record the reminder as history on the vote row.
+                    vote.reminder_count = (vote.reminder_count or 0) + 1
+                    vote.last_reminded_at = now
+                    reminded.append(vote.approver_email)
+
+        if not reminded:
+            raise AppException(
+                400,
+                "Everyone has already recorded their decision — no reminders sent.",
+                "NOTHING_TO_REMIND",
+            )
+
+        return {"reminded": reminded, "count": len(reminded)}
+
+    # ------------------------------------------------------------------
     # Internal: check consensus after each vote
     # ------------------------------------------------------------------
     async def _check_consensus(self, request_id: int) -> None:

@@ -116,6 +116,8 @@ class VoteResponse(BaseModel):
     decided_at: Optional[datetime] = None
     accessed_at: Optional[datetime] = None
     token_expires_at: Optional[datetime] = None
+    reminder_count: int = 0
+    last_reminded_at: Optional[datetime] = None
 
     model_config = ConfigDict(from_attributes=True)
 

@@ -65,6 +65,22 @@ async def get_approval_status(
     }
 
 
+@router.post("/opportunities/{opportunity_id}/remind", response_model=dict)
+async def send_reminders(
+    opportunity_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Re-send approval links to approvers who have not yet recorded a decision."""
+    svc = svc_module.GateApprovalService(db)
+    result = await svc.send_reminders(
+        opportunity_id=opportunity_id,
+        requested_by=current_user.get("email", current_user.get("sub", "")),
+    )
+    await db.commit()
+    return {"status": "success", **result}
+
+
 # ── Public endpoints — no auth, UUID token is the identity ────────────
 
 
