@@ -606,7 +606,9 @@ class GateApprovalService:
             # vote at EVERY gate (Phase 0-4) — the field is pre-filled with the
             # current designation (project_owner) and can be overridden. The PM is
             # notified only once the whole panel approves (see _check_consensus).
-            requires_project_manager=bool(vote.is_plant_manager),
+            # Only project-based types have a PM (Negotiation/Cash never do).
+            requires_project_manager=bool(vote.is_plant_manager)
+            and snap.get("opportunity_type") not in ("Negotiation", "Cash"),
             all_votes=peer_votes,
             # Identity
             opportunity_name=snap.get("opportunity_name"),
@@ -859,6 +861,64 @@ class GateApprovalService:
         return {"reminded": reminded, "count": len(reminded)}
 
     # ------------------------------------------------------------------
+    # Manually (re)send the Project Manager handover email for a Go gate —
+    # e.g. when the automatic send failed (SMTP hiccup).
+    # ------------------------------------------------------------------
+    async def resend_pm_notification(self, request_id: int) -> dict:
+        result = await self.db.execute(
+            select(GateApprovalRequest)
+            .where(GateApprovalRequest.request_id == request_id)
+            .options(selectinload(GateApprovalRequest.votes))
+        )
+        req = result.scalar_one_or_none()
+        if not req:
+            raise AppException(404, "Gate approval request not found.", "REQUEST_NOT_FOUND")
+        if not (req.status == "Completed" and req.consensus_result == "Go"):
+            raise AppException(
+                400,
+                "The Project Manager email applies only to an approved (Go) gate.",
+                "GATE_NOT_APPROVED",
+            )
+
+        snap = req.opportunity_snapshot or {}
+        plant_vote = next((v for v in req.votes if v.is_plant_manager), None)
+        pm_email = (
+            req.pm_notified_email
+            or (plant_vote.project_manager_email if plant_vote else None)
+            or snap.get("project_owner")
+        )
+        if not pm_email:
+            raise AppException(
+                400,
+                "No Project Manager email is set for this opportunity.",
+                "NO_PM_EMAIL",
+            )
+
+        sent = self._notify_project_manager(
+            pm_email=pm_email,
+            snap=snap,
+            phase=req.phase_from or "Phase 0",
+            approver_email=(plant_vote.approver_email if plant_vote else "") or "",
+            opportunity_id=req.opportunity_id,
+        )
+        now = datetime.utcnow()
+        req.pm_notified_email = pm_email
+        req.pm_notification_status = "sent" if sent else "failed"
+        if sent:
+            req.pm_notified_at = now
+        req.updated_at = now
+        # In-app notification too, best-effort (only meaningful when it went out).
+        if sent:
+            await self._notify_by_email(
+                pm_email,
+                "gate_approval_pm_assigned",
+                f"You are the Project Manager — {snap.get('opportunity_name') or 'Opportunity'}",
+                f"Handover email (re)sent for the {req.phase_from} gate.",
+                f"/purchasing-value?opp={req.opportunity_id}",
+            )
+        return {"pm_email": pm_email, "delivery": "sent" if sent else "failed"}
+
+    # ------------------------------------------------------------------
     # Internal: check consensus after each vote
     # ------------------------------------------------------------------
     async def _check_consensus(self, request_id: int) -> None:
@@ -977,8 +1037,9 @@ class GateApprovalService:
         # PM designated on this gate, falling back to the Phase 0 carry-over.
         # Best-effort: failure must not roll back the transition.
         if consensus == "Go" and pm_email:
+            sent = False
             try:
-                self._notify_project_manager(
+                sent = self._notify_project_manager(
                     pm_email=pm_email,
                     snap=snap,
                     phase=req.phase_from or "Phase 0",
@@ -987,7 +1048,13 @@ class GateApprovalService:
                     opportunity_id=req.opportunity_id,
                 )
             except Exception:
-                pass
+                sent = False
+            # Record the handover on the gate so the UI can confirm, per phase,
+            # that the Project Manager was notified.
+            req.pm_notified_email = pm_email
+            req.pm_notification_status = "sent" if sent else "failed"
+            if sent:
+                req.pm_notified_at = now
             await self._notify_by_email(
                 pm_email,
                 "gate_approval_pm_assigned",
@@ -1153,7 +1220,7 @@ class GateApprovalService:
         phase: str,
         approver_email: str,
         opportunity_id: Optional[int] = None,
-    ) -> None:
+    ) -> bool:
         """Modern, self-contained handover email to the designated Project Manager.
         Includes the full opportunity dossier so the PM can track it in their own
         system without opening the app."""
@@ -1341,10 +1408,12 @@ class GateApprovalService:
 </div>"""
         try:
             email_svc = get_email_service()
-            email_svc.send_sync(
-                subject=f"[Project handover] You lead — {opp_name} ({phase} approved)",
-                recipients=[pm_email],
-                body_html=html,
+            return bool(
+                email_svc.send_sync(
+                    subject=f"[Project handover] You lead — {opp_name} ({phase} approved)",
+                    recipients=[pm_email],
+                    body_html=html,
+                )
             )
         except Exception:
-            pass  # Non-blocking
+            return False  # Non-blocking

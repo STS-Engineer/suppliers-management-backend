@@ -2095,6 +2095,12 @@ class GateApprovalRequest(GovernanceMixin, Base):
     # Light | Intermediate | Full — null for Phase 0 requests
     applied_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     opportunity_snapshot: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    # Project Manager handover — recorded when the gate reaches Go and the PM
+    # email is sent, so each phase's gate carries proof the PM was notified.
+    pm_notified_email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    pm_notified_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    pm_notification_status: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    # sent | failed
     created_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_by: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
 

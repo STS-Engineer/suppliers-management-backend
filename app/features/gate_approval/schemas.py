@@ -133,6 +133,9 @@ class GateApprovalRequestResponse(BaseModel):
     consensus_result: Optional[str] = None
     committee_level: Optional[str] = None
     applied_at: Optional[datetime] = None
+    pm_notified_email: Optional[str] = None
+    pm_notified_at: Optional[datetime] = None
+    pm_notification_status: Optional[str] = None
     votes: List[VoteResponse] = []
 
     model_config = ConfigDict(from_attributes=True)

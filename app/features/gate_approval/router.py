@@ -81,6 +81,19 @@ async def send_reminders(
     return {"status": "success", **result}
 
 
+@router.post("/requests/{request_id}/notify-pm", response_model=dict)
+async def resend_pm_notification(
+    request_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Manually (re)send the Project Manager handover email for an approved gate."""
+    svc = svc_module.GateApprovalService(db)
+    result = await svc.resend_pm_notification(request_id)
+    await db.commit()
+    return {"status": "success", **result}
+
+
 # ── Public endpoints — no auth, UUID token is the identity ────────────
 
 
