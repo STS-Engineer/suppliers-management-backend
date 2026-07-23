@@ -822,7 +822,10 @@ class PurchasingValueService:
         "opportunity_name", "opportunity_type", "phase_status", "status",
         "description",
         "validation_decision", "idea_owner", "project_owner",
+        "purchasing_owner", "conversion_owner",
         "budget_year", "supplier_id", "plant_id",
+        "currency", "fx_rate_to_eur",
+        "priority_category", "priority_score",
         "change_mode",               # Standard | Silent — per-phase value at gate time
         # Dates
         "planned_start_date", "real_start_date",
@@ -967,6 +970,16 @@ class PurchasingValueService:
         # ------ GO → advance phase ------
         else:
             current_phase = opp.phase_status or "Phase 0"
+
+            # Keep the designated Project Manager in sync across gates: at Phase
+            # 1-4 the plant manager may confirm or override the PM on their vote,
+            # so a provided value updates opp.project_owner (Phase 0 sets it in
+            # its own branch below, where it is mandatory for project types).
+            if (
+                payload.project_manager
+                and current_phase not in ("Assigned", "Phase 0")
+            ):
+                opp.project_owner = payload.project_manager
 
             # Phases 1-4 are material: financial lines, deployment, and close-out.
             # A single privileged user must NOT advance them without a quorum vote.

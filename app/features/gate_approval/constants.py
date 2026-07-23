@@ -18,10 +18,12 @@ ROLE_SUPPLY_CHAIN = "Supply Chain"
 # permissions; this one only ever appears as a CommitteeApprover.role value.
 ROLE_VP_CONVERSION = "VP Conversion"
 
+# NOTE: Project Leader is NOT a committee voter. The Project Manager / leader is
+# designated by the Plant Manager on their approval vote (like Phase 0) and is
+# only notified once the whole panel approves — see GateApprovalService.
 ALL_ROLES = (
     ROLE_PURCHASING_DIRECTOR,
     ROLE_PLANT_MANAGER,
-    ROLE_PROJECT_LEADER,
     ROLE_PRODUCT_LINE_MANAGER,
     ROLE_COO_VP,
     ROLE_CEO,
@@ -45,21 +47,20 @@ COMMITTEE_LEVELS = ("Light", "Intermediate", "Full")
 # committee level is chosen. Phase 2/3/4 always use CORE_MANDATORY_ROLES below,
 # regardless of which tier was picked at Phase 1.
 MANDATORY_ROLES_BY_TIER = {
-    "Light": [ROLE_PURCHASING_DIRECTOR, ROLE_PLANT_MANAGER, ROLE_PROJECT_LEADER],
+    "Light": [ROLE_PURCHASING_DIRECTOR, ROLE_PLANT_MANAGER],
     "Intermediate": [
         ROLE_PURCHASING_DIRECTOR,
         ROLE_PLANT_MANAGER,
-        ROLE_PROJECT_LEADER,
         ROLE_PRODUCT_LINE_MANAGER,
         ROLE_COO_VP,
     ],
-    "Full": [ROLE_PURCHASING_DIRECTOR, ROLE_PLANT_MANAGER, ROLE_PROJECT_LEADER, ROLE_CEO],
+    "Full": [ROLE_PURCHASING_DIRECTOR, ROLE_PLANT_MANAGER, ROLE_CEO],
 }
 
 # Phase 2/3/4 mandatory roles — fixed, independent of committee tier. Everyone
 # else (COO/VP, Quality, Engineering, Finance, Operations, Supply Chain) is
 # optional ("if required") at these phases.
-CORE_MANDATORY_ROLES = [ROLE_PURCHASING_DIRECTOR, ROLE_PLANT_MANAGER, ROLE_PROJECT_LEADER]
+CORE_MANDATORY_ROLES = [ROLE_PURCHASING_DIRECTOR, ROLE_PLANT_MANAGER]
 
 COMMITTEE_ELIGIBLE_PHASES = ("Phase 1", "Phase 2", "Phase 3", "Phase 4")
 

@@ -45,6 +45,15 @@ def _token_expiry(now: datetime) -> Optional[datetime]:
     return now + timedelta(hours=ttl) if ttl else None
 
 
+def _arrow(before, after) -> Optional[str]:
+    """Render a before → after pair for the PM handover email, or None if both empty."""
+    b = "" if before in (None, "") else str(before)
+    a = "" if after in (None, "") else str(after)
+    if not b and not a:
+        return None
+    return f"{b or '—'} → {a or '—'}"
+
+
 @contextmanager
 def _pdf_attachment(pdf_bytes: Optional[bytes], filename_prefix: str, opp_name: str):
     """Write pdf_bytes to a temp file for the duration of the block; yields
@@ -593,10 +602,11 @@ class GateApprovalService:
             already_decided=vote.decision is not None,
             decision=vote.decision,
             token_expires_at=vote.token_expires_at,
-            # PM is designated once, at the Phase 0 gate — later phases (1-3)
-            # already have opp.project_owner set and must not re-prompt for it.
-            requires_project_manager=bool(vote.is_plant_manager)
-            and req.phase_from in ("Assigned", "Phase 0"),
+            # The Plant Manager designates the Project Manager on their approval
+            # vote at EVERY gate (Phase 0-4) — the field is pre-filled with the
+            # current designation (project_owner) and can be overridden. The PM is
+            # notified only once the whole panel approves (see _check_consensus).
+            requires_project_manager=bool(vote.is_plant_manager),
             all_votes=peer_votes,
             # Identity
             opportunity_name=snap.get("opportunity_name"),
@@ -913,7 +923,11 @@ class GateApprovalService:
             consensus = "Review"
 
         if consensus == "Go":
-            pm_email = plant_vote.project_manager_email if plant_vote else None
+            # PM designated by the plant manager on this gate; fall back to the
+            # one carried over from Phase 0 (opportunity_snapshot.project_owner).
+            pm_email = (plant_vote.project_manager_email if plant_vote else None) or (
+                req.opportunity_snapshot or {}
+            ).get("project_owner")
             gate_payload = GateDecisionRequest(
                 decision="Go",
                 decided_by=last_decider,
@@ -957,21 +971,25 @@ class GateApprovalService:
             f"/purchasing-value?opp={req.opportunity_id}",
         )
 
-        # PM email is best-effort; failure must not roll back the transition.
-        if consensus == "Go" and plant_vote and plant_vote.project_manager_email:
+        # Notify the Project Manager — at EVERY gate (Phase 0-4), and ONLY once
+        # the whole panel has approved (we are inside the consensus == "Go"
+        # branch, so a single Rework/Needs Review never reaches here). Uses the
+        # PM designated on this gate, falling back to the Phase 0 carry-over.
+        # Best-effort: failure must not roll back the transition.
+        if consensus == "Go" and pm_email:
             try:
                 self._notify_project_manager(
-                    pm_email=plant_vote.project_manager_email,
-                    opp_name=snap.get("opportunity_name") or "Opportunity",
-                    opp_type=snap.get("opportunity_type") or "",
+                    pm_email=pm_email,
+                    snap=snap,
                     phase=req.phase_from or "Phase 0",
-                    idea_owner=snap.get("idea_owner") or "",
-                    approver_email=plant_vote.approver_email or "",
+                    approver_email=(plant_vote.approver_email if plant_vote else "")
+                    or "",
+                    opportunity_id=req.opportunity_id,
                 )
             except Exception:
                 pass
             await self._notify_by_email(
-                plant_vote.project_manager_email,
+                pm_email,
                 "gate_approval_pm_assigned",
                 f"You are assigned as Project Manager — {snap.get('opportunity_name') or 'Opportunity'}",
                 f"All approvers validated the {req.phase_from} gate. You now lead this project.",
@@ -1131,52 +1149,200 @@ class GateApprovalService:
     def _notify_project_manager(
         self,
         pm_email: str,
-        opp_name: str,
-        opp_type: str,
+        snap: dict,
         phase: str,
-        idea_owner: str,
         approver_email: str,
+        opportunity_id: Optional[int] = None,
     ) -> None:
-        by_line = f"by {approver_email}" if approver_email else ""
+        """Modern, self-contained handover email to the designated Project Manager.
+        Includes the full opportunity dossier so the PM can track it in their own
+        system without opening the app."""
+        snap = snap or {}
+        cur = snap.get("currency") or "EUR"
+        sym = {"EUR": "€", "USD": "$", "RMB": "¥", "INR": "₹"}.get(cur, cur + " ")
+        opp_name = snap.get("opportunity_name") or "Opportunity"
+        opp_type = snap.get("opportunity_type") or "—"
+        is_nego = opp_type == "Negotiation"
+
+        def money(v, decimals: int = 0) -> Optional[str]:
+            if v in (None, ""):
+                return None
+            try:
+                return f"{sym}{float(v):,.{decimals}f}"
+            except Exception:
+                return str(v)
+
+        def txt(v) -> Optional[str]:
+            if v in (None, ""):
+                return None
+            return str(v)
+
+        def qty(v) -> Optional[str]:
+            if v in (None, ""):
+                return None
+            try:
+                return f"{float(v):,.0f}"
+            except Exception:
+                return str(v)
+
+        # (title, [(label, value_or_None), ...]) — empty rows/sections are dropped.
+        risks = snap.get("stp_risks") or {}
+        benefits = snap.get("stp_benefits") or {}
+        sections = [
+            ("Identity", [
+                ("Type", opp_type),
+                ("Priority", txt(snap.get("priority_category"))),
+                ("Description", txt(snap.get("description"))),
+                ("Idea owner", txt(snap.get("idea_owner"))),
+                ("Purchasing owner", txt(snap.get("purchasing_owner"))),
+                ("Conversion owner", txt(snap.get("conversion_owner"))),
+                ("Change type", txt(snap.get("change_mode"))),
+                ("Currency", cur + (f" · FX→EUR {snap.get('fx_rate_to_eur')}" if snap.get("fx_rate_to_eur") else "")),
+            ]),
+            ("Scope", [
+                ("Scope in", txt(snap.get("scope_in"))),
+                ("Scope out", txt(snap.get("scope_out"))),
+                ("Customers", txt(snap.get("customers"))),
+            ]),
+            ("Supplier", [
+                ("Proposed supplier", txt(snap.get("proposed_supplier_name"))),
+                ("Country (after)", txt(snap.get("country_after"))),
+                ("Supplier consulted", "Yes" if snap.get("supplier_asked") else None),
+                ("Consultation result", txt(snap.get("supplier_asked_result"))),
+            ]),
+            ("Pricing", None if is_nego else [
+                ("Current price", money(snap.get("current_price"), 4)),
+                ("Proposed price", money(snap.get("proposed_price"), 4)),
+                ("Current price N+1", money(snap.get("current_price_n1"), 4)),
+                ("Proposed price N+1", money(snap.get("proposed_price_n1"), 4)),
+                ("Current price N+2", money(snap.get("current_price_n2"), 4)),
+                ("Proposed price N+2", money(snap.get("proposed_price_n2"), 4)),
+                ("Current price N+3", money(snap.get("current_price_n3"), 4)),
+                ("Proposed price N+3", money(snap.get("proposed_price_n3"), 4)),
+            ]),
+            ("Quantities", None if is_nego else [
+                ("Annual qty N+1", qty(snap.get("annual_quantity_n1"))),
+                ("Annual qty N+2", qty(snap.get("annual_quantity_n2"))),
+                ("Annual qty N+3", qty(snap.get("annual_quantity_n3"))),
+                ("Annual qty N+4", qty(snap.get("annual_quantity_n4"))),
+            ]),
+            ("Savings & ROI", [
+                ("Expected annual saving", money(snap.get("expected_annual_saving"))),
+                ("Saving year N", money(snap.get("saving_year_n"))),
+                ("Saving year N+1", money(snap.get("saving_year_n1"))),
+                ("Saving year N+2", money(snap.get("saving_year_n2"))),
+                ("Saving year N+3", money(snap.get("saving_year_n3"))),
+                ("Period saving (total)", money(snap.get("period_saving"))),
+                ("ROI", f"{snap.get('roi_percent')}%" if snap.get("roi_percent") not in (None, "") else None),
+                ("ROI (period)", f"{snap.get('roi_period_percent')}%" if snap.get("roi_period_percent") not in (None, "") else None),
+            ]),
+            ("Investment & costs", [
+                ("Total investment", money(snap.get("total_investment"))),
+                ("Tooling", money(snap.get("tooling_cost"))),
+                ("Travel", money(snap.get("travel_cost"))),
+                ("Qualification", money(snap.get("qualification_cost"))),
+                ("Other", money(snap.get("other_cost"))),
+            ]),
+            ("Cash", [
+                ("Cash impact", money(snap.get("cash_impact"))),
+                ("Inventory gap", money(snap.get("cash_inventory_gap"))),
+                ("A/P gap", money(snap.get("cash_ap_gap"))),
+            ]),
+            ("Logistics", None if is_nego else [
+                ("Incoterms (before → after)", _arrow(snap.get("incoterms_before"), snap.get("incoterms_after"))),
+                ("Incoterms place (before → after)", _arrow(snap.get("place_of_incoterms_before"), snap.get("place_of_incoterms_after"))),
+                ("TOP days (before → after)", _arrow(snap.get("top_days_before"), snap.get("top_days_after"))),
+                ("Transit days (before → after)", _arrow(snap.get("transit_days_before"), snap.get("transit_days_after"))),
+                ("Bonus (before → after)", _arrow(snap.get("bonus_before"), snap.get("bonus_after"))),
+                ("Consignment (before → after)", _arrow(snap.get("consignment_before"), snap.get("consignment_after"))),
+            ]),
+            ("Planning", [
+                ("Planned start", txt(snap.get("planned_start_date"))),
+                ("Real start", txt(snap.get("real_start_date"))),
+                ("Planned end", txt(snap.get("planned_end_date"))),
+                ("Duration", f"{snap.get('duration_months')} months" if snap.get("duration_months") not in (None, "") else None),
+            ]),
+            ("Risks & benefits", [
+                *[(f"Risk · {k.replace('_', ' ')}", txt(v)) for k, v in (risks.items() if isinstance(risks, dict) else [])],
+                *[(f"Benefit · {k.replace('_', ' ')}", txt(v)) for k, v in (benefits.items() if isinstance(benefits, dict) else [])],
+            ]),
+        ]
+
+        def render_section(title, rows) -> str:
+            if not rows:
+                return ""
+            body = "".join(
+                f"<tr>"
+                f"<td style='padding:7px 16px 7px 0;color:#64748b;font-size:13px;white-space:nowrap;vertical-align:top'>{k}</td>"
+                f"<td style='padding:7px 0;color:#0f172a;font-size:13px;font-weight:600;vertical-align:top'>{v}</td>"
+                f"</tr>"
+                for k, v in rows if v not in (None, "")
+            )
+            if not body:
+                return ""
+            return (
+                f"<tr><td colspan='2' style='padding:18px 0 6px'>"
+                f"<span style='display:inline-block;font-size:11px;font-weight:700;letter-spacing:.08em;"
+                f"text-transform:uppercase;color:#0891b2'>{title}</span>"
+                f"<span style='display:block;height:2px;width:34px;margin-top:4px;background:linear-gradient(90deg,#2563eb,#0891b2);border-radius:2px'></span>"
+                f"</td></tr>{body}"
+            )
+
+        sections_html = "".join(render_section(t, r) for t, r in sections)
+
+        # Headline stat tiles (only the ones that have a value).
+        tiles = [
+            ("Expected annual saving", money(snap.get("expected_annual_saving"))),
+            ("Total period saving", money(snap.get("period_saving"))),
+            ("Cash impact", money(snap.get("cash_impact"))),
+        ]
+        tiles = [(lbl, val) for lbl, val in tiles if val]
+        tiles_html = ""
+        if tiles:
+            cells = "".join(
+                f"<td style='padding:6px'>"
+                f"<div style='background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;padding:12px 14px'>"
+                f"<div style='font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#94a3b8'>{lbl}</div>"
+                f"<div style='font-size:18px;font-weight:800;color:#0f2744;margin-top:4px'>{val}</div>"
+                f"</div></td>"
+                for lbl, val in tiles
+            )
+            tiles_html = f"<table role='presentation' width='100%' style='border-collapse:separate;margin:4px -6px 6px'><tr>{cells}</tr></table>"
+
+        by_line = f" by {approver_email}" if approver_email else ""
+        link = (
+            f"{settings.frontend_base_url}/purchasing-value?opp={opportunity_id}"
+            if opportunity_id else settings.frontend_base_url
+        )
+
         html = f"""
-<div style="font-family:Inter,Arial,sans-serif;max-width:560px;margin:0 auto;padding:24px">
-  <h2 style="color:#1e40af;font-size:18px;margin-bottom:4px">
-    You have been assigned as Project Manager
-  </h2>
-  <p style="color:#64748b;font-size:13px;margin-top:0">
-    All approvers have validated the <strong>{phase}</strong> gate {by_line}.
-    You are designated as the <strong>Project Manager</strong> responsible for
-    leading this project through Phase 1 and beyond.
-  </p>
-  <table style="width:100%;border-collapse:collapse;margin:16px 0">
-    <tr>
-      <td style="padding:4px 12px 4px 0;color:#64748b;font-size:13px">Opportunity</td>
-      <td style="padding:4px 0;font-size:13px;font-weight:600">{opp_name}</td>
-    </tr>
-    <tr>
-      <td style="padding:4px 12px 4px 0;color:#64748b;font-size:13px">Type</td>
-      <td style="padding:4px 0;font-size:13px;font-weight:600">{opp_type}</td>
-    </tr>
-    <tr>
-      <td style="padding:4px 12px 4px 0;color:#64748b;font-size:13px">Idea Owner</td>
-      <td style="padding:4px 0;font-size:13px;font-weight:600">{idea_owner}</td>
-    </tr>
-    <tr>
-      <td style="padding:4px 12px 4px 0;color:#64748b;font-size:13px">Gate</td>
-      <td style="padding:4px 0;font-size:13px;font-weight:600">{phase} — approved by all reviewers, advancing to Phase 1</td>
-    </tr>
-  </table>
-  <p style="color:#64748b;font-size:12px;margin-top:4px">
-    Please connect with the idea owner and the purchasing team to start the Phase 1 feasibility study.
-  </p>
-  <p style="font-size:11px;color:#94a3b8;margin-top:20px">
-    Avocarbon · Suppliers Management · Purchasing Value
-  </p>
+<div style="margin:0;padding:24px 12px;background:#eef2f7;font-family:Inter,Segoe UI,Arial,sans-serif">
+  <div style="max-width:640px;margin:0 auto;background:#ffffff;border-radius:20px;overflow:hidden;box-shadow:0 18px 40px -20px rgba(2,10,25,.35)">
+    <div style="background:linear-gradient(135deg,#0f2744,#1b5d92 55%,#0891b2);padding:26px 28px;color:#fff">
+      <div style="font-size:11px;font-weight:700;letter-spacing:.22em;text-transform:uppercase;color:rgba(255,255,255,.7)">AvoCarbon · Purchasing Value</div>
+      <div style="font-size:22px;font-weight:800;margin-top:8px;line-height:1.25">You're the Project Manager</div>
+      <div style="font-size:13px;color:rgba(255,255,255,.85);margin-top:6px">
+        The <strong>{phase}</strong> gate was approved by the full panel{by_line}. You now lead this project.
+      </div>
+    </div>
+    <div style="padding:22px 28px 28px">
+      <div style="font-size:15px;font-weight:800;color:#0f2744">{opp_name}</div>
+      <div style="font-size:12px;color:#64748b;margin-top:2px">Full dossier below — for tracking in your own system.</div>
+      {tiles_html}
+      <table role="presentation" width="100%" style="border-collapse:collapse;margin-top:6px">
+        {sections_html}
+      </table>
+      <a href="{link}" style="display:inline-block;margin-top:22px;background:linear-gradient(135deg,#0f2744,#1b5d92,#0891b2);color:#fff;text-decoration:none;padding:12px 26px;border-radius:12px;font-size:14px;font-weight:700">Open in Purchasing Value →</a>
+      <p style="font-size:11px;color:#94a3b8;margin:22px 0 0">
+        AvoCarbon · Suppliers Management · Purchasing Value — automated notification, no reply needed.
+      </p>
+    </div>
+  </div>
 </div>"""
         try:
             email_svc = get_email_service()
             email_svc.send_sync(
-                subject=f"[Action Required] You are assigned as Project Manager — {opp_name}",
+                subject=f"[Project handover] You lead — {opp_name} ({phase} approved)",
                 recipients=[pm_email],
                 body_html=html,
             )
