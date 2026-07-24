@@ -13,7 +13,7 @@ from app.features.auth.models import AccessIdentity
 from app.features.notifications.service import NotificationService
 
 from app.db.models import AvocarbonSite, Contact, ContactSiteRelation, SupplierDevelopmentPlan, SupplierGroup, SupplierSiteRelation, SupplierSpendByYear, SupplierUnit
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Optional
 
 router = APIRouter(prefix="/supplier-relations", tags=["supplier-relations"])
@@ -327,6 +327,41 @@ async def patch_relation(
             "is_active": relation.is_active,
         },
         "warnings": warnings,
+    }
+
+
+class RelationOwnerPatch(BaseModel):
+    """Reassign the supplier owner (buyer_owner) of a relation."""
+    supplier_owner: str = Field(..., min_length=1)
+
+
+@router.patch("/{relation_id}/owner", response_model=dict)
+async def update_relation_owner(
+    relation_id: int,
+    data: RelationOwnerPatch,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Change the supplier owner of a relation. The owner is stored as a canonical
+    lowercase email. Open to any buyer (non-viewer)."""
+    _require_profile(current_user, NON_VIEWER)
+
+    email = (data.supplier_owner or "").strip().lower()
+    if "@" not in email or "." not in email.split("@")[-1]:
+        raise HTTPException(status_code=422, detail="A valid owner email is required.")
+
+    relation = await db.get(SupplierSiteRelation, relation_id)
+    if not relation:
+        raise AppException(f"Relation {relation_id} not found", status_code=404)
+
+    relation.supplier_owner = email
+    actor = _resolve_actor(current_user)
+    if actor and hasattr(relation, "updated_by"):
+        relation.updated_by = actor
+    await db.commit()
+    return {
+        "status": "success",
+        "data": {"id_relation": relation_id, "supplier_owner": relation.supplier_owner},
     }
 
 

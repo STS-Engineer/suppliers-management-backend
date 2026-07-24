@@ -1724,6 +1724,26 @@ class PurchasingValueService:
             return True
         return False
 
+    @staticmethod
+    def _budget_anchor_date(opp):
+        """Budget-year anchor. Same idea as compute_savings_start_date but the
+        Phase-2 execution_start_date ranks just BELOW real_start_date and ABOVE
+        planned_start_date, so an opp whose execution has started is budgeted from
+        that year — until the real deployment start (Phase 3) is known, which then
+        takes over and can move the opp to its true year.
+
+        Priority: real_start_date → execution_start_date → planned_start_date → estimate.
+
+        NOTE: this anchor is used ONLY for budget-year placement. The monthly savings
+        profile and the KPIs keep compute_savings_start_date (real/planned) as their
+        anchor — execution_start must not shift the savings curve, only the budget FY."""
+        if getattr(opp, "real_start_date", None) is not None:
+            return opp.real_start_date
+        if getattr(opp, "execution_start_date", None) is not None:
+            return opp.execution_start_date
+        # Falls back to planned_start_date → study-based estimate.
+        return compute_savings_start_date(opp)
+
     async def _closed_fiscal_years(self) -> set[int]:
         """Return the set of fiscal years that have been officially closed."""
         from app.db.models import BudgetYearClosure
@@ -1790,7 +1810,9 @@ class PurchasingValueService:
             return
 
         duration = int(opp.duration_months or 0)
-        anchor = compute_savings_start_date(opp)
+        # Budget-year anchor: execution_start (Phase 2) counts here, unlike the
+        # savings-profile anchor. See _budget_anchor_date.
+        anchor = self._budget_anchor_date(opp)
         # Budget the INCREMENTAL year-over-year price drop ("saving à budgéter"), not the
         # full run-rate saving reconducted every year (Olivier, call 2026-07-10). A flat
         # price collapses the whole budget onto year N; a falling price adds each year's
@@ -1873,17 +1895,26 @@ class PurchasingValueService:
                 self.db.add(new_row)
                 status_by_fy[fy] = default_status
 
-        # Stale rows (duration shrank / dates cleared) — drop only if not locked.
-        # A director-committed row (status_locked_at set) must never be silently
-        # deleted OR mutated — its applicable_amount is a frozen commitment, so
-        # leave it exactly as-is rather than zeroing it out; a stale locked row
-        # is a signal for Finance to review, not a value the sync should touch.
+        # Stale rows (duration shrank / dates cleared / the anchor moved the opp to a
+        # different year).
         for fy, row in existing.items():
-            if (
-                fy not in seen
-                and row.status_locked_at is None
-                and fy not in closed_fys
-            ):
+            if fy in seen:
+                continue
+            if fy in closed_fys:
+                # A closed year is frozen and its rows are never deleted. But when the
+                # opportunity's savings have moved OUT of this year (e.g. the real
+                # deployment start revealed a later year than the execution/planned
+                # start it was budgeted under), an ADDITIONAL (post-closure) row no
+                # longer applies here — exclude it by marking it "Not considered"
+                # (budget_status "Opportunity"). This intentionally overrides a prior
+                # Finance "Accepted" (locked) decision on the additional row, since the
+                # opportunity is no longer in this fiscal year. A BASELINE row is the
+                # frozen historical commitment and is NEVER touched.
+                if row.is_additional and row.budget_status != "Opportunity":
+                    row.budget_status = "Opportunity"
+                continue
+            # Open year: drop the stale row unless it's a locked commitment.
+            if row.status_locked_at is None:
                 await self.db.delete(row)
 
         await self.db.flush()
