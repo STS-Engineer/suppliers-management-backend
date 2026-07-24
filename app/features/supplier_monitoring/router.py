@@ -2,7 +2,7 @@
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.shared.dependencies.db import get_db
@@ -23,9 +23,14 @@ async def get_monitoring_overview(
 ):
     """Per-check counts + drill-down list of supplier units with missing data.
 
-    Read-only — available to every authenticated role (including viewers /
-    directors) since it only surfaces existing data-completeness gaps.
+    Read-only, but hidden from the viewer role (monitoring dashboard is reserved
+    for buyers / managers).
     """
+    if current_user.get("access_profile") == "viewer":
+        raise HTTPException(
+            status_code=403,
+            detail="Viewer role cannot access the monitoring dashboard.",
+        )
     service = SupplierMonitoringService(db)
     data = await service.get_overview(
         country=country,

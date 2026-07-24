@@ -2155,9 +2155,10 @@ class OpportunityActionPlan(Base):
     __tablename__ = "opportunity_action_plan"
 
     action_plan_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    opportunity_id: Mapped[int] = mapped_column(
+    # Optional: an action plan may be "general" (not attached to any opportunity).
+    opportunity_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("opportunity.opportunity_id", ondelete="CASCADE"),
-        nullable=False,
+        nullable=True,
         index=True,
     )
     phase_status: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
@@ -2173,7 +2174,7 @@ class OpportunityActionPlan(Base):
     updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     updated_by: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
 
-    opportunity: Mapped["Opportunity"] = relationship(
+    opportunity: Mapped[Optional["Opportunity"]] = relationship(
         "Opportunity", back_populates="action_plans"
     )
 

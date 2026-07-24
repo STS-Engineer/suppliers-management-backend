@@ -201,7 +201,9 @@ async def list_pending_relation_reviews(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
-    """List all relations in pending_review status — visible to all authenticated users."""
+    """List all relations in pending_review status — vp_conversion only
+    (the only role that can approve/reject them)."""
+    _require_profile(current_user, ["vp_conversion"])
     rows = (await db.execute(
         select(SupplierSiteRelation, SupplierUnit, SupplierGroup, AvocarbonSite)
         .join(SupplierUnit, SupplierUnit.id_supplier_unit == SupplierSiteRelation.id_supplier_unit)

@@ -3428,13 +3428,58 @@ class PurchasingValueService:
         }
         action.setdefault("history", []).append(entry)
 
-    async def create_action_plan(self, opportunity_id: int, payload, user_email: str):
+    @staticmethod
+    def _name_from_email(email: Optional[str]) -> Optional[str]:
+        """Derive a display name from a firstname.lastname@domain email.
+        The name is always the single source of truth derived here — never the
+        client-supplied value — so it stays consistent everywhere."""
+        if not email:
+            return None
+        local = email.split("@")[0].strip()
+        if not local:
+            return None
+        parts = [p for p in local.replace("_", ".").split(".") if p]
+        if not parts:
+            return None
+        return " ".join(w[:1].upper() + w[1:] for w in parts)
+
+    @classmethod
+    def _apply_derived_names(cls, plan_data: dict) -> None:
+        """Overwrite every `responsable` in a plan payload with the name derived
+        from its `email_responsable` (plan level + all subjects/actions, recursively)."""
+        def fix(node: dict) -> None:
+            name = cls._name_from_email(node.get("email_responsable"))
+            if name:
+                node["responsable"] = name
+            elif node.get("email_responsable") is None:
+                pass  # no email at this level → leave any existing value untouched
+
+        def walk_sujet(s: dict) -> None:
+            fix(s)
+            for a in s.get("actions", []):
+                fix(a)
+                for sa in a.get("sous_actions", []):
+                    fix(sa)
+            for ss in s.get("sous_sujets", []):
+                walk_sujet(ss)
+
+        fix(plan_data)
+        for s in plan_data.get("sujets", []):
+            walk_sujet(s)
+
+    async def create_action_plan(self, payload, user_email: str, opportunity_id: Optional[int] = None):
         from app.db.models import OpportunityActionPlan
 
-        # Verify opportunity exists
-        await self.get_opportunity(opportunity_id)
+        # Verify opportunity exists (skipped for a general / standalone plan)
+        if opportunity_id is not None:
+            await self.get_opportunity(opportunity_id)
 
-        plan_code = payload.plan_code or f"SM-OPP-{opportunity_id}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+        if payload.plan_code:
+            plan_code = payload.plan_code
+        elif opportunity_id is not None:
+            plan_code = f"SM-OPP-{opportunity_id}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+        else:
+            plan_code = f"SM-GEN-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
 
         def _strip_none(obj):
             if isinstance(obj, dict):
@@ -3457,6 +3502,8 @@ class PurchasingValueService:
             "sujets": [s.model_dump(mode="json") for s in payload.sujets],
         })
         self._validate_closed_actions(plan_data["sujets"])
+        # Names are always derived from emails — never trust the client value.
+        self._apply_derived_names(plan_data)
 
         # External push disabled — stored locally, sync via POST .../sync when ready.
         # TODO: re-enable once ACTION_PLAN_DATABASE_URL is configured on Azure.
@@ -3473,6 +3520,70 @@ class PurchasingValueService:
             plan_data=plan_data,
             external_push_status=push_status,
             external_push_error=push_error,
+            created_at=now,
+            created_by=user_email,
+            updated_at=now,
+            updated_by=user_email,
+        )
+        self.db.add(plan)
+        await self.db.flush()
+        return plan
+
+    async def create_quick_action(self, payload, user_email: str, opportunity_id: Optional[int] = None):
+        """Create a single action wrapped in a minimal one-subject plan.
+
+        Backs the "quick add" form on the Action Plans dashboard. Reuses the same
+        storage path as create_action_plan so the flatten/status/reminder logic
+        works unchanged."""
+        from app.db.models import OpportunityActionPlan
+
+        if opportunity_id is not None:
+            await self.get_opportunity(opportunity_id)
+
+        prefix = f"SM-OPP-{opportunity_id}" if opportunity_id is not None else "SM-GEN"
+        plan_code = f"{prefix}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+        plan_title = payload.plan_title or "General actions"
+
+        # Name is always derived from the email — the client value is ignored.
+        resp_name = self._name_from_email(payload.email_responsable)
+
+        action = {
+            "titre": payload.titre,
+            "status": "open",
+        }
+        if payload.description:
+            action["description"] = payload.description
+        if payload.email_responsable:
+            action["email_responsable"] = payload.email_responsable
+        if resp_name:
+            action["responsable"] = resp_name
+        if payload.due_date:
+            action["due_date"] = payload.due_date.isoformat()
+
+        plan_data = {
+            "version": "2.0",
+            "plan_code": plan_code,
+            "plan_title": plan_title,
+            "inserted_by": user_email,
+            "responsable": resp_name,
+            "email_responsable": payload.email_responsable,
+            "sujets": [
+                {
+                    "titre": plan_title,
+                    "actions": [action],
+                }
+            ],
+        }
+        plan_data = {k: v for k, v in plan_data.items() if v is not None}
+
+        now = datetime.utcnow()
+        plan = OpportunityActionPlan(
+            opportunity_id=opportunity_id,
+            plan_title=plan_title,
+            plan_code=plan_code,
+            plan_data=plan_data,
+            external_push_status="pending",
+            external_push_error=None,
             created_at=now,
             created_by=user_email,
             updated_at=now,
@@ -3583,13 +3694,18 @@ class PurchasingValueService:
         """
         from app.db.models import OpportunityActionPlan
 
+        # A viewer may only see actions they are responsible for — force the filter
+        # to their own email regardless of any client-supplied value.
+        if viewer_role == "viewer":
+            responsible_email = (viewer_email or "").strip().lower() or "__no_viewer_email__"
+
         q = select(OpportunityActionPlan)
         if opportunity_id:
             q = q.where(OpportunityActionPlan.opportunity_id == opportunity_id)
         result = await self.db.execute(q)
         plans = list(result.scalars().all())
 
-        opp_ids = {p.opportunity_id for p in plans}
+        opp_ids = {p.opportunity_id for p in plans if p.opportunity_id is not None}
         if opp_ids:
             opps_result = await self.db.execute(
                 select(Opportunity).where(
@@ -3605,8 +3721,13 @@ class PurchasingValueService:
         for plan in plans:
             if not plan.plan_data:
                 continue
-            opp = opp_by_id.get(plan.opportunity_id)
-            opp_name = (opp.opportunity_name or f"Opp #{plan.opportunity_id}") if opp else f"Opp #{plan.opportunity_id}"
+            opp = opp_by_id.get(plan.opportunity_id) if plan.opportunity_id is not None else None
+            if plan.opportunity_id is None:
+                opp_name = "General (no opportunity)"
+            elif opp:
+                opp_name = opp.opportunity_name or f"Opp #{plan.opportunity_id}"
+            else:
+                opp_name = f"Opp #{plan.opportunity_id}"
             plan_resp_email = plan.plan_data.get("email_responsable")
             plan_resp_name = plan.plan_data.get("responsable")
 
@@ -3614,7 +3735,7 @@ class PurchasingValueService:
                 for a_idx, action in enumerate(sujet.get("actions", [])):
                     act_email = action.get("email_responsable") or plan_resp_email
                     act_name = action.get("responsable") or plan_resp_name
-                    if responsible_email and act_email != responsible_email:
+                    if responsible_email and (act_email or "").strip().lower() != responsible_email.strip().lower():
                         continue
                     if status and action.get("status") != status:
                         continue
@@ -3870,6 +3991,127 @@ class PurchasingValueService:
         plan.updated_by = user_email
         await self.db.flush()
         return actions[action_idx]
+
+    async def update_action_item(
+        self,
+        action_plan_id: int,
+        sujet_idx: int,
+        action_idx: int,
+        payload,
+        user_email: str,
+        actor_role: Optional[str] = None,
+    ) -> dict:
+        """Edit a single action's editable fields (title, description, due date,
+        responsible). An action must always keep a responsible, so clearing the
+        email is rejected. A responsible change is recorded in the audit trail."""
+        plan = await self.get_action_plan(action_plan_id)
+        data = dict(plan.plan_data or {})
+        sujets = data.get("sujets", [])
+
+        if sujet_idx >= len(sujets):
+            raise AppException(404, "Subject index out of range.", "SUJET_NOT_FOUND")
+        actions = sujets[sujet_idx].get("actions", [])
+        if action_idx >= len(actions):
+            raise AppException(404, "Action index out of range.", "ACTION_NOT_FOUND")
+
+        # Only the current responsible / a manager / a related owner may edit.
+        await self._assert_action_can_manage(plan, actions[action_idx], user_email, actor_role)
+
+        action = actions[action_idx]
+        plan_resp_email = (plan.plan_data or {}).get("email_responsable")
+        changed_fields: list[str] = []
+
+        # Responsible change (with dedicated audit entry). The name is always
+        # derived from the email — any client-supplied `responsable` is ignored.
+        if payload.email_responsable is not None:
+            new_email = payload.email_responsable.strip()
+            if not new_email:
+                raise AppException(422, "A responsible email is required.", "RESPONSIBLE_REQUIRED")
+            previous = action.get("email_responsable") or plan_resp_email
+            if new_email != (previous or ""):
+                self._log_action_event(
+                    action, "responsible_changed", user_email,
+                    from_email=previous, to_email=new_email,
+                )
+            action["email_responsable"] = new_email
+            derived = self._name_from_email(new_email)
+            if derived:
+                action["responsable"] = derived
+            else:
+                action.pop("responsable", None)
+
+        # Other editable fields.
+        if payload.titre is not None:
+            titre = payload.titre.strip()
+            if not titre:
+                raise AppException(422, "Action title cannot be empty.", "TITLE_REQUIRED")
+            if titre != action.get("titre"):
+                action["titre"] = titre
+                changed_fields.append("titre")
+        if payload.description is not None:
+            new_desc = payload.description.strip() or None
+            if new_desc != action.get("description"):
+                if new_desc is None:
+                    action.pop("description", None)
+                else:
+                    action["description"] = new_desc
+                changed_fields.append("description")
+        if payload.due_date is not None:
+            new_due = payload.due_date.isoformat() if payload.due_date else None
+            if new_due != action.get("due_date"):
+                if new_due is None:
+                    action.pop("due_date", None)
+                else:
+                    action["due_date"] = new_due
+                changed_fields.append("due_date")
+
+        if changed_fields:
+            self._log_action_event(action, "action_edited", user_email, fields=changed_fields)
+
+        plan.plan_data = data
+        flag_modified(plan, "plan_data")
+        plan.updated_at = datetime.utcnow()
+        plan.updated_by = user_email
+        await self.db.flush()
+        return action
+
+    async def delete_action_item(
+        self,
+        action_plan_id: int,
+        sujet_idx: int,
+        action_idx: int,
+        user_email: str,
+        actor_role: Optional[str] = None,
+    ) -> dict:
+        """Remove a single action from a plan's JSONB. If the plan has no actions
+        left across all subjects afterwards, the whole plan is deleted."""
+        plan = await self.get_action_plan(action_plan_id)
+        data = dict(plan.plan_data or {})
+        sujets = data.get("sujets", [])
+
+        if sujet_idx >= len(sujets):
+            raise AppException(404, "Subject index out of range.", "SUJET_NOT_FOUND")
+        actions = sujets[sujet_idx].get("actions", [])
+        if action_idx >= len(actions):
+            raise AppException(404, "Action index out of range.", "ACTION_NOT_FOUND")
+
+        # Only the responsible / a manager / a related owner may delete an action.
+        await self._assert_action_can_manage(plan, actions[action_idx], user_email, actor_role)
+
+        actions.pop(action_idx)
+
+        remaining = sum(len(s.get("actions", [])) for s in sujets)
+        if remaining == 0:
+            await self.db.delete(plan)
+            await self.db.flush()
+            return {"plan_deleted": True, "action_plan_id": action_plan_id}
+
+        plan.plan_data = data
+        flag_modified(plan, "plan_data")
+        plan.updated_at = datetime.utcnow()
+        plan.updated_by = user_email
+        await self.db.flush()
+        return {"plan_deleted": False, "action_plan_id": action_plan_id}
 
     async def send_action_item_reminder(
         self,

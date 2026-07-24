@@ -23,6 +23,12 @@ router = APIRouter(prefix="/evaluations", tags=["evaluations"])
 _PRIVILEGED = {"vp_conversion", "purchasing_director"}
 
 
+def _block_viewer(current_user: dict) -> None:
+    """Evaluation scorecards are hidden from the viewer role."""
+    if current_user.get("access_profile") == "viewer":
+        raise AppException(403, "Viewer role cannot access evaluations.", "FORBIDDEN")
+
+
 @router.get("/template/csv")
 async def download_csv_template():
     """Download the blank CSV template (no auth required — contains no business data)."""
@@ -57,6 +63,7 @@ async def download_prefilled_template(
     - filter=due  → only OVERDUE, DUE_SOON, NEVER_EVALUATED, sorted by urgency,
                     with extra context columns (urgency, frequency, last/next date, days overdue)
     """
+    _block_viewer(current_user)
     due_only = filter.lower() == "due"
     content = await generate_prefilled_template(db, due_only=due_only)
     filename = "evaluation_due_only.xlsx" if due_only else "evaluation_prefilled.xlsx"
@@ -87,6 +94,7 @@ async def batch_upload_evaluations(
     - Updates the relation and creates a status history entry if status changed
     - Computes next_evaluation_date based on frequency
     """
+    _block_viewer(current_user)
     content = await file.read()
     filename = (file.filename or "").lower()
 
@@ -137,6 +145,7 @@ async def get_due_evaluations(
     fire evaluation notifications in the background (first visit of the day only —
     the DB lock in run_evaluation_notifications prevents duplicates).
     """
+    _block_viewer(current_user)
     items = await get_evaluations_due(db)
 
     summary = {
@@ -174,6 +183,7 @@ async def trigger_evaluation_notifications(
     Manually send evaluation-due notifications to vp_conversion and purchasing_director.
     Safe to call multiple times — DB lock prevents duplicate sends on the same day.
     """
+    _block_viewer(current_user)
     result = await run_evaluation_notifications(db, source="manual")
 
     if result.get("skipped"):

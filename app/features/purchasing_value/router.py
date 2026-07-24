@@ -41,6 +41,9 @@ async def get_kpis(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
+    # KPI dashboard is hidden from viewers.
+    _require(current_user, _NON_VIEWER)
+
     def _parse_ints(raw: Optional[str]) -> list[int]:
         result = []
         for token in (raw or "").split(","):
@@ -900,6 +903,8 @@ async def get_recovery_plans(
     """Return all active financial lines that have a recovery plan (any status).
     Includes full opportunity + plant context and computed progress fields.
     """
+    # Recovery page is hidden from viewers.
+    _require(current_user, _NON_VIEWER)
     today = date.today()
     result = await db.execute(
         select(FinancialLine)
@@ -1050,6 +1055,8 @@ async def list_budget_years(
 ):
     """Opportunities with a budget record in the given fiscal year, for the
     budgeting page (year filter)."""
+    # Budgeting page is hidden from viewers.
+    _require(current_user, _NON_VIEWER)
     svc = PurchasingValueService(db)
     items = await svc.list_budget_years(fiscal_year)
     closure = await svc.get_budget_year_closure(fiscal_year)
@@ -1267,7 +1274,7 @@ async def create_action_plan(
     )
     try:
         svc = PurchasingValueService(db)
-        plan = await svc.create_action_plan(opportunity_id, payload, user_email)
+        plan = await svc.create_action_plan(payload, user_email, opportunity_id)
         await db.commit()
         from app.features.purchasing_value.schemas import ActionPlanResponse
         return {"status": "success", "data": ActionPlanResponse.model_validate(plan).model_dump()}
@@ -1381,6 +1388,137 @@ async def list_all_action_items(
     return {"status": "success", "data": items}
 
 
+@router.post("/action-plans", response_model=dict)
+async def create_standalone_action_plan(
+    payload: schemas.ActionPlanCreateRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Create a full action plan NOT attached to any opportunity (general plan)."""
+    _require(current_user, _NON_VIEWER)
+    user_email = (
+        current_user.get("email")
+        or current_user.get("upn")
+        or current_user.get("sub")
+        or "unknown"
+    )
+    try:
+        svc = PurchasingValueService(db)
+        plan = await svc.create_action_plan(payload, user_email, opportunity_id=None)
+        await db.commit()
+        from app.features.purchasing_value.schemas import ActionPlanResponse
+        return {"status": "success", "data": ActionPlanResponse.model_validate(plan).model_dump()}
+    except AppException:
+        await db.rollback()
+        raise
+    except Exception:
+        await db.rollback()
+        raise
+
+
+@router.post("/action-plans/quick", response_model=dict)
+async def create_quick_action(
+    payload: schemas.QuickActionCreateRequest,
+    opportunity_id: Optional[int] = Query(None, description="Optional opportunity to attach the action to"),
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Quick-add a single action. Attaches to an opportunity only if opportunity_id
+    is supplied; otherwise it becomes a general action."""
+    _require(current_user, _NON_VIEWER)
+    user_email = (
+        current_user.get("email")
+        or current_user.get("upn")
+        or current_user.get("sub")
+        or "unknown"
+    )
+    try:
+        svc = PurchasingValueService(db)
+        plan = await svc.create_quick_action(payload, user_email, opportunity_id)
+        await db.commit()
+        from app.features.purchasing_value.schemas import ActionPlanResponse
+        return {"status": "success", "data": ActionPlanResponse.model_validate(plan).model_dump()}
+    except AppException:
+        await db.rollback()
+        raise
+    except Exception:
+        await db.rollback()
+        raise
+
+
+@router.post("/action-plans/{action_plan_id}/evidence", response_model=dict)
+async def upload_action_evidence_standalone(
+    action_plan_id: int,
+    sujet_idx: int = Query(..., description="Index of the subject in plan_data.sujets"),
+    action_idx: int = Query(..., description="Index of the action within that subject"),
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Upload evidence for an action addressed by action_plan_id only (used for
+    general action plans that have no opportunity in the URL path)."""
+    _require(current_user, _NON_VIEWER)
+    user_email = (
+        current_user.get("email")
+        or current_user.get("upn")
+        or current_user.get("sub")
+        or "unknown"
+    )
+    try:
+        svc = PurchasingValueService(db)
+        result = await svc.upload_action_evidence(
+            action_plan_id,
+            sujet_idx,
+            action_idx,
+            file,
+            user_email,
+        )
+        await db.commit()
+        return {"status": "success", "data": result}
+    except AppException:
+        await db.rollback()
+        raise
+    except Exception:
+        await db.rollback()
+        raise
+
+
+@router.delete("/action-plans/{action_plan_id}/evidence", response_model=dict)
+async def delete_action_evidence_standalone(
+    action_plan_id: int,
+    sujet_idx: int = Query(..., description="Index of the subject in plan_data.sujets"),
+    action_idx: int = Query(..., description="Index of the action within that subject"),
+    blob_name: str = Query(..., description="Blob storage key of the attachment to delete"),
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    _require(current_user, _NON_VIEWER)
+    user_email = (
+        current_user.get("email")
+        or current_user.get("upn")
+        or current_user.get("sub")
+        or "unknown"
+    )
+    try:
+        svc = PurchasingValueService(db)
+        await svc.delete_action_evidence(
+            action_plan_id,
+            sujet_idx,
+            action_idx,
+            blob_name,
+            user_email,
+            actor_role=current_user.get("access_profile"),
+        )
+        await db.commit()
+        return {"status": "success", "message": "Attachment deleted"}
+    except AppException:
+        await db.rollback()
+        raise
+    except Exception:
+        await db.rollback()
+        raise
+
+
 @router.post(
     "/opportunities/{opportunity_id}/action-plans/{action_plan_id}/evidence",
     response_model=dict,
@@ -1483,6 +1621,73 @@ async def update_action_item_status(
         svc = PurchasingValueService(db)
         result = await svc.update_action_item_status(
             action_plan_id, sujet_idx, action_idx, status, implementation_date, user_email,
+            actor_role=current_user.get("access_profile"),
+        )
+        await db.commit()
+        return {"status": "success", "data": result}
+    except AppException:
+        await db.rollback()
+        raise
+    except Exception:
+        await db.rollback()
+        raise
+
+
+@router.patch("/action-plans/{action_plan_id}/item", response_model=dict)
+async def update_action_item(
+    action_plan_id: int,
+    payload: schemas.UpdateActionRequest,
+    sujet_idx: int = Query(..., description="Index of the subject in plan_data.sujets"),
+    action_idx: int = Query(..., description="Index of the action within that subject"),
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Edit a single action (title, description, due date, responsible) inside a
+    plan's JSONB. A responsible change is recorded in the audit trail."""
+    _require(current_user, _NON_VIEWER)
+    user_email = (
+        current_user.get("email")
+        or current_user.get("upn")
+        or current_user.get("sub")
+        or "unknown"
+    )
+    try:
+        svc = PurchasingValueService(db)
+        result = await svc.update_action_item(
+            action_plan_id, sujet_idx, action_idx, payload, user_email,
+            actor_role=current_user.get("access_profile"),
+        )
+        await db.commit()
+        return {"status": "success", "data": result}
+    except AppException:
+        await db.rollback()
+        raise
+    except Exception:
+        await db.rollback()
+        raise
+
+
+@router.delete("/action-plans/{action_plan_id}/item", response_model=dict)
+async def delete_action_item(
+    action_plan_id: int,
+    sujet_idx: int = Query(..., description="Index of the subject in plan_data.sujets"),
+    action_idx: int = Query(..., description="Index of the action within that subject"),
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Delete a single action from a plan's JSONB. Deletes the whole plan if it
+    has no actions left afterwards."""
+    _require(current_user, _NON_VIEWER)
+    user_email = (
+        current_user.get("email")
+        or current_user.get("upn")
+        or current_user.get("sub")
+        or "unknown"
+    )
+    try:
+        svc = PurchasingValueService(db)
+        result = await svc.delete_action_item(
+            action_plan_id, sujet_idx, action_idx, user_email,
             actor_role=current_user.get("access_profile"),
         )
         await db.commit()

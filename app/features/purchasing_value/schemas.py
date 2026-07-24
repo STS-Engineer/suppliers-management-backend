@@ -1386,9 +1386,30 @@ class ActionPlanUpdateRequest(BaseModel):
     sujets: Optional[List[SujetNodeV2]] = None
 
 
+class UpdateActionRequest(BaseModel):
+    """Edit a single action's fields. All optional — only provided fields change.
+    Clearing the responsible email is rejected (an action must keep a responsible).
+    The responsible name is derived from the email server-side — not accepted here."""
+    titre: Optional[str] = None
+    description: Optional[str] = None
+    due_date: Optional[date] = None
+    email_responsable: Optional[str] = None
+
+
+class QuickActionCreateRequest(BaseModel):
+    """Lightweight single-action create. Builds a minimal one-subject / one-action
+    plan behind the scenes. opportunity_id is optional (general action).
+    The responsible name is derived from the email server-side — not accepted here."""
+    titre: str = Field(..., min_length=1)
+    description: Optional[str] = None
+    email_responsable: Optional[str] = None
+    due_date: Optional[date] = None
+    plan_title: Optional[str] = None
+
+
 class ActionPlanResponse(BaseModel):
     action_plan_id: int
-    opportunity_id: int
+    opportunity_id: Optional[int] = None
     phase_status: Optional[str] = None
     plan_title: Optional[str] = None
     plan_code: Optional[str] = None
