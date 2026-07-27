@@ -8,7 +8,7 @@ import io
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import AppException
@@ -21,6 +21,14 @@ from app.db.models import (
     SupplierSiteRelation,
     SupplierStatusHistory,
     SupplierUnit,
+)
+from app.shared.development_plan_rules import (
+    TERMINAL_PLAN_STATUSES,
+    grade_alert_email,
+    plan_due_date,
+    plan_internal_note,
+    plan_title,
+    requires_development_plan,
 )
 from app.shared.utils.email.email_service import send_email
 
@@ -803,86 +811,65 @@ async def ingest_batch(
         if row.comments:
             relation.evaluation_comments = row.comments
 
-        # Auto-create a development plan when grade is C or D,
-        # unless one is already open/required for this relation.
+        # Auto-create a development plan when the operational grade is C or D
+        # (procedure C2Pr3 §8), unless a non-terminal plan already exists for
+        # this relation. Trigger, due dates and buyer alert live in the shared
+        # development_plan_rules module so this path and the relation
+        # re-evaluation path stay aligned.
         dev_plan_created = False
-        if row.grade in ("C", "D") and not dry_run:
-            existing_plan_stmt = select(SupplierDevelopmentPlan).where(
-                SupplierDevelopmentPlan.id_relation == relation.id_relation,
-                SupplierDevelopmentPlan.plan_status.in_(
-                    ["Must be send", "Request sent", "Received", "Under Review"]
-                ),
-                SupplierDevelopmentPlan.is_deleted.is_(False),
+        if requires_development_plan(row.grade) and not dry_run:
+            existing_plan_stmt = (
+                select(SupplierDevelopmentPlan.id_development_plan)
+                .where(
+                    SupplierDevelopmentPlan.id_relation == relation.id_relation,
+                    SupplierDevelopmentPlan.is_deleted.is_(False),
+                    func.lower(
+                        func.coalesce(SupplierDevelopmentPlan.plan_status, "")
+                    ).notin_(tuple(TERMINAL_PLAN_STATUSES)),
+                )
+                .limit(1)
             )
-            existing_plan = (await db.execute(existing_plan_stmt)).scalar_one_or_none()
+            existing_plan = (await db.execute(existing_plan_stmt)).first()
 
             if not existing_plan:
-                # Grade D → exit D within 3 months; Grade C → exit C within 6 months
-                due_months = 3 if row.grade == "D" else 6
-                plan_due = row.evaluation_date + timedelta(days=due_months * 30)
-
-                if row.grade == "D":
-                    title = "Improvement Plan — Grade D (exit within 3 months)"
-                    internal_note = (
-                        "Supplier must submit an improvement plan targeting Grade B "
-                        "within 6 months and exit Grade D within 3 months."
-                    )
-                else:
-                    title = "Improvement Plan — Grade C (exit within 6 months)"
-                    internal_note = (
-                        "Supplier must submit an improvement plan immediately "
-                        "to exit Grade C within 6 months."
-                    )
+                plan_due = plan_due_date(row.grade, row.evaluation_date)
 
                 dev_plan = SupplierDevelopmentPlan(
                     id_relation=relation.id_relation,
-                    plan_title=title,
+                    plan_title=plan_title(row.grade),
                     plan_status="Must be send",
                     issue_date=row.evaluation_date,
                     due_date=plan_due,
-                    internal_comments=internal_note,
+                    internal_comments=plan_internal_note(row.grade),
                 )
                 db.add(dev_plan)
                 dev_plan_created = True
 
-                # Notify the assigned buyer — a Grade C/D supplier is a supply risk
-                # that requires immediate attention; silent plan creation is not enough.
+                # Notify the assigned internal buyer — a Grade C/D supplier is a
+                # supply risk that requires immediate attention; silent plan
+                # creation is not enough.
                 buyer_email = relation.buyer_owner
                 if buyer_email:
-                    supplier_display = unit.supplier_name if unit else f"Relation #{relation.id_relation}"
-                    site_display = site.site_name if site else f"Site #{relation.id_site}"
-                    grade_label = "D (Exit within 3 months)" if row.grade == "D" else "C (Exit within 6 months)"
+                    supplier_display = (
+                        unit.supplier_name
+                        if unit
+                        else f"Relation #{relation.id_relation}"
+                    )
+                    site_display = (
+                        site.site_name if site else f"Site #{relation.id_site}"
+                    )
+                    subject, body_html = grade_alert_email(
+                        operational_grade=row.grade,
+                        supplier_display=supplier_display,
+                        site_display=site_display,
+                        evaluation_date=row.evaluation_date,
+                        plan_due=plan_due,
+                    )
                     try:
                         await send_email(
-                            subject=f"[Action Required] Grade {row.grade} Supplier — {supplier_display} · {site_display}",
+                            subject=subject,
                             recipients=[buyer_email],
-                            body_html=f"""
-<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
-  <div style="background:#7f1d1d;padding:20px 28px;border-radius:8px 8px 0 0">
-    <h1 style="color:#fff;margin:0;font-size:18px">Supplier Risk Alert — Grade {row.grade}</h1>
-    <p style="color:#fca5a5;margin:4px 0 0;font-size:13px">Avocarbon · Supplier Management</p>
-  </div>
-  <div style="background:#f8fafc;padding:24px 28px;border:1px solid #e2e8f0;border-top:none">
-    <p style="margin:0 0 16px;font-size:14px;color:#1e293b">
-      A development plan has been automatically created for a Grade {row.grade} supplier
-      requiring your immediate attention.
-    </p>
-    <table style="width:100%;border-collapse:collapse;margin-bottom:20px;font-size:13px">
-      <tr style="background:#fee2e2"><td style="padding:8px 12px;font-weight:bold;width:40%">Supplier</td><td style="padding:8px 12px">{supplier_display}</td></tr>
-      <tr><td style="padding:8px 12px;font-weight:bold">Plant</td><td style="padding:8px 12px">{site_display}</td></tr>
-      <tr style="background:#fee2e2"><td style="padding:8px 12px;font-weight:bold">Grade</td><td style="padding:8px 12px;color:#991b1b;font-weight:bold">{grade_label}</td></tr>
-      <tr><td style="padding:8px 12px;font-weight:bold">Evaluation date</td><td style="padding:8px 12px">{row.evaluation_date.isoformat()}</td></tr>
-      <tr style="background:#fee2e2"><td style="padding:8px 12px;font-weight:bold">Plan due date</td><td style="padding:8px 12px;color:#991b1b;font-weight:bold">{plan_due.isoformat()}</td></tr>
-    </table>
-    <p style="margin:0;font-size:13px;color:#475569">
-      Please send the development plan request to the supplier and monitor their response.
-      Review the supplier workspace in Avocarbon Supplier Management for full details.
-    </p>
-  </div>
-  <div style="background:#f1f5f9;padding:12px 28px;border-radius:0 0 8px 8px;border:1px solid #e2e8f0;border-top:none">
-    <p style="color:#94a3b8;font-size:11px;margin:0">Avocarbon Supplier Management Platform — automated alert</p>
-  </div>
-</div>""",
+                            body_html=body_html,
                         )
                     except Exception:
                         pass  # email failure must not roll back the evaluation batch

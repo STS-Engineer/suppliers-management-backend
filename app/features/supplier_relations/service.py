@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Optional
 
@@ -39,6 +39,14 @@ from app.shared.utils.blob_storage import (
     get_recovered_blob_url,
     upload_development_plan_document,
     upload_evaluation_document,
+)
+from app.shared.development_plan_rules import (
+    grade_alert_email,
+    is_active_plan_status,
+    plan_due_date,
+    plan_internal_note as build_plan_internal_note,
+    plan_title as build_plan_title,
+    requires_development_plan,
 )
 from app.shared.utils.email.email_service import send_email
 from app.shared.utils.blob_storage import delete_blob
@@ -3891,17 +3899,20 @@ class SupplierRelationService:
         changed_by: Optional[str],
         reason: Optional[str],
     ) -> Optional[SupplierDevelopmentPlan]:
-        # Trigger only when the supplier's status is "New business on hold" (Red).
-        # This is determined by the full final grade (e.g. C4, D1-D4, A4, B4),
-        # not simply by the operational grade being C or D — grades like C1/C2/C3
-        # map to Orange status and do NOT require a development plan, while A4/B4
-        # map to Red and DO require one.
-        if relation.supplier_status != STATUS_NEW_BUSINESS_ON_HOLD:
+        # Trigger on the operational evaluation letter C or D (procedure
+        # C2Pr3 §8), aligned with the batch-evaluation path via the shared
+        # development_plan_rules module. Grades A/B only *may* propose a plan,
+        # so they never auto-create one — even when the class pushes the
+        # supplier to a Red status (e.g. A4/B4).
+        if not requires_development_plan(operational_grade):
             return None
 
         stmt = (
             select(SupplierDevelopmentPlan)
-            .where(SupplierDevelopmentPlan.id_relation == relation.id_relation)
+            .where(
+                SupplierDevelopmentPlan.id_relation == relation.id_relation,
+                SupplierDevelopmentPlan.is_deleted.is_(False),
+            )
             .order_by(SupplierDevelopmentPlan.id_development_plan.desc())
         )
         result = await self.db.execute(stmt)
@@ -3910,30 +3921,54 @@ class SupplierRelationService:
             (
                 plan
                 for plan in existing_plans
-                if (plan.plan_status or "").strip().lower()
-                not in {"approved", "closed", "cancelled", "rejected"}
+                if is_active_plan_status(plan.plan_status)
             ),
             None,
         )
         if active_plan:
             return active_plan
 
-        relation_code = relation.relation_code or f"REL-{relation.id_relation:06d}"
-        final_grade_label = relation.final_grade or operational_grade or "unknown"
+        plan_due = plan_due_date(operational_grade, evaluation_date)
         plan = SupplierDevelopmentPlan(
             id_relation=relation.id_relation,
-            plan_title=f"Development plan required - {relation_code}",
+            plan_title=build_plan_title(operational_grade),
             plan_status=PLAN_STATUS_MUST_BE_SEND,
             issue_date=evaluation_date,
-            due_date=evaluation_date + timedelta(days=30),
-            internal_comments=reason
-            or (
-                f"Auto-created: evaluation grade {final_grade_label} triggered a development plan."
-            ),
+            due_date=plan_due,
+            internal_comments=reason or build_plan_internal_note(operational_grade),
             updated_by=changed_by or "SYSTEM",
         )
         self.db.add(plan)
         await self.db.flush()
+
+        # Notify the assigned internal buyer, matching the batch path. Email
+        # failures must never roll back the evaluation.
+        buyer_email = (relation.buyer_owner or "").strip()
+        if buyer_email:
+            supplier_display = (
+                relation.relation_code or f"Relation #{relation.id_relation}"
+            )
+            site_display = relation.alias_1 or f"Site #{relation.id_site}"
+            subject, body_html = grade_alert_email(
+                operational_grade=operational_grade,
+                supplier_display=supplier_display,
+                site_display=site_display,
+                evaluation_date=evaluation_date,
+                plan_due=plan_due,
+            )
+            try:
+                await send_email(
+                    subject=subject,
+                    recipients=[buyer_email],
+                    body_html=body_html,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to send Grade %s buyer alert for relation %s",
+                    operational_grade,
+                    relation.id_relation,
+                )
+
         return plan
 
     async def _create_cycle(
