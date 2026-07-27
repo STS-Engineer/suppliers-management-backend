@@ -38,11 +38,14 @@ from app.shared.utils.email.email_service import send_email
 #
 # Green  = Can Quote and Be Awarded
 # Orange = Can Quote but Not be Awarded
-# Red    = New Business on Hold
+# Red    = New business on Hold
 
 STATUS_GREEN = "Can Quote and Be Awarded"
 STATUS_ORANGE = "Can Quote but Not be Awarded"
-STATUS_RED = "New Business on Hold"
+# Canonical casing must match supplier_relations.service.STATUS_NEW_BUSINESS_ON_HOLD
+# ("New business on Hold"); the batch upload persists this value, so a mismatch here
+# breaks exact status comparisons and badge styling elsewhere.
+STATUS_RED = "New business on Hold"
 
 PANEL_ADD = "panel_add"
 PANEL_ADD_EXEC = "panel_add_exec_committee"
@@ -317,7 +320,7 @@ def generate_xlsx_template() -> bytes:
         ("", "", ""),
         ("Status matrix:", "A1/A2/B1/B2 → Green (Can Quote and Be Awarded)", ""),
         ("", "A3/B3/C1/C2/C3 → Orange (Can Quote but Not be Awarded)", ""),
-        ("", "A4/B4/C4/D1/D2/D3/D4 → Red (New Business on Hold)", ""),
+        ("", "A4/B4/C4/D1/D2/D3/D4 → Red (New business on Hold)", ""),
     ]
     for row_data in instructions:
         ws2.append(list(row_data))
