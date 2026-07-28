@@ -1,5 +1,7 @@
 """Supplier relations router."""
 
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -303,6 +305,15 @@ async def patch_relation(
     if data.is_active is not None:
         deactivating = data.is_active is False and (relation.is_active is True)
         relation.is_active = data.is_active
+
+        # Keep inactivated_at in lockstep with is_active. The unit/group cascade
+        # already stamps it, and several dashboards (evaluation scorecards,
+        # supplier monitoring) key their population off this column — leaving it
+        # NULL made a relation deactivated here still show up there.
+        if data.is_active is False:
+            relation.inactivated_at = relation.inactivated_at or datetime.utcnow()
+        else:
+            relation.inactivated_at = None
 
         if deactivating:
             # Check for open development plans

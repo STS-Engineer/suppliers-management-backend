@@ -119,6 +119,7 @@ class SupplierMonitoringService:
                 .join(AvocarbonSite, AvocarbonSite.id_site == SupplierSiteRelation.id_site)
                 .where(SupplierSiteRelation.id_supplier_unit.in_(unit_ids))
                 .where(SupplierSiteRelation.is_deleted.is_(False))
+                .where(SupplierSiteRelation.is_active.is_(True))
                 .where(SupplierSiteRelation.inactivated_at.is_(None))
                 .where(SupplierSiteRelation.validation_status == "approved")
             )

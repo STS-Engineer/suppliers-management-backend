@@ -736,6 +736,9 @@ class SupplierSiteRelationResponse(BaseModel):
     created_at: Optional[datetime] = None
     last_evaluation_date: Optional[datetime] = None
     next_evaluation_date: Optional[datetime] = None
+    # Without is_active the UI's `relation.is_active ?? true` always read true,
+    # so the Activate/Deactivate toggle never flipped after a deactivation.
+    is_active: bool = True
     inactivated_at: Optional[datetime] = None
     last_status_change: Optional[datetime] = None
     evaluation_comments: Optional[str] = None

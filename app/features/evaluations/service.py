@@ -172,6 +172,10 @@ async def get_evaluations_due(db: AsyncSession) -> List[Dict[str, Any]]:
         )
         .join(AvocarbonSite, AvocarbonSite.id_site == SupplierSiteRelation.id_site)
         .where(SupplierSiteRelation.is_deleted.is_(False))
+        # is_active is the authoritative flag; inactivated_at is kept in lockstep
+        # with it. Both are checked so a relation deactivated by either path
+        # (relation PATCH or unit/group cascade) drops out of the scorecards.
+        .where(SupplierSiteRelation.is_active.is_(True))
         .where(SupplierSiteRelation.inactivated_at.is_(None))
         .where(SupplierSiteRelation.validation_status == "approved")
     )
@@ -357,6 +361,7 @@ async def generate_prefilled_template(db: AsyncSession, due_only: bool = False) 
         )
         .join(AvocarbonSite, AvocarbonSite.id_site == SupplierSiteRelation.id_site)
         .where(SupplierSiteRelation.is_deleted.is_(False))
+        .where(SupplierSiteRelation.is_active.is_(True))
         .where(SupplierSiteRelation.inactivated_at.is_(None))
         .where(SupplierSiteRelation.validation_status == "approved")
         .order_by(AvocarbonSite.site_name, SupplierUnit.supplier_name)
