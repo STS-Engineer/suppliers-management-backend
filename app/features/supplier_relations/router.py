@@ -9,6 +9,7 @@ from app.features.supplier_relations import schemas
 from app.features.supplier_relations.service import SupplierRelationService
 from app.shared.dependencies.auth import get_current_user
 from app.shared.dependencies.db import get_db
+from app.shared.utils.emails import normalize_email
 from app.features.auth.models import AccessIdentity
 from app.features.notifications.service import NotificationService
 
@@ -346,7 +347,7 @@ async def update_relation_owner(
     lowercase email. Open to any buyer (non-viewer)."""
     _require_profile(current_user, NON_VIEWER)
 
-    email = (data.supplier_owner or "").strip().lower()
+    email = normalize_email(data.supplier_owner) or ""
     if "@" not in email or "." not in email.split("@")[-1]:
         raise HTTPException(status_code=422, detail="A valid owner email is required.")
 
