@@ -716,6 +716,18 @@ class SupplierService:
         if not unit:
             raise AppException(f"Supplier unit with ID {unit_id} not found", status_code=404)
 
+        if is_active and not unit.is_active:
+            # A unit may only be reactivated once its group is live again —
+            # otherwise it would sit active under a deactivated group.
+            group = await self.repo.find_group_by_id(unit.id_group)
+            if group and not group.is_active:
+                raise AppException(
+                    f"Cannot activate '{unit.supplier_name}': its supplier group "
+                    f"'{group.nom}' is deactivated. Reactivate the group first — "
+                    f"that reactivates its units automatically.",
+                    status_code=400,
+                )
+
         previous_snapshot = self._unit_audit_snapshot(unit)
         now = datetime.utcnow()
         unit.is_active = is_active

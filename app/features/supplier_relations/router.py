@@ -304,6 +304,37 @@ async def patch_relation(
 
     if data.is_active is not None:
         deactivating = data.is_active is False and (relation.is_active is True)
+
+        if data.is_active is True and relation.is_active is not True:
+            # A relation may only be reactivated once its parents are live again.
+            # Both the unit and the group cascade deactivate their relations, so
+            # without this check the relation would come back as an active link
+            # hanging under a deactivated supplier.
+            parent_row = (
+                await db.execute(
+                    select(SupplierUnit, SupplierGroup)
+                    .join(SupplierGroup, SupplierGroup.id_group == SupplierUnit.id_group)
+                    .where(SupplierUnit.id_supplier_unit == relation.id_supplier_unit)
+                )
+            ).first()
+            if parent_row:
+                parent_unit, parent_group = parent_row
+                if not parent_group.is_active:
+                    raise AppException(
+                        f"Cannot activate this relation: its supplier group "
+                        f"'{parent_group.nom}' is deactivated. Reactivate the group "
+                        f"first — that also reactivates its units — then activate "
+                        f"this relation.",
+                        status_code=400,
+                    )
+                if not parent_unit.is_active:
+                    raise AppException(
+                        f"Cannot activate this relation: its supplier unit "
+                        f"'{parent_unit.supplier_name}' is deactivated. Reactivate "
+                        f"the unit first, then activate this relation.",
+                        status_code=400,
+                    )
+
         relation.is_active = data.is_active
 
         # Keep inactivated_at in lockstep with is_active. The unit/group cascade
