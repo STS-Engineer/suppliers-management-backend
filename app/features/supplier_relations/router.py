@@ -16,7 +16,7 @@ from app.features.auth.models import AccessIdentity
 from app.features.notifications.service import NotificationService
 
 from app.db.models import AvocarbonSite, Contact, ContactSiteRelation, SupplierDevelopmentPlan, SupplierGroup, SupplierSiteRelation, SupplierSpendByYear, SupplierUnit
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from typing import List, Optional
 
 router = APIRouter(prefix="/supplier-relations", tags=["supplier-relations"])
@@ -374,8 +374,9 @@ async def patch_relation(
 
 
 class RelationOwnerPatch(BaseModel):
-    """Reassign the supplier owner (buyer_owner) of a relation."""
-    supplier_owner: str = Field(..., min_length=1)
+    """Reassign the supplier owner (buyer_owner) of a relation. An empty/null
+    value clears the owner, e.g. when the assigned buyer leaves the company."""
+    supplier_owner: Optional[str] = None
 
 
 @router.patch("/{relation_id}/owner", response_model=dict)
@@ -389,9 +390,13 @@ async def update_relation_owner(
     lowercase email. Open to any buyer (non-viewer)."""
     _require_profile(current_user, NON_VIEWER)
 
-    email = normalize_email(data.supplier_owner) or ""
-    if "@" not in email or "." not in email.split("@")[-1]:
-        raise HTTPException(status_code=422, detail="A valid owner email is required.")
+    raw = (data.supplier_owner or "").strip()
+    if raw:
+        email = normalize_email(raw) or ""
+        if "@" not in email or "." not in email.split("@")[-1]:
+            raise HTTPException(status_code=422, detail="A valid owner email is required.")
+    else:
+        email = None
 
     relation = await db.get(SupplierSiteRelation, relation_id)
     if not relation:
