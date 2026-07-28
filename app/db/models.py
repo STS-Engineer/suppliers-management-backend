@@ -28,7 +28,9 @@ from sqlalchemy import (
     Date,
     inspect,
 )
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
+
+from app.shared.utils.emails import normalize_email
 from sqlalchemy.dialects.postgresql import JSONB, UUID, ARRAY
 from app.db.session import Base
 
@@ -197,6 +199,12 @@ class SupplierGroup(GovernanceMixin, Base):
     @supplier_owner.setter
     def supplier_owner(self, value: Optional[str]) -> None:
         self.group_supplier_owner_email = value
+
+    @validates("group_supplier_owner_email")
+    def _normalize_group_owner_email(self, _key: str, value: Optional[str]) -> Optional[str]:
+        # Canonicalize the group owner email on write — see the equivalent
+        # validator on SupplierSiteRelation.
+        return normalize_email(value)
 
     @property
     def group_code(self) -> Optional[str]:
@@ -414,6 +422,13 @@ class SupplierSiteRelation(GovernanceMixin, Base):
     @supplier_owner.setter
     def supplier_owner(self, value: Optional[str]) -> None:
         self.buyer_owner = value
+
+    @validates("buyer_owner", "submitted_for_review_by")
+    def _normalize_email_fields(self, _key: str, value: Optional[str]) -> Optional[str]:
+        # Owner/submitter emails are canonicalized on write so the same address
+        # stored via import, API or auto-assignment always matches on equality
+        # checks (ownership/RBAC), recipient de-dup and owner grouping.
+        return normalize_email(value)
 
     @property
     def relation_code(self) -> Optional[str]:
