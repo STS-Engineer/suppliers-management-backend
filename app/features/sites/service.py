@@ -57,6 +57,7 @@ class SiteService:
         skip: int = 0,
         limit: int = 100,
         site_name: Optional[str] = None,
+        search: Optional[str] = None,
         supplier_owner: Optional[str] = None,
         class_grade: Optional[str] = None,
         status: Optional[str] = None,
@@ -213,6 +214,23 @@ class SiteService:
                 if group_name and not matches_text(group.nom, group_name):
                     continue
                 if unit_name and not matches_text(unit.supplier_name, unit_name):
+                    continue
+
+                # General keyword search — matches any identifying field of the
+                # relation, so users can type a plant, group, unit, alias,
+                # family or product line without picking the right filter box.
+                if search and not any(
+                    matches_text(value, search)
+                    for value in (
+                        site.site_name,
+                        group.nom,
+                        unit.supplier_name,
+                        unit.unit_code,
+                        relation.alias_1,
+                        unit.family,
+                        unit.product_line,
+                    )
+                ):
                     continue
 
                 relation_contacts = (
