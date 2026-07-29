@@ -99,6 +99,14 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("ACTION_PLAN_API_URL", "action_plan_api_url"),
     )
 
+    # AVO Carbon Central MCP — People/HR directory, used to populate the
+    # Project Manager picker on the gate approval form with real employee
+    # emails instead of free text.
+    AVO_MCP_URL: str = Field(
+        default="https://avo-client-db-mcp.azurewebsites.net/mcp",
+        validation_alias=AliasChoices("AVO_MCP_URL", "avo_mcp_url"),
+    )
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

@@ -2480,6 +2480,32 @@ class EmailDeliveryHistory(Base):
     )
 
 
+class AvoMemberDirectory(Base):
+    """Local fallback cache of the AVO Carbon employee directory (people with
+    an email on file), synced from the AVO Carbon Central MCP's `list_members`
+    tool. Used by the gate approval Project Manager picker when the live MCP
+    call is unavailable — refreshed opportunistically on every successful
+    live call, never written to independently."""
+
+    __tablename__ = "avo_member_directory"
+
+    people_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+
+    full_name: Mapped[str] = mapped_column(String(300), nullable=False)
+
+    email: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+
+    work_unit_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+
+    role_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+
+    synced_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+
 # ---------------------------------------------------------------------------
 # __all__  (single definition — FIX: removed the duplicate at top of file)
 # ---------------------------------------------------------------------------

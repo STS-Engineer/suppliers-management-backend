@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Request
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.features.gate_approval import schemas, service as svc_module
+from app.core.exceptions import AppException
+from app.db.models import GateApprovalVote
+from app.features.gate_approval import pm_directory, schemas, service as svc_module
 from app.shared.dependencies.auth import get_current_user
 from app.shared.dependencies.db import get_db
 
@@ -65,6 +68,18 @@ async def get_approval_status(
     }
 
 
+@router.get("/pm-directory", response_model=dict)
+async def get_pm_directory_authenticated(
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Authenticated — list AVO Carbon members with an email, for approver
+    pickers inside the app (e.g. sourcing committee role assignment). Same
+    live-MCP-with-local-fallback lookup as the public vote-form picker."""
+    data = await pm_directory.get_pm_directory(db)
+    return {"status": "success", "data": schemas.PmDirectoryResponse(**data).model_dump()}
+
+
 @router.post("/opportunities/{opportunity_id}/remind", response_model=dict)
 async def send_reminders(
     opportunity_id: int,
@@ -107,6 +122,24 @@ async def get_vote_form(
     data = await svc.get_vote_by_token(token)
     await db.commit()  # persists accessed_at set inside the service
     return {"status": "success", "data": data.model_dump()}
+
+
+@router.get("/vote/{token}/pm-directory", response_model=dict)
+async def get_pm_directory(
+    token: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Public — list AVO Carbon members with an email, for the plant manager's
+    Project Manager picker. Live from the AVO Carbon Central MCP, falling
+    back to the last successfully synced local snapshot if the MCP is down."""
+    result = await db.execute(
+        select(GateApprovalVote).where(GateApprovalVote.access_token == token)
+    )
+    if not result.scalar_one_or_none():
+        raise AppException(404, "Approval link not found.", "VOTE_NOT_FOUND")
+
+    data = await pm_directory.get_pm_directory(db)
+    return {"status": "success", "data": schemas.PmDirectoryResponse(**data).model_dump()}
 
 
 @router.post("/vote/{token}", response_model=dict)

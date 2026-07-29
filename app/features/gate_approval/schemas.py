@@ -104,6 +104,20 @@ class VoteSubmitRequest(BaseModel):
         return _validate_email(v)
 
 
+class PmDirectoryEntry(BaseModel):
+    """One selectable Project Manager candidate for the gate approval form."""
+    people_id: int
+    full_name: str
+    email: str
+    work_unit_name: Optional[str] = None
+    role_name: Optional[str] = None
+
+
+class PmDirectoryResponse(BaseModel):
+    entries: List[PmDirectoryEntry]
+    source: str  # "live" (fresh from the MCP) | "cache" (local fallback)
+
+
 class VoteResponse(BaseModel):
     vote_id: int
     approver_email: Optional[str] = None
