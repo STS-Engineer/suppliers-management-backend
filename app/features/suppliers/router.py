@@ -235,6 +235,23 @@ async def complete_supplier_onboarding(
                 body="A new supplier has been onboarded and is awaiting your validation before being added to the panel.",
                 action_url=f"/pending-validation/{group_id}",
             )
+
+        # Notify the assigned supplier owner, if they're a different registered
+        # user than whoever completed the onboarding.
+        actor = _resolve_actor(current_user)
+        owner_email = (data.supplier_owner or "").strip().lower() or None
+        if owner_email and owner_email != (actor or "").lower():
+            try:
+                await notif_svc.notify_by_email(
+                    owner_email,
+                    "group_owner_assigned",
+                    "You've been assigned as supplier owner",
+                    f"{actor or 'Someone'} assigned you as the supplier owner of {group_name}.",
+                    "/suppliers",
+                )
+            except Exception:
+                pass  # Non-blocking — onboarding must still succeed
+
         await db.commit()
 
         return {

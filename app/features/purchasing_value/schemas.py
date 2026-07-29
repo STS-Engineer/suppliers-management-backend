@@ -1221,6 +1221,10 @@ class OpportunityResponse(BaseModel):
     # no pending gate request.
     reminders_sent: Optional[int] = None
     pending_approvers: Optional[int] = None
+    # Approver email of whoever voted as Plant Manager on this opportunity's most
+    # recent gate approval request (computed in opportunity_to_response). Null
+    # until a gate approval request with a Plant Manager vote exists.
+    plant_manager_email: Optional[str] = None
     cash_inventory_gap: Optional[Decimal] = None
     cash_ap_gap: Optional[Decimal] = None
     secondary_plants: Optional[str] = None
@@ -1279,6 +1283,22 @@ def opportunity_to_response(opp) -> OpportunityResponse:
         votes = [v for r in pending_reqs for v in (r.votes or [])]
         data.reminders_sent = sum(int(v.reminder_count or 0) for v in votes)
         data.pending_approvers = sum(1 for v in votes if v.decision is None)
+    # Plant Manager filter support — the most recent gate approval request (any
+    # status) that carries a Plant Manager vote, so the filter reflects who's
+    # currently designated even after the request completes.
+    all_reqs = sorted(
+        (r for r in (opp.gate_approval_requests or []) if r.requested_at),
+        key=lambda r: r.requested_at,
+        reverse=True,
+    )
+    for r in all_reqs:
+        pm_vote = next(
+            (v for v in (r.votes or []) if v.is_plant_manager and v.approver_email),
+            None,
+        )
+        if pm_vote:
+            data.plant_manager_email = pm_vote.approver_email
+            break
     return data
 
 

@@ -18,6 +18,7 @@ from app.features.purchasing_value.service import PurchasingValueService
 from app.features.purchasing_value.kpi_service import KpiFilters, PurchasingKpiService
 from app.features.purchasing_value.stp_pdf import generate_stp_pdf
 from app.features.purchasing_value.full_report_pdf import generate_full_report_pdf
+from app.features.notifications.service import NotificationService
 from app.shared.dependencies.auth import get_current_user
 from app.shared.dependencies.db import get_db
 
@@ -104,6 +105,20 @@ async def create_opportunity(
             or current_user.get("sub")
         )
         opp = await svc.create_opportunity(payload, created_by=actor_email)
+
+        idea_owner = (opp.idea_owner or "").strip().lower() or None
+        if idea_owner and idea_owner != (actor_email or "").lower():
+            try:
+                await NotificationService(db).notify_by_email(
+                    idea_owner,
+                    "idea_owner_assigned",
+                    f"You're the Idea Owner — {opp.opportunity_name}",
+                    f"{actor_email or 'Someone'} named you the Idea Owner of {opp.opportunity_name}.",
+                    f"/purchasing-value?opp={opp.opportunity_id}",
+                )
+            except Exception:
+                pass  # Non-blocking — creation must still succeed
+
         await db.commit()
         # Re-fetch after commit — avoids stale session cache (R9 monthly rebuilds, etc.)
         fresh_opp = await svc.get_opportunity(opp.opportunity_id)
@@ -164,8 +179,16 @@ async def update_opportunity(
     _require(current_user, _NON_VIEWER)
     try:
         svc = PurchasingValueService(db)
+        actor_email = (
+            current_user.get("email")
+            or current_user.get("upn")
+            or current_user.get("sub")
+        )
         await svc.update_opportunity(
-            opportunity_id, payload, actor_role=current_user.get("access_profile")
+            opportunity_id,
+            payload,
+            actor_role=current_user.get("access_profile"),
+            actor_email=actor_email,
         )
         await db.commit()
         # Re-fetch after commit — avoids stale session cache (R9 monthly rebuilds, etc.)

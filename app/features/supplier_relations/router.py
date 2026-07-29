@@ -402,10 +402,26 @@ async def update_relation_owner(
     if not relation:
         raise AppException(f"Relation {relation_id} not found", status_code=404)
 
+    old_owner = relation.supplier_owner
     relation.supplier_owner = email
     actor = _resolve_actor(current_user)
     if actor and hasattr(relation, "updated_by"):
         relation.updated_by = actor
+
+    if email and email != old_owner and email != (actor or "").lower():
+        unit = await db.get(SupplierUnit, relation.id_supplier_unit)
+        supplier_label = unit.supplier_name if unit else f"relation #{relation_id}"
+        try:
+            await NotificationService(db).notify_by_email(
+                email,
+                "relation_owner_assigned",
+                "You've been assigned as supplier owner",
+                f"{actor or 'Someone'} assigned you as the supplier owner of {supplier_label}.",
+                "/suppliers",
+            )
+        except Exception:
+            pass  # Non-blocking — the owner change itself must still succeed
+
     await db.commit()
     return {
         "status": "success",

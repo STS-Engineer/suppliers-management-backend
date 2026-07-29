@@ -18,6 +18,7 @@ from app.core.constants import PANEL_ACTIVE_DECISIONS
 from app.core.exceptions import AppException
 from app.features.auth.models import AccessIdentity
 from app.features.notifications.models import Notification
+from app.features.notifications.service import NotificationService
 from app.db.models import (
     FinancialLine,
     MonthlyFinancial,
@@ -273,6 +274,7 @@ class PurchasingValueService:
     async def update_opportunity(
         self, opportunity_id: int, payload: OpportunityUpdateRequest,
         actor_role: Optional[str] = None,
+        actor_email: Optional[str] = None,
     ) -> Opportunity:
         opp = await self.get_opportunity(opportunity_id)
 
@@ -528,12 +530,36 @@ class PurchasingValueService:
                     "FX_RATE_REQUIRED",
                 )
 
+        old_purchasing_owner = opp.purchasing_owner
+        old_conversion_owner = opp.conversion_owner
+
         _set_if(opp, "assumptions_summary", payload.assumptions_summary)
         _set_if(opp, "comments", payload.comments)
         _set_if(opp, "plant_id", payload.plant_id)
         _set_if(opp, "supplier_id", payload.supplier_id)
         _set_if(opp, "purchasing_owner", payload.purchasing_owner)
         _set_if(opp, "conversion_owner", payload.conversion_owner)
+
+        for label, old_value, new_value in (
+            ("Purchasing Owner", old_purchasing_owner, opp.purchasing_owner),
+            ("Conversion Owner", old_conversion_owner, opp.conversion_owner),
+        ):
+            new_email = (new_value or "").strip().lower() or None
+            if (
+                new_email
+                and new_email != (old_value or "").strip().lower()
+                and new_email != (actor_email or "").strip().lower()
+            ):
+                try:
+                    await NotificationService(self.db).notify_by_email(
+                        new_email,
+                        "opportunity_owner_assigned",
+                        f"You're now the {label} — {opp.opportunity_name}",
+                        f"{actor_email or 'Someone'} assigned you as the {label} of {opp.opportunity_name}.",
+                        f"/purchasing-value?opp={opp.opportunity_id}",
+                    )
+                except Exception:
+                    pass  # Non-blocking — the field update must still succeed
         # D score — manual dropdown (Easy/Relatively easy/Moderately difficult/Difficult/Very Difficult)
         if payload.difficulty_score is not None:
             _set_if(opp, "difficulty_score", payload.difficulty_score)
@@ -3508,6 +3534,34 @@ class PurchasingValueService:
         for s in plan_data.get("sujets", []):
             walk_sujet(s)
 
+    async def _notify_action_responsible(
+        self,
+        email: Optional[str],
+        actor_email: str,
+        opportunity_id: Optional[int],
+    ) -> None:
+        """Best-effort in-app notification for a newly (re)assigned action-plan
+        responsible, if different from whoever made the change."""
+        new_email = (email or "").strip().lower() or None
+        if not new_email or new_email == (actor_email or "").strip().lower():
+            return
+        opp_name = "an action plan"
+        action_url = "/purchasing-value/action-plans"
+        if opportunity_id is not None:
+            opp = await self.get_opportunity(opportunity_id)
+            opp_name = opp.opportunity_name
+            action_url = f"/purchasing-value?opp={opportunity_id}"
+        try:
+            await NotificationService(self.db).notify_by_email(
+                new_email,
+                "action_responsible_assigned",
+                "You've been assigned an action plan item",
+                f"{actor_email} assigned you as responsible for an action on {opp_name}.",
+                action_url,
+            )
+        except Exception:
+            pass  # Non-blocking — the assignment itself must still succeed
+
     async def create_action_plan(self, payload, user_email: str, opportunity_id: Optional[int] = None):
         from app.db.models import OpportunityActionPlan
 
@@ -3568,6 +3622,9 @@ class PurchasingValueService:
         )
         self.db.add(plan)
         await self.db.flush()
+        await self._notify_action_responsible(
+            payload.email_responsable, user_email, opportunity_id
+        )
         return plan
 
     async def create_quick_action(self, payload, user_email: str, opportunity_id: Optional[int] = None):
@@ -3632,6 +3689,9 @@ class PurchasingValueService:
         )
         self.db.add(plan)
         await self.db.flush()
+        await self._notify_action_responsible(
+            payload.email_responsable, user_email, opportunity_id
+        )
         return plan
 
     async def update_action_plan(self, action_plan_id: int, payload, user_email: str, opportunity_id: Optional[int] = None):
@@ -3650,6 +3710,8 @@ class PurchasingValueService:
             if isinstance(obj, list):
                 return [_strip_none(i) for i in obj]
             return obj
+
+        old_email_responsable = existing.get("email_responsable")
 
         if payload.responsable is not None:
             existing["responsable"] = payload.responsable
@@ -3677,6 +3739,13 @@ class PurchasingValueService:
         plan.external_push_error = None
 
         await self.db.flush()
+        if (
+            payload.email_responsable is not None
+            and payload.email_responsable != old_email_responsable
+        ):
+            await self._notify_action_responsible(
+                payload.email_responsable, user_email, opportunity_id or plan.opportunity_id
+            )
         return plan
 
     async def sync_action_plan(self, action_plan_id: int, opportunity_id: Optional[int] = None) -> dict:
@@ -4073,6 +4142,9 @@ class PurchasingValueService:
                 self._log_action_event(
                     action, "responsible_changed", user_email,
                     from_email=previous, to_email=new_email,
+                )
+                await self._notify_action_responsible(
+                    new_email, user_email, plan.opportunity_id
                 )
             action["email_responsable"] = new_email
             derived = self._name_from_email(new_email)

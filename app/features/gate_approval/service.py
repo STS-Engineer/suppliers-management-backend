@@ -1052,7 +1052,7 @@ class GateApprovalService:
                 latest_req.pm_notified_at = now
             latest_req.updated_at = now
 
-        if sent:
+        if sent and new_pm_email != (updated_by or "").strip().lower():
             await self._notify_by_email(
                 new_pm_email,
                 "gate_approval_pm_assigned",

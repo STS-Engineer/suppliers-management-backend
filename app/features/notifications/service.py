@@ -8,6 +8,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ForbiddenError, NotFoundError
+from app.features.auth.models import AccessIdentity
 from app.features.notifications import schemas
 from app.features.notifications.models import Notification
 
@@ -15,6 +16,34 @@ from app.features.notifications.models import Notification
 class NotificationService:
     def __init__(self, db: AsyncSession) -> None:
         self.db = db
+
+    async def notify_by_email(
+        self,
+        email: str | None,
+        notification_type: str,
+        title: str,
+        body: str,
+        action_url: str,
+    ) -> None:
+        """Best-effort in-app notification for whoever holds this email, if
+        they have a matching active AccessIdentity. Silently no-ops otherwise
+        (e.g. an external contact with no app account)."""
+        if not email:
+            return
+        result = await self.db.execute(
+            select(AccessIdentity).where(
+                AccessIdentity.email.ilike(email), AccessIdentity.is_active.is_(True)
+            )
+        )
+        identity = result.scalar_one_or_none()
+        if identity:
+            await self.create_notification(
+                recipient_id=identity.id_identity,
+                notification_type=notification_type,
+                title=title,
+                body=body,
+                action_url=action_url,
+            )
 
     async def create_notification(
         self,
