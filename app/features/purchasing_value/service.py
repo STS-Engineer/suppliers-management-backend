@@ -106,6 +106,7 @@ class PurchasingValueService:
                 selectinload(Opportunity.opp_documents),
                 selectinload(Opportunity.budget_years),
                 selectinload(Opportunity.plant),
+                selectinload(Opportunity.proposed_supplier),
             )
             .order_by(Opportunity.opportunity_id.desc())
         )
@@ -126,6 +127,7 @@ class PurchasingValueService:
                 selectinload(Opportunity.opp_documents),
                 selectinload(Opportunity.budget_years),
                 selectinload(Opportunity.plant),
+                selectinload(Opportunity.proposed_supplier),
             )
         )
         opp = result.scalar_one_or_none()

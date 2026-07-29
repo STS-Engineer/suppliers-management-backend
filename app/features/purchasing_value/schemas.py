@@ -626,7 +626,11 @@ class OpportunityUpdateRequest(BaseModel):
     )
     description: Optional[str] = None
     # Financial estimates
-    expected_annual_saving: Optional[Decimal] = Field(None, ge=0)
+    # No ge=0 here (unlike the component-line creation schema below): imported
+    # Phase 3 opportunities can carry a legacy negative value (partial-period
+    # import, cost-increase case) and every save resubmits the full form, so a
+    # floor here would block unrelated edits (e.g. owner change) on those rows.
+    expected_annual_saving: Optional[Decimal] = None
     cash_impact: Optional[Decimal] = None
     duration_months: Optional[int] = Field(None, ge=1, le=120)
     # Dates — each has a specific phase (see field description)
@@ -1272,6 +1276,13 @@ def opportunity_to_response(opp) -> OpportunityResponse:
     if opp.plant is not None:
         data.plant_name = opp.plant.site_name
         data.plant_city = opp.plant.city
+    # proposed_supplier_name is free text and only gets written when the buyer
+    # types it (Phase 0) or the Sourcing/Negotiation pickers sync it back. Older
+    # rows may carry only proposed_supplier_id (chosen from the panel) with the
+    # name column left null — fall back to the linked supplier's name so those
+    # opportunities still show up wherever the UI filters/displays by name.
+    if not data.proposed_supplier_name and opp.proposed_supplier is not None:
+        data.proposed_supplier_name = opp.proposed_supplier.supplier_name
     # "Value of opportunity" = total multi-year gain (period_saving); "saving à budgéter"
     # = the incremental year-over-year drop that actually feeds the budget rows.
     data.value_of_opportunity = opp.period_saving
