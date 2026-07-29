@@ -662,7 +662,7 @@ class PurchasingValueService:
             for i, v in enumerate(stp_fin.get("saving_per_year") or [])
             if v is not None and float(v) < 0
         ]
-        if _neg_years:
+        if _neg_years and not payload.confirm_price_increase:
             detail = ", ".join(f"Year {lbl}: {amt:,.0f} €" for lbl, amt in _neg_years)
             raise AppException(
                 422,
@@ -2947,7 +2947,7 @@ class PurchasingValueService:
             for i, v in enumerate(preview_fin.get("saving_per_year") or [])
             if v is not None and float(v) < 0
         ]
-        if _neg_preview:
+        if _neg_preview and not payload.confirm_price_increase:
             detail = ", ".join(f"Year {lbl}: {amt:,.0f} €" for lbl, amt in _neg_preview)
             raise AppException(
                 422,

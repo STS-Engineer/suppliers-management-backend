@@ -735,6 +735,9 @@ class OpportunityUpdateRequest(BaseModel):
     reason_other: Optional[str] = None
     secondary_plants: Optional[str] = None
     changed_by: Optional[str] = None
+    confirm_price_increase: Optional[bool] = Field(
+        None, description="Buyer confirms a price-increase year is intentional, bypassing the negative-saving guard"
+    )
 
 
 class STPRevisionRequestPayload(BaseModel):
@@ -760,6 +763,9 @@ class STPRevisionRequestPayload(BaseModel):
     annual_quantity_n4: Optional[int] = None
     bonus_before:       Optional[Decimal] = None
     bonus_after:        Optional[Decimal] = None
+    confirm_price_increase: Optional[bool] = Field(
+        None, description="Buyer confirms a price-increase year is intentional, bypassing the negative-saving guard"
+    )
 
 
 class STPRevisionDecisionPayload(BaseModel):
