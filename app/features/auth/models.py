@@ -33,6 +33,8 @@ class AccessIdentity(Base):
     registration_status: Mapped[str] = mapped_column(
         String(50), nullable=False, server_default="active"
     )
+    # Email of the approver who moved this account out of 'pending'.
+    approved_by: Mapped[str | None] = mapped_column(String(200), nullable=True)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.current_timestamp()

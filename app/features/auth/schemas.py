@@ -133,6 +133,7 @@ class AccountRequestResponse(BaseModel):
     full_name: str
     requested_role: str
     registration_status: str
+    approved_by: str | None = None
     created_at: datetime | None = None
 
 

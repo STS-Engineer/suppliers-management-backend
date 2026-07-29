@@ -137,11 +137,18 @@ async def activate_account(
 @router.get("/account-requests", response_model=dict)
 async def list_account_requests(
     status: str | None = Query(default=None, description="Filter by registration_status"),
-    _approver: dict = Depends(_require_approver),
+    mine_only: bool = Query(
+        default=False,
+        description="When status=approved, only return requests approved by the current user",
+    ),
+    approver: dict = Depends(_require_approver),
     db: AsyncSession = Depends(get_db),
 ):
     service = AuthService(db)
-    items = await service.list_account_requests(status_filter=status)
+    items = await service.list_account_requests(
+        status_filter=status,
+        approver_email=approver["email"] if mine_only else None,
+    )
     return {
         "status": "success",
         "data": {

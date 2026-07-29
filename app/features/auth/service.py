@@ -309,7 +309,7 @@ class AuthService:
     # ------------------------------------------------------------------
 
     async def list_account_requests(
-        self, status_filter: str | None = None
+        self, status_filter: str | None = None, approver_email: str | None = None
     ) -> list[schemas.AccountRequestResponse]:
         stmt = select(AccessIdentity).where(
             AccessIdentity.registration_status.in_(["pending", "approved", "active", "rejected"])
@@ -318,6 +318,8 @@ class AuthService:
             # "Approved" covers the full post-approval lifecycle: still shows
             # accounts that have since completed activation.
             stmt = stmt.where(AccessIdentity.registration_status.in_(["approved", "active"]))
+            if approver_email:
+                stmt = stmt.where(AccessIdentity.approved_by == approver_email)
         elif status_filter:
             stmt = stmt.where(AccessIdentity.registration_status == status_filter)
         stmt = stmt.order_by(AccessIdentity.created_at.desc())
@@ -350,6 +352,7 @@ class AuthService:
             )
         )
         identity.registration_status = "approved"
+        identity.approved_by = actor_email
         identity.updated_at = _utcnow()
 
         await self._log_audit(
@@ -663,5 +666,6 @@ class AuthService:
             full_name=identity.full_name,
             requested_role=identity.access_profile,
             registration_status=identity.registration_status,
+            approved_by=identity.approved_by,
             created_at=identity.created_at,
         )
