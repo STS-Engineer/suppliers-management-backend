@@ -1,4 +1,5 @@
-"""Gate approval service."""
+﻿"""Gate approval service."""
+
 from __future__ import annotations
 
 import os
@@ -14,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.exceptions import AppException
+from app.core.logging import logger
 from app.db.models import GateApprovalRequest, GateApprovalVote, Opportunity
 from app.features.auth.models import AccessIdentity
 from app.features.gate_approval import schemas
@@ -63,7 +65,9 @@ def _pdf_attachment(pdf_bytes: Optional[bytes], filename_prefix: str, opp_name: 
         return
     safe = (opp_name or "opportunity").replace(" ", "_")[:50]
     filename = f"{filename_prefix}_{safe}.pdf"
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf", prefix=f"{filename_prefix}_") as tmp:
+    with tempfile.NamedTemporaryFile(
+        delete=False, suffix=".pdf", prefix=f"{filename_prefix}_"
+    ) as tmp:
         tmp.write(pdf_bytes)
         tmp_path = tmp.name
     try:
@@ -73,7 +77,6 @@ def _pdf_attachment(pdf_bytes: Optional[bytes], filename_prefix: str, opp_name: 
 
 
 class GateApprovalService:
-
     def __init__(self, db: AsyncSession):
         self.db = db
 
@@ -124,7 +127,11 @@ class GateApprovalService:
         is_negotiation = opp.opportunity_type == "Negotiation"
 
         if opp.status == "Cancelled":
-            raise AppException(400, "Cannot request approval for a cancelled opportunity.", "OPP_CANCELLED")
+            raise AppException(
+                400,
+                "Cannot request approval for a cancelled opportunity.",
+                "OPP_CANCELLED",
+            )
 
         _GATE_ELIGIBLE_PHASES = ("Phase 0",)
         if opp.phase_status not in _GATE_ELIGIBLE_PHASES:
@@ -162,7 +169,10 @@ class GateApprovalService:
                 missing.append("Prices (Before/After)")
             if not (opp.incoterms_before and opp.incoterms_after and opp.country_after):
                 missing.append("Logistics (Incoterms + Country after)")
-            if not (stp_risks.get("material_indexation_before") and stp_risks.get("material_indexation_after")):
+            if not (
+                stp_risks.get("material_indexation_before")
+                and stp_risks.get("material_indexation_after")
+            ):
                 missing.append("Risks (Material indexation Before/After)")
             if not (stp_benefits.get("if_we_do") or stp_benefits.get("if_not")):
                 missing.append("Benefits (If we do)")
@@ -213,7 +223,10 @@ class GateApprovalService:
 
         # Transition opportunity to "Awaiting Validation" for all gate-eligible phases
         # so the UI shows the correct state while votes are being collected.
-        if opp.phase_status in _GATE_ELIGIBLE_PHASES and opp.status in ("Working on it", "Needs Rework"):
+        if opp.phase_status in _GATE_ELIGIBLE_PHASES and opp.status in (
+            "Working on it",
+            "Needs Rework",
+        ):
             opp.status = "Awaiting Validation"
             opp.validation_request_sent_at = now
             opp.validation_request_sent_by = requested_by
@@ -227,14 +240,19 @@ class GateApprovalService:
             # Negotiation: a single approver decides — either Purchasing
             # Director or VP Conversion. The Plant Manager, if given, is
             # notified by email only (see below) and never gets a vote.
-            if not payload.approver_role or payload.approver_role not in NEGOTIATION_APPROVER_ROLES:
+            if (
+                not payload.approver_role
+                or payload.approver_role not in NEGOTIATION_APPROVER_ROLES
+            ):
                 raise AppException(
                     422,
                     "Select an approver role (Purchasing Director or VP Conversion).",
                     "APPROVER_REQUIRED",
                 )
             if not payload.approver_email:
-                raise AppException(422, "Approver email is required.", "APPROVER_REQUIRED")
+                raise AppException(
+                    422, "Approver email is required.", "APPROVER_REQUIRED"
+                )
             all_approvers = [(payload.approver_email, False)]
             approver_roles[payload.approver_email] = payload.approver_role
         else:
@@ -242,7 +260,9 @@ class GateApprovalService:
             # Deduplicate by email so a person listed in both roles gets one vote row
             # (as plant manager, which carries the PM designation responsibility).
             if not payload.plant_manager_email:
-                raise AppException(422, "Plant Manager email is required.", "PLANT_MANAGER_REQUIRED")
+                raise AppException(
+                    422, "Plant Manager email is required.", "PLANT_MANAGER_REQUIRED"
+                )
             seen_emails: set[str] = set()
             all_approvers = []
             for email, is_pm in [
@@ -265,11 +285,15 @@ class GateApprovalService:
         # Productivity opportunities — Negotiation/Cash have no STP format.
         stp_pdf_bytes = (
             generate_stp_pdf(opp, phase=0)
-            if opp.phase_status == "Phase 0" and opp.opportunity_type in STP_ELIGIBLE_TYPES
+            if opp.phase_status == "Phase 0"
+            and opp.opportunity_type in STP_ELIGIBLE_TYPES
             else None
         )
 
-        with _pdf_attachment(stp_pdf_bytes, "STP_Phase0", opp.opportunity_name) as (attach_path, attach_filename):
+        with _pdf_attachment(stp_pdf_bytes, "STP_Phase0", opp.opportunity_name) as (
+            attach_path,
+            attach_filename,
+        ):
             for email, is_pm in all_approvers:
                 token = str(uuid.uuid4())
                 vote = GateApprovalVote(
@@ -290,7 +314,10 @@ class GateApprovalService:
                 # a PM that opp.project_owner already holds.
                 pm_note_applies = is_pm and opp.phase_status in ("Assigned", "Phase 0")
                 html = self._build_email_html(
-                    opp, req, link, payload.message,
+                    opp,
+                    req,
+                    link,
+                    payload.message,
                     is_plant_manager=pm_note_applies,
                     approver_role=approver_roles.get(email),
                 )
@@ -301,6 +328,7 @@ class GateApprovalService:
                         body_html=html,
                         attachment_path=attach_path,
                         attachment_filename=attach_filename,
+                        db=self.db,
                     )
                 except Exception:
                     pass  # Non-blocking — vote still created
@@ -334,7 +362,11 @@ class GateApprovalService:
         opp = await pv_svc.get_opportunity(opportunity_id)
 
         if opp.status == "Cancelled":
-            raise AppException(400, "Cannot request approval for a cancelled opportunity.", "OPP_CANCELLED")
+            raise AppException(
+                400,
+                "Cannot request approval for a cancelled opportunity.",
+                "OPP_CANCELLED",
+            )
 
         if opp.phase_status not in COMMITTEE_ELIGIBLE_PHASES:
             raise AppException(
@@ -375,7 +407,10 @@ class GateApprovalService:
         # is a panel dropdown that writes proposed_supplier_id (the Phase 0 free-text
         # candidate lives in proposed_supplier_name and is optional). Negotiation/Cash
         # skip PLD scoring, so they carry no proposed supplier link.
-        if opp.opportunity_type not in ("Negotiation", "Cash") and opp.proposed_supplier_id is None:
+        if (
+            opp.opportunity_type not in ("Negotiation", "Cash")
+            and opp.proposed_supplier_id is None
+        ):
             gate_missing.append("Proposed New Supplier — After (from panel)")
         # Purchasing Owner + Conversion Owner become mandatory from Phase 2: the
         # Purchasing Owner receives tracking/escalation alerts and the Conversion
@@ -400,7 +435,8 @@ class GateApprovalService:
             # submitted (e.g. leftover Plant Manager/Project Leader fields) are
             # simply ignored — they never get a vote.
             chosen = [
-                a for a in payload.approvers
+                a
+                for a in payload.approvers
                 if a.role in NEGOTIATION_APPROVER_ROLES and a.email
             ]
             if not chosen:
@@ -494,7 +530,10 @@ class GateApprovalService:
         # (e.g. a single tester approving as both Purchasing Director and CEO) —
         # each role gets its own token/link and casts its own decision.
         subject_suffix = f", {tier} Committee)" if tier else ")"
-        with _pdf_attachment(attach_bytes, attach_prefix, opp.opportunity_name) as (attach_path, attach_filename):
+        with _pdf_attachment(attach_bytes, attach_prefix, opp.opportunity_name) as (
+            attach_path,
+            attach_filename,
+        ):
             for approver in approvers_to_notify:
                 if not approver.email:
                     continue
@@ -514,8 +553,12 @@ class GateApprovalService:
 
                 link = f"{settings.frontend_base_url}/approve/{token}"
                 html = self._build_email_html(
-                    opp, req, link, payload.message,
-                    approver_role=approver.role, committee_level=tier,
+                    opp,
+                    req,
+                    link,
+                    payload.message,
+                    approver_role=approver.role,
+                    committee_level=tier,
                 )
                 try:
                     email_svc.send_sync(
@@ -524,6 +567,7 @@ class GateApprovalService:
                         body_html=html,
                         attachment_path=attach_path,
                         attachment_filename=attach_filename,
+                        db=self.db,
                     )
                 except Exception:
                     pass  # Non-blocking — vote still created
@@ -675,7 +719,9 @@ class GateApprovalService:
             # Planning
             planned_start_date=snap.get("planned_start_date"),
             planned_end_date=snap.get("planned_end_date"),
-            duration_months=int(snap["duration_months"]) if snap.get("duration_months") else None,
+            duration_months=int(snap["duration_months"])
+            if snap.get("duration_months")
+            else None,
         )
 
     # ------------------------------------------------------------------
@@ -701,7 +747,11 @@ class GateApprovalService:
         # Gate enforcement on the CURRENT config (not the stored stamp): when
         # expiry is disabled (_link_ttl_hours() == 0), even links that carry an
         # old expiry timestamp are accepted again — no DB backfill needed.
-        if _link_ttl_hours() and vote.token_expires_at and datetime.utcnow() > vote.token_expires_at:
+        if (
+            _link_ttl_hours()
+            and vote.token_expires_at
+            and datetime.utcnow() > vote.token_expires_at
+        ):
             raise AppException(410, "This approval link has expired.", "TOKEN_EXPIRED")
 
         # Load the parent request (for phase context + snapshot)
@@ -736,7 +786,9 @@ class GateApprovalService:
         # Notify the requester in-app with live progress — mirrors
         # committee_review's per-vote _notify_vp pattern.
         votes_result = await self.db.execute(
-            select(GateApprovalVote).where(GateApprovalVote.request_id == req.request_id)
+            select(GateApprovalVote).where(
+                GateApprovalVote.request_id == req.request_id
+            )
         )
         all_votes = votes_result.scalars().all()
         decided_count = sum(1 for v in all_votes if v.decision is not None)
@@ -806,14 +858,19 @@ class GateApprovalService:
         if opp.phase_status == "Phase 0" and opp.opportunity_type in STP_ELIGIBLE_TYPES:
             attach_bytes = generate_stp_pdf(opp, phase=0)
             attach_prefix = "STP_Phase0"
-        elif opp.phase_status == "Phase 1" and opp.opportunity_type in STP_ELIGIBLE_TYPES:
+        elif (
+            opp.phase_status == "Phase 1" and opp.opportunity_type in STP_ELIGIBLE_TYPES
+        ):
             attach_bytes = generate_stp_pdf(opp, phase=1)
             attach_prefix = "STP_Phase1"
         elif opp.phase_status in ("Phase 3", "Phase 4"):
             attach_bytes = generate_full_report_pdf(opp)
             attach_prefix = "FullReport"
 
-        with _pdf_attachment(attach_bytes, attach_prefix, opp.opportunity_name) as (attach_path, attach_filename):
+        with _pdf_attachment(attach_bytes, attach_prefix, opp.opportunity_name) as (
+            attach_path,
+            attach_filename,
+        ):
             for req in pending_requests:
                 tier = req.committee_level
                 subject_suffix = f", {tier} Committee)" if tier else ")"
@@ -822,9 +879,15 @@ class GateApprovalService:
                     if vote.decision is not None or not vote.approver_email:
                         continue
                     link = f"{settings.frontend_base_url}/approve/{vote.access_token}"
-                    pm_note_applies = vote.is_plant_manager and opp.phase_status in ("Assigned", "Phase 0")
+                    pm_note_applies = vote.is_plant_manager and opp.phase_status in (
+                        "Assigned",
+                        "Phase 0",
+                    )
                     html = self._build_email_html(
-                        opp, req, link, req.message,
+                        opp,
+                        req,
+                        link,
+                        req.message,
                         is_plant_manager=pm_note_applies,
                         approver_role=vote.approver_role,
                         committee_level=tier,
@@ -836,6 +899,7 @@ class GateApprovalService:
                             body_html=html,
                             attachment_path=attach_path,
                             attachment_filename=attach_filename,
+                            db=self.db,
                         )
                     except Exception:
                         pass  # Non-blocking — a failed reminder must not error the request
@@ -872,7 +936,9 @@ class GateApprovalService:
         )
         req = result.scalar_one_or_none()
         if not req:
-            raise AppException(404, "Gate approval request not found.", "REQUEST_NOT_FOUND")
+            raise AppException(
+                404, "Gate approval request not found.", "REQUEST_NOT_FOUND"
+            )
         if not (req.status == "Completed" and req.consensus_result == "Go"):
             raise AppException(
                 400,
@@ -917,6 +983,89 @@ class GateApprovalService:
                 f"/purchasing-value?opp={req.opportunity_id}",
             )
         return {"pm_email": pm_email, "delivery": "sent" if sent else "failed"}
+
+    # ------------------------------------------------------------------
+    # Correct/reassign the Project Manager — e.g. the plant manager typo'd
+    # the email during the gate vote. Updates the opportunity's designation,
+    # keeps the last completed gate request's audit trail in sync, and
+    # resends the handover email to the corrected address.
+    # ------------------------------------------------------------------
+    async def update_project_manager(
+        self,
+        opportunity_id: int,
+        new_pm_email: str,
+        updated_by: str,
+    ) -> dict:
+        pv_svc = PurchasingValueService(self.db)
+        opp = await pv_svc.get_opportunity(opportunity_id)
+
+        if opp.opportunity_type in ("Negotiation", "Cash"):
+            raise AppException(
+                400,
+                f"{opp.opportunity_type} opportunities have no Project Manager to reassign.",
+                "NO_PM_FOR_TYPE",
+            )
+
+        new_pm_email = new_pm_email.strip().lower()
+        old_pm_email = opp.project_owner
+        opp.project_owner = new_pm_email
+        opp.updated_at = datetime.utcnow()
+        opp.updated_by = updated_by
+
+        # Keep the most recent completed gate request's audit trail consistent
+        # with the corrected designation, so resend/history reads the new email.
+        req_result = await self.db.execute(
+            select(GateApprovalRequest)
+            .where(
+                GateApprovalRequest.opportunity_id == opportunity_id,
+                GateApprovalRequest.status == "Completed",
+            )
+            .order_by(GateApprovalRequest.applied_at.desc())
+            .options(selectinload(GateApprovalRequest.votes))
+        )
+        latest_req = req_result.scalars().first()
+        if latest_req:
+            latest_req.pm_notified_email = new_pm_email
+            plant_vote = next((v for v in latest_req.votes if v.is_plant_manager), None)
+            if plant_vote:
+                plant_vote.project_manager_email = new_pm_email
+
+        await self.db.flush()
+
+        snap = pv_svc._build_opportunity_snapshot(opp)
+        sent = False
+        try:
+            sent = self._notify_project_manager(
+                pm_email=new_pm_email,
+                snap=snap,
+                phase=opp.phase_status or "Phase 0",
+                approver_email=updated_by,
+                opportunity_id=opportunity_id,
+            )
+        except Exception:
+            sent = False
+
+        now = datetime.utcnow()
+        if latest_req:
+            latest_req.pm_notification_status = "sent" if sent else "failed"
+            if sent:
+                latest_req.pm_notified_at = now
+            latest_req.updated_at = now
+
+        if sent:
+            await self._notify_by_email(
+                new_pm_email,
+                "gate_approval_pm_assigned",
+                f"You are the Project Manager — {snap.get('opportunity_name') or 'Opportunity'}",
+                f"Designated by {updated_by} to correct a prior entry.",
+                f"/purchasing-value?opp={opportunity_id}",
+            )
+
+        return {
+            "old_pm_email": old_pm_email,
+            "new_pm_email": new_pm_email,
+            "notification": "sent" if sent else "failed",
+        }
 
     # ------------------------------------------------------------------
     # Internal: check consensus after each vote
@@ -1010,7 +1159,9 @@ class GateApprovalService:
         # so the request is NOT marked Completed and stays correctable.
         # _via_gate_approval=True bypasses the direct-call guard for Phase 1-3.
         pv_svc = PurchasingValueService(self.db)
-        await pv_svc.apply_gate_decision(req.opportunity_id, gate_payload, _via_gate_approval=True)
+        await pv_svc.apply_gate_decision(
+            req.opportunity_id, gate_payload, _via_gate_approval=True
+        )
 
         # Phase transition succeeded — now seal the approval request.
         req.consensus_result = consensus
@@ -1109,13 +1260,24 @@ class GateApprovalService:
         if opp.description:
             rows.append(("Description", opp.description))
         if approver_role:
-            rows.append(("Your role", f"{approver_role}" + (f" · {committee_level} Committee" if committee_level else "")))
+            rows.append(
+                (
+                    "Your role",
+                    f"{approver_role}"
+                    + (f" · {committee_level} Committee" if committee_level else ""),
+                )
+            )
         rows.append(("Owner (Idea)", snap.get("idea_owner") or "—"))
         # Negotiation has no STP format (no project/price breakdown) — show the
         # flat saving + cash figures instead of the STP-only fields below.
         if opp.opportunity_type == "Negotiation":
             if snap.get("expected_annual_saving") not in (None, 0):
-                rows.append(("Est. Annual Saving", fmt(snap.get("expected_annual_saving"), " €")))
+                rows.append(
+                    (
+                        "Est. Annual Saving",
+                        fmt(snap.get("expected_annual_saving"), " €"),
+                    )
+                )
             if snap.get("cash_impact") not in (None, 0):
                 rows.append(("Cash Impact", fmt(snap.get("cash_impact"), " €")))
         else:
@@ -1139,7 +1301,8 @@ class GateApprovalService:
         msg_block = (
             f"<p style='background:#f1f5f9;border-radius:8px;padding:10px 14px;"
             f"font-size:13px;color:#334155;margin:16px 0'>{message}</p>"
-            if message else ""
+            if message
+            else ""
         )
         pm_note = (
             "<p style='background:#fefce8;border:1px solid #fde68a;border-radius:8px;"
@@ -1147,12 +1310,14 @@ class GateApprovalService:
             "<strong>Note:</strong> As Plant Manager, if you approve this opportunity "
             "you will be asked to designate the <strong>Project Manager</strong> "
             "who will lead this project through Phase 1 and beyond.</p>"
-            if is_plant_manager else ""
+            if is_plant_manager
+            else ""
         )
         ttl = _link_ttl_hours()
         link_validity_note = (
             f"This link expires in {ttl} hours and can be used only once."
-            if ttl else "This link stays valid until you respond and can be used only once."
+            if ttl
+            else "This link stays valid until you respond and can be used only once."
         )
         return f"""
 <div style="font-family:Inter,Arial,sans-serif;max-width:560px;margin:0 auto;padding:24px">
@@ -1189,7 +1354,8 @@ class GateApprovalService:
         msg_block = (
             f"<p style='background:#f1f5f9;border-radius:8px;padding:10px 14px;"
             f"font-size:13px;color:#334155;margin:16px 0'>{message}</p>"
-            if message else ""
+            if message
+            else ""
         )
         html = f"""
 <div style="font-family:Inter,Arial,sans-serif;max-width:560px;margin:0 auto;padding:24px">
@@ -1206,6 +1372,7 @@ class GateApprovalService:
                 subject=f"[FYI] Gate approved — {opp_name}",
                 recipients=[email],
                 body_html=html,
+                db=self.db,
             )
         except Exception:
             pass  # Non-blocking
@@ -1256,83 +1423,188 @@ class GateApprovalService:
         risks = snap.get("stp_risks") or {}
         benefits = snap.get("stp_benefits") or {}
         sections = [
-            ("Identity", [
-                ("Type", opp_type),
-                ("Priority", txt(snap.get("priority_category"))),
-                ("Description", txt(snap.get("description"))),
-                ("Idea owner", txt(snap.get("idea_owner"))),
-                ("Purchasing owner", txt(snap.get("purchasing_owner"))),
-                ("Conversion owner", txt(snap.get("conversion_owner"))),
-                ("Change type", txt(snap.get("change_mode"))),
-                ("Currency", cur + (f" · FX→EUR {snap.get('fx_rate_to_eur')}" if snap.get("fx_rate_to_eur") else "")),
-            ]),
-            ("Scope", [
-                ("Scope in", txt(snap.get("scope_in"))),
-                ("Scope out", txt(snap.get("scope_out"))),
-                ("Customers", txt(snap.get("customers"))),
-            ]),
-            ("Supplier", [
-                ("Proposed supplier", txt(snap.get("proposed_supplier_name"))),
-                ("Country (after)", txt(snap.get("country_after"))),
-                ("Supplier consulted", "Yes" if snap.get("supplier_asked") else None),
-                ("Consultation result", txt(snap.get("supplier_asked_result"))),
-            ]),
-            ("Pricing", None if is_nego else [
-                ("Current price", money(snap.get("current_price"), 4)),
-                ("Proposed price", money(snap.get("proposed_price"), 4)),
-                ("Current price N+1", money(snap.get("current_price_n1"), 4)),
-                ("Proposed price N+1", money(snap.get("proposed_price_n1"), 4)),
-                ("Current price N+2", money(snap.get("current_price_n2"), 4)),
-                ("Proposed price N+2", money(snap.get("proposed_price_n2"), 4)),
-                ("Current price N+3", money(snap.get("current_price_n3"), 4)),
-                ("Proposed price N+3", money(snap.get("proposed_price_n3"), 4)),
-            ]),
-            ("Quantities", None if is_nego else [
-                ("Annual qty N+1", qty(snap.get("annual_quantity_n1"))),
-                ("Annual qty N+2", qty(snap.get("annual_quantity_n2"))),
-                ("Annual qty N+3", qty(snap.get("annual_quantity_n3"))),
-                ("Annual qty N+4", qty(snap.get("annual_quantity_n4"))),
-            ]),
-            ("Savings & ROI", [
-                ("Expected annual saving", money(snap.get("expected_annual_saving"))),
-                ("Saving year N", money(snap.get("saving_year_n"))),
-                ("Saving year N+1", money(snap.get("saving_year_n1"))),
-                ("Saving year N+2", money(snap.get("saving_year_n2"))),
-                ("Saving year N+3", money(snap.get("saving_year_n3"))),
-                ("Period saving (total)", money(snap.get("period_saving"))),
-                ("ROI", f"{snap.get('roi_percent')}%" if snap.get("roi_percent") not in (None, "") else None),
-                ("ROI (period)", f"{snap.get('roi_period_percent')}%" if snap.get("roi_period_percent") not in (None, "") else None),
-            ]),
-            ("Investment & costs", [
-                ("Total investment", money(snap.get("total_investment"))),
-                ("Tooling", money(snap.get("tooling_cost"))),
-                ("Travel", money(snap.get("travel_cost"))),
-                ("Qualification", money(snap.get("qualification_cost"))),
-                ("Other", money(snap.get("other_cost"))),
-            ]),
-            ("Cash", [
-                ("Cash impact", money(snap.get("cash_impact"))),
-                ("Inventory gap", money(snap.get("cash_inventory_gap"))),
-                ("A/P gap", money(snap.get("cash_ap_gap"))),
-            ]),
-            ("Logistics", None if is_nego else [
-                ("Incoterms (before → after)", _arrow(snap.get("incoterms_before"), snap.get("incoterms_after"))),
-                ("Incoterms place (before → after)", _arrow(snap.get("place_of_incoterms_before"), snap.get("place_of_incoterms_after"))),
-                ("TOP days (before → after)", _arrow(snap.get("top_days_before"), snap.get("top_days_after"))),
-                ("Transit days (before → after)", _arrow(snap.get("transit_days_before"), snap.get("transit_days_after"))),
-                ("Bonus (before → after)", _arrow(snap.get("bonus_before"), snap.get("bonus_after"))),
-                ("Consignment (before → after)", _arrow(snap.get("consignment_before"), snap.get("consignment_after"))),
-            ]),
-            ("Planning", [
-                ("Planned start", txt(snap.get("planned_start_date"))),
-                ("Real start", txt(snap.get("real_start_date"))),
-                ("Planned end", txt(snap.get("planned_end_date"))),
-                ("Duration", f"{snap.get('duration_months')} months" if snap.get("duration_months") not in (None, "") else None),
-            ]),
-            ("Risks & benefits", [
-                *[(f"Risk · {k.replace('_', ' ')}", txt(v)) for k, v in (risks.items() if isinstance(risks, dict) else [])],
-                *[(f"Benefit · {k.replace('_', ' ')}", txt(v)) for k, v in (benefits.items() if isinstance(benefits, dict) else [])],
-            ]),
+            (
+                "Identity",
+                [
+                    ("Type", opp_type),
+                    ("Priority", txt(snap.get("priority_category"))),
+                    ("Description", txt(snap.get("description"))),
+                    ("Idea owner", txt(snap.get("idea_owner"))),
+                    ("Purchasing owner", txt(snap.get("purchasing_owner"))),
+                    ("Conversion owner", txt(snap.get("conversion_owner"))),
+                    ("Change type", txt(snap.get("change_mode"))),
+                    (
+                        "Currency",
+                        cur
+                        + (
+                            f" · FX→EUR {snap.get('fx_rate_to_eur')}"
+                            if snap.get("fx_rate_to_eur")
+                            else ""
+                        ),
+                    ),
+                ],
+            ),
+            (
+                "Scope",
+                [
+                    ("Scope in", txt(snap.get("scope_in"))),
+                    ("Scope out", txt(snap.get("scope_out"))),
+                    ("Customers", txt(snap.get("customers"))),
+                ],
+            ),
+            (
+                "Supplier",
+                [
+                    ("Proposed supplier", txt(snap.get("proposed_supplier_name"))),
+                    ("Country (after)", txt(snap.get("country_after"))),
+                    (
+                        "Supplier consulted",
+                        "Yes" if snap.get("supplier_asked") else None,
+                    ),
+                    ("Consultation result", txt(snap.get("supplier_asked_result"))),
+                ],
+            ),
+            (
+                "Pricing",
+                None
+                if is_nego
+                else [
+                    ("Current price", money(snap.get("current_price"), 4)),
+                    ("Proposed price", money(snap.get("proposed_price"), 4)),
+                    ("Current price N+1", money(snap.get("current_price_n1"), 4)),
+                    ("Proposed price N+1", money(snap.get("proposed_price_n1"), 4)),
+                    ("Current price N+2", money(snap.get("current_price_n2"), 4)),
+                    ("Proposed price N+2", money(snap.get("proposed_price_n2"), 4)),
+                    ("Current price N+3", money(snap.get("current_price_n3"), 4)),
+                    ("Proposed price N+3", money(snap.get("proposed_price_n3"), 4)),
+                ],
+            ),
+            (
+                "Quantities",
+                None
+                if is_nego
+                else [
+                    ("Annual qty N+1", qty(snap.get("annual_quantity_n1"))),
+                    ("Annual qty N+2", qty(snap.get("annual_quantity_n2"))),
+                    ("Annual qty N+3", qty(snap.get("annual_quantity_n3"))),
+                    ("Annual qty N+4", qty(snap.get("annual_quantity_n4"))),
+                ],
+            ),
+            (
+                "Savings & ROI",
+                [
+                    (
+                        "Expected annual saving",
+                        money(snap.get("expected_annual_saving")),
+                    ),
+                    ("Saving year N", money(snap.get("saving_year_n"))),
+                    ("Saving year N+1", money(snap.get("saving_year_n1"))),
+                    ("Saving year N+2", money(snap.get("saving_year_n2"))),
+                    ("Saving year N+3", money(snap.get("saving_year_n3"))),
+                    ("Period saving (total)", money(snap.get("period_saving"))),
+                    (
+                        "ROI",
+                        f"{snap.get('roi_percent')}%"
+                        if snap.get("roi_percent") not in (None, "")
+                        else None,
+                    ),
+                    (
+                        "ROI (period)",
+                        f"{snap.get('roi_period_percent')}%"
+                        if snap.get("roi_period_percent") not in (None, "")
+                        else None,
+                    ),
+                ],
+            ),
+            (
+                "Investment & costs",
+                [
+                    ("Total investment", money(snap.get("total_investment"))),
+                    ("Tooling", money(snap.get("tooling_cost"))),
+                    ("Travel", money(snap.get("travel_cost"))),
+                    ("Qualification", money(snap.get("qualification_cost"))),
+                    ("Other", money(snap.get("other_cost"))),
+                ],
+            ),
+            (
+                "Cash",
+                [
+                    ("Cash impact", money(snap.get("cash_impact"))),
+                    ("Inventory gap", money(snap.get("cash_inventory_gap"))),
+                    ("A/P gap", money(snap.get("cash_ap_gap"))),
+                ],
+            ),
+            (
+                "Logistics",
+                None
+                if is_nego
+                else [
+                    (
+                        "Incoterms (before → after)",
+                        _arrow(
+                            snap.get("incoterms_before"), snap.get("incoterms_after")
+                        ),
+                    ),
+                    (
+                        "Incoterms place (before → after)",
+                        _arrow(
+                            snap.get("place_of_incoterms_before"),
+                            snap.get("place_of_incoterms_after"),
+                        ),
+                    ),
+                    (
+                        "TOP days (before → after)",
+                        _arrow(snap.get("top_days_before"), snap.get("top_days_after")),
+                    ),
+                    (
+                        "Transit days (before → after)",
+                        _arrow(
+                            snap.get("transit_days_before"),
+                            snap.get("transit_days_after"),
+                        ),
+                    ),
+                    (
+                        "Bonus (before → after)",
+                        _arrow(snap.get("bonus_before"), snap.get("bonus_after")),
+                    ),
+                    (
+                        "Consignment (before → after)",
+                        _arrow(
+                            snap.get("consignment_before"),
+                            snap.get("consignment_after"),
+                        ),
+                    ),
+                ],
+            ),
+            (
+                "Planning",
+                [
+                    ("Planned start", txt(snap.get("planned_start_date"))),
+                    ("Real start", txt(snap.get("real_start_date"))),
+                    ("Planned end", txt(snap.get("planned_end_date"))),
+                    (
+                        "Duration",
+                        f"{snap.get('duration_months')} months"
+                        if snap.get("duration_months") not in (None, "")
+                        else None,
+                    ),
+                ],
+            ),
+            (
+                "Risks & benefits",
+                [
+                    *[
+                        (f"Risk · {k.replace('_', ' ')}", txt(v))
+                        for k, v in (risks.items() if isinstance(risks, dict) else [])
+                    ],
+                    *[
+                        (f"Benefit · {k.replace('_', ' ')}", txt(v))
+                        for k, v in (
+                            benefits.items() if isinstance(benefits, dict) else []
+                        )
+                    ],
+                ],
+            ),
         ]
 
         def render_section(title, rows) -> str:
@@ -1343,7 +1615,8 @@ class GateApprovalService:
                 f"<td style='padding:7px 16px 7px 0;color:#64748b;font-size:13px;white-space:nowrap;vertical-align:top'>{k}</td>"
                 f"<td style='padding:7px 0;color:#0f172a;font-size:13px;font-weight:600;vertical-align:top'>{v}</td>"
                 f"</tr>"
-                for k, v in rows if v not in (None, "")
+                for k, v in rows
+                if v not in (None, "")
             )
             if not body:
                 return ""
@@ -1379,7 +1652,8 @@ class GateApprovalService:
         by_line = f" by {approver_email}" if approver_email else ""
         link = (
             f"{settings.frontend_base_url}/purchasing-value?opp={opportunity_id}"
-            if opportunity_id else settings.frontend_base_url
+            if opportunity_id
+            else settings.frontend_base_url
         )
 
         html = f"""
@@ -1401,7 +1675,7 @@ class GateApprovalService:
       </table>
       <a href="{link}" style="display:inline-block;margin-top:22px;background:linear-gradient(135deg,#0f2744,#1b5d92,#0891b2);color:#fff;text-decoration:none;padding:12px 26px;border-radius:12px;font-size:14px;font-weight:700">Open in Purchasing Value →</a>
       <p style="font-size:11px;color:#94a3b8;margin:22px 0 0">
-        AvoCarbon · Suppliers Management · Purchasing Value — automated notification, no reply needed.
+        AVOCARBON · Suppliers Management · Purchasing Value — automated notification, no reply needed.
       </p>
     </div>
   </div>
@@ -1413,7 +1687,12 @@ class GateApprovalService:
                     subject=f"[Project handover] You lead — {opp_name} ({phase} approved)",
                     recipients=[pm_email],
                     body_html=html,
+                    db=self.db,
                 )
             )
         except Exception:
+            logger.exception(
+                "PM handover email failed | opportunity_id=%s | pm_email=%s",
+                opportunity_id, pm_email,
+            )
             return False  # Non-blocking

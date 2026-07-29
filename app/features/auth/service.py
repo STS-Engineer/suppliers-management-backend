@@ -206,6 +206,7 @@ class AuthService:
                     subject="Your Password Reset Code",
                     recipients=[identity.email],
                     body_html=body,
+                    db=self.db,
                 )
             except Exception:
                 pass
@@ -374,6 +375,7 @@ class AuthService:
                 subject="Your Account Has Been Approved – Activate Now",
                 recipients=[identity.email],
                 body_html=body,
+                db=self.db,
             )
         except Exception:
             pass
@@ -412,6 +414,7 @@ class AuthService:
                 subject="Update on Your Account Request",
                 recipients=[identity.email],
                 body_html=body,
+                db=self.db,
             )
         except Exception:
             pass

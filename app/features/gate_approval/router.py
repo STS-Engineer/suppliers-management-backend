@@ -109,6 +109,26 @@ async def resend_pm_notification(
     return {"status": "success", **result}
 
 
+@router.put("/opportunities/{opportunity_id}/project-manager", response_model=dict)
+async def update_project_manager(
+    opportunity_id: int,
+    payload: schemas.ProjectManagerUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Correct/reassign the Project Manager for an opportunity (e.g. a plant
+    manager typo'd the email during the gate vote) and resend the handover
+    email to the corrected address."""
+    svc = svc_module.GateApprovalService(db)
+    result = await svc.update_project_manager(
+        opportunity_id=opportunity_id,
+        new_pm_email=payload.project_manager_email,
+        updated_by=current_user.get("email", current_user.get("sub", "")),
+    )
+    await db.commit()
+    return {"status": "success", **result}
+
+
 # ── Public endpoints — no auth, UUID token is the identity ────────────
 
 

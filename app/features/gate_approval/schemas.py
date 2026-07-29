@@ -104,6 +104,17 @@ class VoteSubmitRequest(BaseModel):
         return _validate_email(v)
 
 
+class ProjectManagerUpdateRequest(BaseModel):
+    """Correct/reassign the Project Manager designated on an opportunity —
+    e.g. a plant manager typo'd the email during the Phase 0 gate vote."""
+    project_manager_email: str
+
+    @field_validator("project_manager_email")
+    @classmethod
+    def validate_pm_email(cls, v: str) -> str:
+        return _validate_email(v)
+
+
 class PmDirectoryEntry(BaseModel):
     """One selectable Project Manager candidate for the gate approval form."""
     people_id: int

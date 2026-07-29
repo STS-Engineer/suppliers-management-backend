@@ -1173,6 +1173,7 @@ class PurchasingValueService:
                         recipients=payload.to_emails,
                         body_html=body,
                         cc=payload.cc_emails or [],
+                        db=self.db,
                     )
                 else:
                     import tempfile
@@ -1191,6 +1192,7 @@ class PurchasingValueService:
                             recipients=payload.to_emails,
                             body_html=body,
                             cc=payload.cc_emails or [],
+                            db=self.db,
                             attachment_path=tmp_path,
                             attachment_filename=f"STP_Phase0_{safe}.pdf",
                         )
@@ -1247,6 +1249,7 @@ class PurchasingValueService:
                         recipients=payload.to_emails,
                         body_html=body,
                         cc=payload.cc_emails or [],
+                        db=self.db,
                     )
                 else:
                     import tempfile
@@ -1265,6 +1268,7 @@ class PurchasingValueService:
                             recipients=payload.to_emails,
                             body_html=body,
                             cc=payload.cc_emails or [],
+                            db=self.db,
                             attachment_path=tmp_path,
                             attachment_filename=f"STP_Phase1_{safe}.pdf",
                         )
@@ -1296,6 +1300,7 @@ class PurchasingValueService:
                 recipients=payload.to_emails,
                 body_html=body_html,
                 cc=payload.extra_cc_emails or [],
+                db=self.db,
             )
         except Exception as exc:
             logger.warning("Validation-request email failed for opp %s: %s", opportunity_id, exc)
@@ -1399,6 +1404,7 @@ class PurchasingValueService:
                         body_html=_build_escalation_email(
                             opp, line, line.escalation_reason
                         ),
+                        db=self.db,
                     )
                 except Exception as exc:
                     logger.warning("Auto-escalation email failed for line %s: %s", row.financial_line_id, exc)
@@ -1447,6 +1453,7 @@ class PurchasingValueService:
                     body_html=_build_escalation_email(
                         opp, line, payload.escalation_reason
                     ),
+                    db=self.db,
                 )
             except Exception as exc:
                 logger.warning("Manual escalation email failed for line %s: %s", line_id, exc)
@@ -1682,6 +1689,7 @@ class PurchasingValueService:
                 subject=f"[Alert] Missing savings data — {opp.opportunity_name}",
                 recipients=recipients,
                 body_html=_build_delay_alert_email(opp, line, months_missing),
+                db=self.db,
             )
             line.delay_alert_last_sent_at = datetime.utcnow()
         except Exception as exc:
@@ -2962,6 +2970,7 @@ class PurchasingValueService:
                     subject=f"[STP Revision Approval] {opp.opportunity_name}",
                     recipients=approver_emails,
                     body_html=body,
+                    db=self.db,
                 )
             except Exception as exc:
                 logger.warning("STP revision request email failed for opp %s: %s", opportunity_id, exc)
@@ -3080,6 +3089,7 @@ class PurchasingValueService:
                     subject=f"[STP Revision {payload.decision}] {opp.opportunity_name}",
                     recipients=[requester_email],
                     body_html=body,
+                    db=self.db,
                 )
             except Exception as exc:
                 logger.warning("STP revision decision email failed for opp %s: %s", opportunity_id, exc)
@@ -4215,6 +4225,7 @@ class PurchasingValueService:
             subject=f"[Reminder] Action Plan — {title} ({opp_name})",
             recipients=[recipient],
             body_html=html,
+            db=self.db,
         )
 
         now = datetime.utcnow().isoformat()
@@ -4298,6 +4309,7 @@ class PurchasingValueService:
             subject=subject,
             recipients=[recipient_email],
             body_html=html,
+            db=self.db,
         )
 
         now = datetime.utcnow().isoformat()

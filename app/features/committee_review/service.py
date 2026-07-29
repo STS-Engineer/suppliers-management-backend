@@ -539,6 +539,7 @@ class CommitteeReviewService:
                 subject=f"[Action Required] Committee Review: {supplier_name}",
                 recipients=[member.email],
                 body_html=body_html,
+                db=self.db,
             )
         except Exception:
             pass  # email failure should not block the review creation

@@ -1143,11 +1143,11 @@ class SupplierRelationService:
                     cc=cc_recipients or None,
                     body_html=body_html,
                     attachments=attachment_list,
-                    db=None,
+                    db=self.db,
                 )
             else:
                 from app.shared.utils.email.email_service import send_email as _send
-                await _send(subject=subject, recipients=to_recipients, cc=cc_recipients or None, body_html=body_html, db=None)
+                await _send(subject=subject, recipients=to_recipients, cc=cc_recipients or None, body_html=body_html, db=self.db)
         finally:
             for p in temp_paths:
                 try:
@@ -1605,7 +1605,7 @@ class SupplierRelationService:
             recipients=to_recipients,
             cc=cc_recipients or None,
             body_html=body_html,
-            db=None,
+            db=self.db,
         )
 
         plan.plan_status = PLAN_STATUS_REQUEST_SENT
@@ -1844,7 +1844,7 @@ class SupplierRelationService:
             recipients=to_recipients,
             cc=cc_recipients or None,
             body_html=body_html,
-            db=None,
+            db=self.db,
         )
 
         plan.updated_at = datetime.now()
@@ -2125,7 +2125,7 @@ class SupplierRelationService:
             recipients=to_recipients,
             cc=cc_recipients or None,
             body_html=body_html,
-            db=None,
+            db=self.db,
         )
 
         plan.updated_at = datetime.now()
@@ -2398,7 +2398,7 @@ class SupplierRelationService:
             recipients=to_recipients,
             cc=cc_recipients or None,
             body_html=body_html,
-            db=None,
+            db=self.db,
         )
 
     async def send_development_plan_review_notification(
@@ -2892,7 +2892,7 @@ class SupplierRelationService:
                     cc=cc_recipients or None,
                     body_html=body_html,
                     attachments=attachment_list,
-                    db=None,
+                    db=self.db,
                 )
             else:
                 await send_email(
@@ -2900,7 +2900,7 @@ class SupplierRelationService:
                     recipients=to_recipients,
                     cc=cc_recipients or None,
                     body_html=body_html,
-                    db=None,
+                    db=self.db,
                 )
         finally:
             for p in temp_paths:
@@ -3961,6 +3961,7 @@ class SupplierRelationService:
                     subject=subject,
                     recipients=[buyer_email],
                     body_html=body_html,
+                    db=self.db,
                 )
             except Exception:
                 logger.exception(

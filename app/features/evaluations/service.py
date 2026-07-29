@@ -875,6 +875,7 @@ async def ingest_batch(
                             subject=subject,
                             recipients=[buyer_email],
                             body_html=body_html,
+                            db=db,
                         )
                     except Exception:
                         pass  # email failure must not roll back the evaluation batch
