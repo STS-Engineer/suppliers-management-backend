@@ -312,9 +312,13 @@ class AuthService:
         self, status_filter: str | None = None
     ) -> list[schemas.AccountRequestResponse]:
         stmt = select(AccessIdentity).where(
-            AccessIdentity.registration_status.in_(["pending", "approved", "rejected"])
+            AccessIdentity.registration_status.in_(["pending", "approved", "active", "rejected"])
         )
-        if status_filter:
+        if status_filter == "approved":
+            # "Approved" covers the full post-approval lifecycle: still shows
+            # accounts that have since completed activation.
+            stmt = stmt.where(AccessIdentity.registration_status.in_(["approved", "active"]))
+        elif status_filter:
             stmt = stmt.where(AccessIdentity.registration_status == status_filter)
         stmt = stmt.order_by(AccessIdentity.created_at.desc())
         result = await self.db.execute(stmt)
