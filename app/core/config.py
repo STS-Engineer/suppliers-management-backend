@@ -94,14 +94,11 @@ class Settings(BaseSettings):
         "purchasing_manager,purchasing_director,vp_conversion,supplier_owner"
     )
 
-    ACTION_PLAN_API_URL: str = Field(
-        default="https://sales-feedback.azurewebsites.net",
-        validation_alias=AliasChoices("ACTION_PLAN_API_URL", "action_plan_api_url"),
-    )
-
-    # AVO Carbon Central MCP — People/HR directory, used to populate the
-    # Project Manager picker on the gate approval form with real employee
-    # emails instead of free text.
+    # AVO Carbon Central MCP — same server exposes several independent DB
+    # backends via tool namespaces: People/HR directory (populates the
+    # Project Manager picker on the gate approval form) and the shared
+    # Action Plan DB (sujet/action tools, gated on ACTION_PLAN_DATABASE_URL
+    # on the MCP's own side).
     AVO_MCP_URL: str = Field(
         default="https://avo-client-db-mcp.azurewebsites.net/mcp",
         validation_alias=AliasChoices("AVO_MCP_URL", "avo_mcp_url"),

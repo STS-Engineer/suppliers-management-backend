@@ -3591,7 +3591,7 @@ class PurchasingValueService:
             "version": "2.0",
             "plan_code": plan_code,
             "plan_title": payload.plan_title,
-            "inserted_by": user_email,
+            "inserted_by": "suppliers_purchasing_value_system",
             "responsable": payload.responsable,
             "email_responsable": payload.email_responsable,
             "demandeur": payload.demandeur,
@@ -3623,6 +3623,11 @@ class PurchasingValueService:
             updated_by=user_email,
         )
         self.db.add(plan)
+        await self.db.flush()
+        # Best-effort — a failed auto-sync doesn't block the plan being saved
+        # locally; external_push_status records the outcome for the explicit
+        # /sync endpoint to retry later.
+        await self._attempt_mcp_sync(plan, opportunity_id)
         await self.db.flush()
         await self._notify_action_responsible(
             payload.email_responsable, user_email, opportunity_id
@@ -3664,7 +3669,7 @@ class PurchasingValueService:
             "version": "2.0",
             "plan_code": plan_code,
             "plan_title": plan_title,
-            "inserted_by": user_email,
+            "inserted_by": "suppliers_purchasing_value_system",
             "responsable": resp_name,
             "email_responsable": payload.email_responsable,
             "sujets": [
@@ -3690,6 +3695,8 @@ class PurchasingValueService:
             updated_by=user_email,
         )
         self.db.add(plan)
+        await self.db.flush()
+        await self._attempt_mcp_sync(plan, opportunity_id)
         await self.db.flush()
         await self._notify_action_responsible(
             payload.email_responsable, user_email, opportunity_id
@@ -3724,7 +3731,14 @@ class PurchasingValueService:
         if payload.email_demandeur is not None:
             existing["email_demandeur"] = payload.email_demandeur
         if payload.sujets is not None:
-            existing["sujets"] = _strip_none([s.model_dump(mode="json") for s in payload.sujets])
+            from app.features.purchasing_value.action_plan_mcp_sync import (
+                carry_forward_external_ids,
+            )
+
+            new_sujets = _strip_none([s.model_dump(mode="json") for s in payload.sujets])
+            # Preserve sync identity from any prior sync before the old tree is discarded.
+            carry_forward_external_ids(existing.get("sujets"), new_sujets)
+            existing["sujets"] = new_sujets
             self._validate_closed_actions(existing["sujets"])
         if payload.plan_title is not None:
             existing["plan_title"] = payload.plan_title
@@ -3734,11 +3748,10 @@ class PurchasingValueService:
         plan.updated_at = datetime.utcnow()
         plan.updated_by = user_email
 
-        # External push disabled — mark as pending for future sync.
-        # TODO: re-enable once ACTION_PLAN_DATABASE_URL is configured on Azure.
-        # push_status, push_error = await self._push_to_external(existing)
-        plan.external_push_status = "pending"
-        plan.external_push_error = None
+        # Best-effort — a failed auto-sync doesn't block the edit being saved
+        # locally; external_push_status records the outcome for the explicit
+        # /sync endpoint to retry later.
+        await self._attempt_mcp_sync(plan, opportunity_id)
 
         await self.db.flush()
         if (
@@ -3750,46 +3763,112 @@ class PurchasingValueService:
             )
         return plan
 
+    async def _attempt_mcp_sync(self, plan, opportunity_id: Optional[int] = None) -> Optional[str]:
+        """Best-effort push of `plan` to the Action Plan MCP. Never raises —
+        records the outcome on external_push_status/error (flushed by the
+        caller) so a failed auto-sync can still be retried via the explicit
+        /sync endpoint. Returns the error message on failure, None on success
+        or if the MCP isn't configured."""
+        from app.features.purchasing_value.action_plan_mcp_sync import (
+            is_enabled,
+            sync_plan_to_mcp,
+        )
+
+        if not plan.plan_data:
+            return None
+        if not is_enabled():
+            plan.external_push_status = "pending"
+            plan.external_push_error = None
+            return None
+
+        opportunity_name = None
+        target_opportunity_id = opportunity_id or plan.opportunity_id
+        if target_opportunity_id is not None:
+            opportunity = await self.get_opportunity(target_opportunity_id)
+            opportunity_name = opportunity.opportunity_name
+
+        try:
+            await sync_plan_to_mcp(
+                plan.plan_data,
+                plan.plan_code,
+                target_opportunity_id,
+                opportunity_name,
+            )
+            # sync_plan_to_mcp mutates plan_data in place (writes "_external_id"
+            # onto each synced node) so re-syncs update instead of duplicating.
+            flag_modified(plan, "plan_data")
+            plan.external_push_status = "ok"
+            plan.external_push_error = None
+            return None
+        except Exception as exc:
+            error = str(exc)[:500]
+            plan.external_push_status = "failed"
+            plan.external_push_error = error
+            logger.warning(
+                "Action Plan MCP sync failed for plan %s: %s", plan.action_plan_id, exc
+            )
+            return error
+
     async def sync_action_plan(self, action_plan_id: int, opportunity_id: Optional[int] = None) -> dict:
-        """Push a locally stored action plan to the external sales-feedback API.
-        Call POST .../action-plans/{id}/sync once ACTION_PLAN_DATABASE_URL is configured.
-        Returns {"status": "ok"} or raises AppException on failure.
+        """Sync a locally stored action plan to the shared Action Plan DB via
+        the AVO Carbon Central MCP's sujet/action tools — the same MCP server
+        used for the People/HR directory, different tool namespace. Returns
+        {"status": "ok"} or raises AppException.
         """
-        import httpx
-        from app.core.config import settings
+        from app.features.purchasing_value.action_plan_mcp_sync import is_enabled
 
         plan = await self.get_action_plan(action_plan_id, opportunity_id)
         if not plan.plan_data:
             raise AppException(400, "Plan has no data to sync.", "NO_PLAN_DATA")
+        if not is_enabled():
+            raise AppException(
+                503,
+                "Action Plan MCP sync is not configured (AVO_MCP_URL is unset).",
+                "SYNC_DISABLED",
+            )
 
+        error = await self._attempt_mcp_sync(plan, opportunity_id)
+        await self.db.flush()
+        if error:
+            raise AppException(502, f"Could not sync to Action Plan MCP: {error}", "SYNC_FAILED")
+        return {"status": "ok"}
+
+    async def _attempt_mcp_delete_action(self, external_id: Optional[int]) -> None:
+        """Best-effort delete of a synced action on the MCP side — never
+        raises; a failure here shouldn't block the local delete the caller
+        already committed to. No-op if the action was never synced or the
+        MCP isn't configured."""
+        if external_id is None:
+            return
+        from app.features.purchasing_value.action_plan_mcp_sync import (
+            delete_action_from_mcp,
+            is_enabled,
+        )
+
+        if not is_enabled():
+            return
         try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                resp = await client.post(
-                    f"{settings.ACTION_PLAN_API_URL}/api/v2/plans",
-                    json=plan.plan_data,
-                )
-            if resp.status_code in (200, 201):
-                plan.external_push_status = "ok"
-                plan.external_push_error = None
-                await self.db.flush()
-                return {"status": "ok", "external_response": resp.json()}
-            else:
-                plan.external_push_status = "failed"
-                plan.external_push_error = resp.text[:500]
-                await self.db.flush()
-                raise AppException(502, f"External API error {resp.status_code}: {resp.text[:200]}", "SYNC_FAILED")
-        except AppException:
-            raise
+            await delete_action_from_mcp(external_id)
         except Exception as exc:
-            plan.external_push_status = "failed"
-            plan.external_push_error = str(exc)[:500]
-            await self.db.flush()
-            raise AppException(502, f"Could not reach external API: {exc}", "SYNC_UNREACHABLE")
+            logger.warning(
+                "Failed to delete synced action %s on the Action Plan MCP: %s",
+                external_id, exc,
+            )
 
     async def delete_action_plan(self, action_plan_id: int, opportunity_id: Optional[int] = None) -> None:
+        from app.features.purchasing_value.action_plan_mcp_sync import (
+            collect_external_action_ids,
+        )
+
         plan = await self.get_action_plan(action_plan_id, opportunity_id)
+        # The MCP has no delete_sujet tool — only the plan's synced actions can
+        # be cleaned up this way; the wrapper sujets (per-plan / PV-OPP-{id} /
+        # PV-GENERAL / PV-ROOT) remain in the shared DB regardless.
+        external_ids = collect_external_action_ids((plan.plan_data or {}).get("sujets"))
         await self.db.delete(plan)
         await self.db.flush()
+        for external_id in external_ids:
+            await self._attempt_mcp_delete_action(external_id)
 
     async def list_all_action_items(
         self,
@@ -4213,12 +4292,14 @@ class PurchasingValueService:
         # Only the responsible / a manager / a related owner may delete an action.
         await self._assert_action_can_manage(plan, actions[action_idx], user_email, actor_role)
 
+        deleted_external_id = actions[action_idx].get("_external_id")
         actions.pop(action_idx)
 
         remaining = sum(len(s.get("actions", [])) for s in sujets)
         if remaining == 0:
             await self.db.delete(plan)
             await self.db.flush()
+            await self._attempt_mcp_delete_action(deleted_external_id)
             return {"plan_deleted": True, "action_plan_id": action_plan_id}
 
         plan.plan_data = data
@@ -4226,6 +4307,7 @@ class PurchasingValueService:
         plan.updated_at = datetime.utcnow()
         plan.updated_by = user_email
         await self.db.flush()
+        await self._attempt_mcp_delete_action(deleted_external_id)
         return {"plan_deleted": False, "action_plan_id": action_plan_id}
 
     async def send_action_item_reminder(

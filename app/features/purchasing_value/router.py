@@ -1369,8 +1369,9 @@ async def sync_action_plan(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
-    """Push a pending action plan to the external sales-feedback API.
-    Use this once ACTION_PLAN_DATABASE_URL is configured on Azure.
+    """Sync a pending action plan to the shared Action Plan DB via the AVO
+    Carbon Central MCP. Requires AVO_MCP_URL to be configured — returns 503
+    otherwise.
     """
     _require(current_user, _NON_VIEWER)
     try:
@@ -1431,6 +1432,29 @@ async def create_standalone_action_plan(
         await db.commit()
         from app.features.purchasing_value.schemas import ActionPlanResponse
         return {"status": "success", "data": ActionPlanResponse.model_validate(plan).model_dump()}
+    except AppException:
+        await db.rollback()
+        raise
+    except Exception:
+        await db.rollback()
+        raise
+
+
+@router.post("/action-plans/{action_plan_id}/sync", response_model=dict)
+async def sync_standalone_action_plan(
+    action_plan_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Sync a general (not attached to any opportunity) action plan — same as
+    sync_action_plan below, but for plans that have no opportunity_id to nest
+    the route under."""
+    _require(current_user, _NON_VIEWER)
+    try:
+        svc = PurchasingValueService(db)
+        result = await svc.sync_action_plan(action_plan_id, opportunity_id=None)
+        await db.commit()
+        return {"status": "success", "data": result}
     except AppException:
         await db.rollback()
         raise
