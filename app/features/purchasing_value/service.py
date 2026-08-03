@@ -3964,6 +3964,15 @@ class PurchasingValueService:
                         "can_manage": self._action_can_manage(
                             action, plan, opp, viewer_email, viewer_role
                         ),
+                        # Plan-level push status ("ok" | "failed" | "pending") — the MCP
+                        # sync runs per-plan, not per-action, so this reflects the whole
+                        # plan's last sync attempt. "synced" here means THIS action has
+                        # its own "_external_id" written back from a successful sync,
+                        # which can lag behind plan-level "ok" if this action was added
+                        # after the last successful sync.
+                        "external_push_status": plan.external_push_status,
+                        "external_push_error": plan.external_push_error,
+                        "synced": action.get("_external_id") is not None,
                     })
 
         items.sort(key=lambda x: (x["responsible_email"] or "zzz", x["due_date"] or "9999"))

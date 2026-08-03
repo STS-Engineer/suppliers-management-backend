@@ -55,7 +55,7 @@ _STATUS_TO_MCP = {"open": "open", "blocked": "on_hold", "closed": "done"}
 # observation) has no equivalent field in our ActionNodeV2 schema — we don't
 # collect this from the user today, so every synced action defaults to
 # "corrective". Revisit if the UI grows a field for this.
-DEFAULT_ACTION_TYPE = "corrective"
+DEFAULT_ACTION_TYPE = "action"
 
 
 def is_enabled() -> bool:
@@ -75,7 +75,10 @@ def carry_forward_external_ids(
 
     Matches siblings by titre (best-effort — a title edit or reorder that
     also changes titles will be treated as a new node, which just means one
-    extra create + an orphaned row on the MCP side rather than data loss)."""
+    extra create + an orphaned row on the MCP side rather than data loss).
+    Also carries forward each action's attachment "_external_id"s, matched by
+    blob_name — belt-and-suspenders, since `attachments` is an untyped dict
+    list in ActionNodeV2 and normally survives the update round-trip as-is."""
     old_nodes = old_nodes or []
     new_nodes = new_nodes or []
 
@@ -92,6 +95,13 @@ def carry_forward_external_ids(
             new_node["_external_id"] = old_node["_external_id"]
         if "_last_synced_status" in old_node:
             new_node["_last_synced_status"] = old_node["_last_synced_status"]
+        old_attachments_by_blob = {
+            a.get("blob_name"): a for a in (old_node.get("attachments") or []) if a.get("blob_name")
+        }
+        for new_att in new_node.get("attachments") or []:
+            old_att = old_attachments_by_blob.get(new_att.get("blob_name"))
+            if old_att and "_external_id" in old_att:
+                new_att["_external_id"] = old_att["_external_id"]
         carry_forward_external_ids(
             old_node.get("sous_sujets"), new_node.get("sous_sujets")
         )
@@ -228,6 +238,32 @@ async def _get_or_create_sujet(
     return created["id"]
 
 
+async def _sync_attachments(action: dict[str, Any], action_external_id: int) -> None:
+    """Register any not-yet-synced attachments on this action via
+    add_action_attachment. Tracks sync identity per attachment the same way
+    actions/sujets do (writes "_external_id" back onto the attachment dict)
+    so re-syncing doesn't register the same file twice. Files themselves stay
+    in our own Azure Blob storage — only the reference (file_url) is passed,
+    matching what add_action_attachment expects (file_path, not bytes)."""
+    for attachment in action.get("attachments") or []:
+        if attachment.get("_external_id") is not None:
+            continue
+        file_path = attachment.get("file_url")
+        if not file_path:
+            continue
+        file_name = attachment.get("filename") or attachment.get("blob_name") or "attachment"
+        created = await _call_mcp_tool(
+            "add_action_attachment",
+            {
+                "action_id": action_external_id,
+                "file_name": file_name,
+                "file_path": file_path,
+                "uploaded_by": attachment.get("uploaded_by"),
+            },
+        )
+        attachment["_external_id"] = created["id"]
+
+
 async def _sync_action(
     action: dict[str, Any], sujet_id: int, parent_action_id: Optional[int] = None
 ) -> None:
@@ -289,6 +325,8 @@ async def _sync_action(
                 "ordre": action.get("ordre"),
             },
         )
+
+    await _sync_attachments(action, external_id)
 
     for sub in action.get("sous_actions") or []:
         await _sync_action(sub, sujet_id, parent_action_id=external_id)
