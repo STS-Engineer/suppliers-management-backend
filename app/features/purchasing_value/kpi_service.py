@@ -35,6 +35,36 @@ def _pct(num: float, denom: float) -> Optional[float]:
     return round((num / denom) * 100, 1)
 
 
+def _owner_group_key(raw: str) -> str:
+    """Case/whitespace/email-vs-name-insensitive key for grouping idea_owner values
+    that refer to the same person. Monday imports write this field inconsistently
+    (sometimes an email, sometimes a plain display name), so two raw strings for the
+    same buyer must not be treated as two different people."""
+    s = raw.strip()
+    if "@" in s:
+        local = s.split("@", 1)[0]
+        s = " ".join(part for part in local.replace(".", " ").replace("_", " ").split())
+    else:
+        s = " ".join(s.split())
+    return s.lower()
+
+
+def _build_owner_alias_map(raw_values: list[str]) -> dict[str, str]:
+    """Map every observed raw idea_owner string to one representative raw value per
+    person (preferring an email-form value when the group has one, since it's the
+    more precise identifier) — so filtering/grouping by any variant catches all of
+    them."""
+    groups: dict[str, list[str]] = {}
+    for raw in raw_values:
+        groups.setdefault(_owner_group_key(raw), []).append(raw)
+    alias_map: dict[str, str] = {}
+    for raws in groups.values():
+        representative = next((r for r in raws if "@" in r), raws[0])
+        for r in raws:
+            alias_map[r] = representative
+    return alias_map
+
+
 @dataclass
 class KpiFilters:
     """Multi-dimensional filter for the KPI dashboard.
@@ -268,17 +298,32 @@ class PurchasingKpiService:
         opportunity_opp_ids = set(opportunity_pipeline_by_opp)
 
         # ── Available filter options (full dataset, before any filter) ────
+        # Scoped to opportunities that actually have a kpi_line — an opportunity
+        # that's Cancelled or in an inactive phase with no surviving line would
+        # otherwise offer a filter tag that always resolves to an empty dashboard.
+        _opp_ids_with_lines = {ln.opportunity_id for ln in kpi_lines if ln.opportunity_id}
+        _opps_with_lines = [o for o in all_opps if o.opportunity_id in _opp_ids_with_lines]
+
         _plants_seen: dict[int, str] = {}
         for ln in kpi_lines:
             if ln.plant_id and ln.plant:
                 _plants_seen[ln.plant_id] = ln.plant.site_name
+        # idea_owner is written inconsistently by the Monday import (email vs plain
+        # display name, casing/whitespace variants) — alias every raw value seen to
+        # one representative per person so filters/grouping don't show duplicates.
+        _owner_alias = _build_owner_alias_map([o.idea_owner for o in all_opps if o.idea_owner])
+
+        def _owner_of(o) -> Optional[str]:
+            raw = o.idea_owner if o else None
+            return _owner_alias.get(raw, raw) if raw else raw
+
         _available_filters = {
             "plants": [
                 {"id": k, "name": v}
                 for k, v in sorted(_plants_seen.items(), key=lambda x: x[1])
             ],
-            "categories": sorted({o.opportunity_type for o in all_opps if o.opportunity_type}),
-            "buyers": sorted({o.idea_owner for o in all_opps if o.idea_owner}),
+            "categories": sorted({o.opportunity_type for o in _opps_with_lines if o.opportunity_type}),
+            "buyers": sorted({_owner_of(o) for o in _opps_with_lines if o.idea_owner}),
         }
 
         # ── Apply multi-dimensional filters (reassign working sets) ───────
@@ -291,14 +336,24 @@ class PurchasingKpiService:
                 ln for ln in kpi_lines
                 if (not _plant_set or ln.plant_id in _plant_set)
                 and (not _cat_set   or (ln.opportunity and ln.opportunity.opportunity_type in _cat_set))
-                and (not _buyer_set or (ln.opportunity and ln.opportunity.idea_owner in _buyer_set))
+                and (not _buyer_set or (ln.opportunity and _owner_of(ln.opportunity) in _buyer_set))
             ]
             active_lines = [line for line in kpi_lines if line.status == "Active"]
+            # all_lines feeds the FY-agnostic "Since Jan 2026" total below — it must
+            # shrink with the same plant/type/buyer filters, otherwise that one figure
+            # stays frozen at the unfiltered total while every other KPI on the page
+            # correctly drops to 0 for a filter combination with no matching data.
+            all_lines = [
+                ln for ln in all_lines
+                if (not _plant_set or ln.plant_id in _plant_set)
+                and (not _cat_set   or (ln.opportunity and ln.opportunity.opportunity_type in _cat_set))
+                and (not _buyer_set or (ln.opportunity and _owner_of(ln.opportunity) in _buyer_set))
+            ]
             all_opps = [
                 o for o in all_opps
                 if (not _plant_set or o.plant_id in _plant_set)
                 and (not _cat_set   or (o.opportunity_type or "") in _cat_set)
-                and (not _buyer_set or (o.idea_owner or "") in _buyer_set)
+                and (not _buyer_set or _owner_of(o) in _buyer_set)
             ]
             # Re-derive every dict/list keyed off the PRE-filter data — otherwise
             # sections built earlier (committed budget, pipeline, by-type lookup)
@@ -1130,7 +1185,7 @@ class PurchasingKpiService:
         buyer_map: dict[str, dict] = {}
         for line in kpi_lines:
             opp = line.opportunity
-            buyer_email = (opp.idea_owner if opp else None) or "Unknown"
+            buyer_email = _owner_of(opp) or "Unknown"
             if buyer_email not in buyer_map:
                 buyer_map[buyer_email] = {
                     "buyer_email": buyer_email,
@@ -1239,6 +1294,7 @@ class PurchasingKpiService:
                 "pacing_late_count": pacing_late_count,
                 "pacing_on_time_count": pacing_on_time_count,
                 "monthly_update_pct": monthly_update_pct,
+                "monthly_update_ref_month": _update_ref_month.strftime("%b %Y"),
                 # Portfolio quality
                 "avg_priority_score": avg_priority,
                 # Counts
