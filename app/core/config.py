@@ -21,6 +21,12 @@ class Settings(BaseSettings):
     )
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 480
 
+    # Sign-in brute-force protection. After LOGIN_MAX_ATTEMPTS consecutive
+    # wrong passwords, the account is locked for LOGIN_LOCKOUT_MINUTES and
+    # then auto-unlocks on the next attempt past that time.
+    LOGIN_MAX_ATTEMPTS: int = 5
+    LOGIN_LOCKOUT_MINUTES: int = 15
+
     SMTP_HOST: str = ""
     SMTP_PORT: int = 25
     SMTP_USER: str = ""
@@ -82,6 +88,13 @@ class Settings(BaseSettings):
     # Auth flows
     OTP_EXPIRE_MINUTES: int = 15
     ACTIVATION_LINK_EXPIRE_HOURS: int = 48
+    # Max wrong OTP guesses allowed against a single issued code before it is
+    # invalidated and the user must request a new one (brute-force protection).
+    OTP_MAX_ATTEMPTS: int = 5
+    # Minimum delay between two "forgot password" requests for the same
+    # identity, so repeatedly hitting the endpoint can't spam the user's inbox
+    # or spin up unlimited fresh OTPs to extend the brute-force window.
+    OTP_RESEND_COOLDOWN_SECONDS: int = 60
 
     # Gate-approval link lifetime in hours. 0 (default) = links never expire,
     # so the approval panel can validate at its own pace. Set a positive value

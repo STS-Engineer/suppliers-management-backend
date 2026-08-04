@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import secrets
 from datetime import UTC, datetime, timedelta
@@ -11,7 +12,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.core.exceptions import ConflictError, ForbiddenError, NotFoundError, UnauthorizedError
+from app.core.exceptions import (
+    ConflictError,
+    ForbiddenError,
+    NotFoundError,
+    TooManyRequestsError,
+    UnauthorizedError,
+)
 from app.core.security import create_access_token, decode_token, hash_password, verify_password
 from app.features.auth import schemas
 from app.features.auth.email_templates import (
@@ -60,6 +67,19 @@ class AuthService:
         if not identity:
             raise UnauthorizedError("Invalid email or password.")
 
+        now = _utcnow()
+
+        if identity.locked_until and identity.locked_until > now:
+            minutes_left = int((identity.locked_until - now).total_seconds() // 60) + 1
+            raise TooManyRequestsError(
+                f"Too many failed sign-in attempts. Please try again in "
+                f"{minutes_left} minute{'s' if minutes_left != 1 else ''}."
+            )
+        if identity.locked_until and identity.locked_until <= now:
+            # Lockout window has passed — start a fresh attempt count.
+            identity.locked_until = None
+            identity.failed_login_attempts = 0
+
         # Give registration-aware errors before checking the password,
         # so users who submitted a request know their status.
         if identity.registration_status == "pending":
@@ -76,12 +96,25 @@ class AuthService:
             )
 
         if not verify_password(payload.password, identity.password_hash):
+            identity.failed_login_attempts += 1
+            if identity.failed_login_attempts >= settings.LOGIN_MAX_ATTEMPTS:
+                identity.locked_until = now + timedelta(minutes=settings.LOGIN_LOCKOUT_MINUTES)
+                await self._log_audit("account_locked", identity.email, identity.id_identity)
+                await self.db.commit()
+                raise TooManyRequestsError(
+                    "Too many failed sign-in attempts. Your account is locked for "
+                    f"{settings.LOGIN_LOCKOUT_MINUTES} minutes."
+                )
+            await self._log_audit("login_failed", identity.email, identity.id_identity)
+            await self.db.commit()
             raise UnauthorizedError("Invalid email or password.")
 
         if not identity.is_active:
             raise ForbiddenError("This account is inactive.")
 
-        identity.last_login_at = _utcnow()
+        identity.last_login_at = now
+        identity.failed_login_attempts = 0
+        identity.locked_until = None
         await self.db.commit()
 
         expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
@@ -183,6 +216,16 @@ class AuthService:
 
         identity = await self._get_identity_by_email(payload.email)
         if identity and identity.is_active and identity.registration_status == "active":
+            if await self._otp_resend_on_cooldown(identity.id_identity):
+                # Silently no-op — the previously issued OTP (and its remaining
+                # attempt budget) is still valid, so avoid handing an attacker
+                # a fresh unlimited-attempt code just by spamming this endpoint.
+                await self._log_audit(
+                    "password_reset_resend_throttled", identity.email, identity.id_identity
+                )
+                await self.db.commit()
+                return schemas.ForgotPasswordResponse(message=_GENERIC)
+
             # Invalidate any prior unused OTPs.
             await self._invalidate_tokens(identity.id_identity, "password_reset_otp")
 
@@ -218,21 +261,53 @@ class AuthService:
         if not identity or not identity.is_active or identity.registration_status != "active":
             raise UnauthorizedError("Invalid email or OTP.")
 
-        otp_hash = _hash_token(payload.otp)
         now = _utcnow()
 
-        stmt = select(AuthToken).where(
-            AuthToken.identity_id == identity.id_identity,
-            AuthToken.token_type == "password_reset_otp",
-            AuthToken.token_hash == otp_hash,
-            AuthToken.used_at.is_(None),
-            AuthToken.expires_at > now,
+        # Look up the active OTP by identity only (not by guessed value) so a
+        # wrong guess can still be counted against it. Locks the row so two
+        # concurrent submits can't each read the same attempt_count and both
+        # slip through under the cap.
+        stmt = (
+            select(AuthToken)
+            .where(
+                AuthToken.identity_id == identity.id_identity,
+                AuthToken.token_type == "password_reset_otp",
+                AuthToken.used_at.is_(None),
+                AuthToken.expires_at > now,
+            )
+            .order_by(AuthToken.created_at.desc())
+            .with_for_update()
         )
         result = await self.db.execute(stmt)
-        auth_token = result.scalar_one_or_none()
+        auth_token = result.scalars().first()
 
         if not auth_token:
             raise UnauthorizedError("Invalid or expired OTP.")
+
+        if auth_token.attempt_count >= settings.OTP_MAX_ATTEMPTS:
+            auth_token.used_at = now
+            await self._log_audit("otp_locked", identity.email, identity.id_identity)
+            await self.db.commit()
+            raise TooManyRequestsError(
+                "Too many incorrect attempts. Please request a new code."
+            )
+
+        if not hmac.compare_digest(auth_token.token_hash, _hash_token(payload.otp)):
+            auth_token.attempt_count += 1
+            remaining = settings.OTP_MAX_ATTEMPTS - auth_token.attempt_count
+            if remaining <= 0:
+                auth_token.used_at = now
+                await self._log_audit("otp_locked", identity.email, identity.id_identity)
+                await self.db.commit()
+                raise TooManyRequestsError(
+                    "Too many incorrect attempts. Please request a new code."
+                )
+            await self._log_audit("otp_verify_failed", identity.email, identity.id_identity)
+            await self.db.commit()
+            attempt_word = "attempt" if remaining == 1 else "attempts"
+            raise UnauthorizedError(
+                f"Invalid OTP. {remaining} {attempt_word} remaining."
+            )
 
         auth_token.used_at = now
         await self._log_audit("otp_verified", identity.email, identity.id_identity)
@@ -604,6 +679,24 @@ class AuthService:
         )
         result = await self.db.execute(stmt)
         return list(result.scalars().all())
+
+    async def _otp_resend_on_cooldown(self, identity_id: int) -> bool:
+        stmt = (
+            select(AuthToken)
+            .where(
+                AuthToken.identity_id == identity_id,
+                AuthToken.token_type == "password_reset_otp",
+            )
+            .order_by(AuthToken.created_at.desc())
+        )
+        result = await self.db.execute(stmt)
+        latest = result.scalars().first()
+        if not latest:
+            return False
+        cooldown_expires_at = latest.created_at + timedelta(
+            seconds=settings.OTP_RESEND_COOLDOWN_SECONDS
+        )
+        return _utcnow() < cooldown_expires_at
 
     async def _invalidate_tokens(self, identity_id: int, token_type: str) -> None:
         stmt = select(AuthToken).where(

@@ -57,9 +57,16 @@ class ForbiddenError(AppException):
 
 class ConflictError(AppException):
     """Resource conflict - 409."""
-    
+
     def __init__(self, message: str, details: Optional[Dict[str, Any]] = None):
         super().__init__(message, 409, "CONFLICT_ERROR", details)
+
+
+class TooManyRequestsError(AppException):
+    """Rate limit / lockout - 429."""
+
+    def __init__(self, message: str = "Too many requests. Please try again later."):
+        super().__init__(message, 429, "TOO_MANY_REQUESTS_ERROR")
 
 
 class FileUploadError(AppException):

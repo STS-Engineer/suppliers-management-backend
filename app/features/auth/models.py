@@ -36,6 +36,14 @@ class AccessIdentity(Base):
     # Email of the approver who moved this account out of 'pending'.
     approved_by: Mapped[str | None] = mapped_column(String(200), nullable=True)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Consecutive wrong-password count since the last successful sign-in or
+    # lockout expiry. Reset to 0 on success or once locked_until has passed.
+    failed_login_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
+    # Set once failed_login_attempts hits settings.LOGIN_MAX_ATTEMPTS; sign-in
+    # is refused until this timestamp passes, then it auto-clears.
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.current_timestamp()
     )
@@ -59,6 +67,10 @@ class AuthToken(Base):
     token_type: Mapped[str] = mapped_column(String(50), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Count of failed verification attempts against this specific token
+    # (only meaningful for 'password_reset_otp'). Used to lock the code out
+    # after too many wrong guesses.
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.current_timestamp()
     )
