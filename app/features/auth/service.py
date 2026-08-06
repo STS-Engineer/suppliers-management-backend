@@ -693,10 +693,27 @@ class AuthService:
         latest = result.scalars().first()
         if not latest:
             return False
+        now = _utcnow()
+        # A token that's already locked out (5 failed verify_otp attempts),
+        # consumed, or expired has no live code left to protect against
+        # spam -- treat that the same as "no token at all" so forgot_password
+        # can issue a fresh OTP right away. Previously the cooldown was
+        # measured from the dead token's created_at regardless of its state,
+        # so clicking "Send reset code" right after a lockout silently
+        # no-op'd (no new token, no email) for up to OTP_RESEND_COOLDOWN_SECONDS
+        # -- forgot_password still returns its generic success message either
+        # way, so the user had no sign anything was wrong.
+        latest_is_live = (
+            latest.used_at is None
+            and latest.expires_at > now
+            and latest.attempt_count < settings.OTP_MAX_ATTEMPTS
+        )
+        if not latest_is_live:
+            return False
         cooldown_expires_at = latest.created_at + timedelta(
             seconds=settings.OTP_RESEND_COOLDOWN_SECONDS
         )
-        return _utcnow() < cooldown_expires_at
+        return now < cooldown_expires_at
 
     async def _invalidate_tokens(self, identity_id: int, token_type: str) -> None:
         stmt = select(AuthToken).where(
