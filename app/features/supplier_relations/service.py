@@ -239,7 +239,7 @@ class SupplierRelationService:
 
         # Q2 — latest pld_class_criteria_detail per (id_relation, criteria_type)
         base_cols = [
-            "id_detail", "id_relation", "criteria_type",
+            "id_detail", "id_relation", "criteria_type", "not_applicable",
             "evidence_file_name", "validity_start_date", "validity_end_date", "signature_date",
         ]
         if has_doc_col:
@@ -305,6 +305,10 @@ class SupplierRelationService:
                 "evidence_file_name":  row["evidence_file_name"],
                 "document_url":  get_fresh_doc_url(doc.file_url) if doc and doc.file_url else recovered_url,
                 "document_name": doc.document_name if doc else row["evidence_file_name"],
+                # Lets the Criteria Validity Tracker exclude this criterion from
+                # "No data" entirely -- a criterion an evaluator explicitly marked
+                # Not Applicable isn't "missing", it just doesn't apply here.
+                "not_applicable": bool(row.get("not_applicable")),
             }
 
         # Build response — only relations that have at least one eval input.
