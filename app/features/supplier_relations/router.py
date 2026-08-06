@@ -16,7 +16,7 @@ from app.features.auth.models import AccessIdentity
 from app.features.notifications.service import NotificationService
 
 from app.db.models import AvocarbonSite, Contact, ContactSiteRelation, SupplierDevelopmentPlan, SupplierGroup, SupplierSiteRelation, SupplierSpendByYear, SupplierUnit
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Optional
 
 router = APIRouter(prefix="/supplier-relations", tags=["supplier-relations"])
@@ -57,30 +57,29 @@ async def get_purchasers_for_site(
 ):
     """Return purchasers relevant for a given Avocarbon site.
 
-    site_purchasers — local_purchaser accounts explicitly assigned to this site
-                      via the access_identity_site junction table.
+    local_purchasers — all active local_purchaser accounts across every plant
+                       (no longer restricted to this site; site_id is accepted
+                       for backward compatibility but is not used to filter).
     group_purchasers — global_purchaser / purchasing_director accounts that cover
                        all sites (no site restriction; always returned).
     """
-    site_rows = await db.execute(
+    local_rows = await db.execute(
         text("""
-            SELECT ai.id_identity, ai.full_name, ai.email, ai.access_profile
-            FROM access_identity ai
-            JOIN access_identity_site ais ON ais.id_identity = ai.id_identity
-            WHERE ais.id_site = :site_id
-              AND ai.is_active = TRUE
-            ORDER BY ai.full_name
-        """),
-        {"site_id": site_id},
+            SELECT id_identity, full_name, email, access_profile
+            FROM access_identity
+            WHERE is_active = TRUE
+              AND access_profile = 'local_purchaser'
+            ORDER BY full_name
+        """)
     )
-    site_purchasers = [
+    local_purchasers = [
         {
             "id_identity": r.id_identity,
             "full_name": r.full_name,
             "email": r.email,
             "access_profile": r.access_profile,
         }
-        for r in site_rows.fetchall()
+        for r in local_rows.fetchall()
     ]
 
     group_rows = await db.execute(
@@ -105,7 +104,7 @@ async def get_purchasers_for_site(
     return {
         "status": "success",
         "data": {
-            "site_purchasers": site_purchasers,
+            "local_purchasers": local_purchasers,
             "group_purchasers": group_purchasers,
         },
     }
@@ -273,6 +272,7 @@ class RelationAdminPatch(BaseModel):
     """Partial update for admin-level relation fields."""
     panel_decision: Optional[str] = None
     is_active: Optional[bool] = None
+    alias_1: Optional[str] = Field(None, max_length=200)
 
 
 _PLAN_OPEN_STATUSES = {"draft", "sent", "in_progress", "under_review", "pending_decision"}
@@ -284,7 +284,7 @@ async def patch_relation(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
-    """Update admin-level fields on a supplier relation (panel_decision, is_active).
+    """Update admin-level fields on a supplier relation (panel_decision, is_active, alias_1).
 
     When is_active is set to False the response includes a warnings list
     describing open development plans that will be affected.
@@ -301,6 +301,9 @@ async def patch_relation(
 
     if data.panel_decision is not None:
         relation.panel_decision = data.panel_decision
+
+    if data.alias_1 is not None:
+        relation.alias_1 = data.alias_1
 
     if data.is_active is not None:
         deactivating = data.is_active is False and (relation.is_active is True)
@@ -368,6 +371,7 @@ async def patch_relation(
             "id_relation": relation_id,
             "panel_decision": relation.panel_decision,
             "is_active": relation.is_active,
+            "alias_1": relation.alias_1,
         },
         "warnings": warnings,
     }

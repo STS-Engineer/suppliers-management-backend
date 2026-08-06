@@ -93,6 +93,10 @@ class ContactCreate(ContactBase):
     email: Optional[str] = Field(None, max_length=200)
 
 
+class ContactUpdate(ContactBase):
+    """Schema for updating an existing contact (partial update)."""
+
+
 class ContactResponse(BaseModel):
     """Response schema for contact.
 

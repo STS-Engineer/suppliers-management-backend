@@ -1341,6 +1341,29 @@ async def list_contacts_for_unit(
         raise
 
 
+@router.put("/contacts/{contact_id}", response_model=dict)
+async def update_contact(
+    contact_id: int,
+    data: schemas.ContactUpdate,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """Update an existing contact (fix a typo in name/email/phone/role)."""
+    _block_viewer(current_user)
+    try:
+        service = SupplierService(db)
+        contact = await service.update_contact(contact_id, data)
+        return {
+            "status": "success",
+            "data": schemas.ContactResponse.model_validate(contact),
+            "message": f"Contact {contact_id} updated successfully",
+        }
+    except AppException:
+        raise
+    except Exception:
+        raise
+
+
 # ============================================================================
 # Certification Management Endpoints
 # ============================================================================

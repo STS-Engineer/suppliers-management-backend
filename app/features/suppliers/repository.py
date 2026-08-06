@@ -296,6 +296,16 @@ class SupplierRepository:
         result = await self.db.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def update_contact(self, contact_id: int, data: dict) -> Optional[Contact]:
+        """Update a contact."""
+        contact = await self.find_contact_by_id(contact_id)
+        if contact:
+            for key, value in data.items():
+                if value is not None and hasattr(contact, key):
+                    setattr(contact, key, value)
+            await self.db.flush()
+        return contact
+
     async def create_contact(self, data: dict) -> Contact:
         """Create a new contact."""
         contact = Contact(**data)

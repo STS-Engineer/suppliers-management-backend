@@ -873,6 +873,15 @@ class SupplierService:
         await self.db.commit()
         return contact
 
+    async def update_contact(self, contact_id: int, data: schemas.ContactUpdate) -> Contact:
+        """Update a contact."""
+        contact_data = data.model_dump(exclude_unset=True)
+        contact = await self.repo.update_contact(contact_id, contact_data)
+        if not contact:
+            raise AppException(f"Contact with ID {contact_id} not found", status_code=404)
+        await self.db.commit()
+        return contact
+
     async def list_contacts_for_group(self, group_id: int) -> List[Contact]:
         """List contacts for a supplier group."""
         group = await self.repo.find_group_by_id(group_id)
