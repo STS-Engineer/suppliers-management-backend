@@ -655,6 +655,14 @@ class ClassCriterionDetail(BaseModel):
     amount_value: Optional[Decimal] = Field(None, ge=0)
     amount_currency: Optional[str] = Field(None, max_length=10)
     auto_validity_end_date: bool = False
+    not_applicable: Optional[bool] = Field(
+        False,
+        description=(
+            "Excludes this criterion from the class score calculation "
+            "entirely (numerator and denominator) — distinct from leaving "
+            "it blank/invalid, which still counts as 0."
+        ),
+    )
     comments: Optional[str] = None
     score: Optional[Decimal] = Field(None, ge=-5, le=100)
 

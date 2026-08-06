@@ -1154,6 +1154,9 @@ class PldClassCriteriaDetail(AuditMixin, GovernanceMixin, Base):
     auto_validity_end_date: Mapped[bool] = mapped_column(
         Boolean, server_default="false", nullable=False
     )
+    not_applicable: Mapped[bool] = mapped_column(
+        Boolean, server_default="false", nullable=False
+    )
 
 
 class OperationalEvaluationInput(AuditMixin, GovernanceMixin, Base):

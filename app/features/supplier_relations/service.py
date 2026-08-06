@@ -426,7 +426,14 @@ class SupplierRelationService:
             "cons_or_wd": self._pluck(class_input, "cons_or_wd") or self._pluck(relation, "cons_or_wd"),
             "financial_health": self._pluck(class_input, "financial_health") or self._pluck(relation, "financial_health"),
         }
-        criteria_scores = await self.get_criteria_scores_breakdown(class_values_for_scores)
+        not_applicable_criteria = {
+            criteria_type
+            for criteria_type in CLASS_CRITERIA_FIELDS
+            if (criteria_details.get(criteria_type) or {}).get("not_applicable")
+        }
+        criteria_scores = await self.get_criteria_scores_breakdown(
+            class_values_for_scores, not_applicable_criteria
+        )
 
         # Load the unit to get its supplier_name (readable name)
         unit = await self.db.get(SupplierUnit, relation.id_supplier_unit)
@@ -3223,8 +3230,11 @@ class SupplierRelationService:
                 evaluation_date=evaluation_date,
             )
 
+        not_applicable_criteria = await self._resolve_not_applicable_criteria(
+            relation_id, submitted_details=data.class_criteria_details
+        )
         class_score = self._prefer_decimal(
-            await self._try_calculate_class_score(merged_values),
+            await self._try_calculate_class_score(merged_values, not_applicable_criteria),
             self._pluck(current_classification, "classification_score"),
         )
         class_value = (
@@ -3594,8 +3604,11 @@ class SupplierRelationService:
                 "financial_health", data.financial_health
             ),
         }
+        not_applicable_criteria = await self._resolve_not_applicable_criteria(
+            relation_id, submitted_details=data.class_criteria_details
+        )
         class_score = self._prefer_decimal(
-            await self._try_calculate_class_score(merged_values)
+            await self._try_calculate_class_score(merged_values, not_applicable_criteria)
         )
         class_value = (
             self._derive_class_value_from_score(class_score)
@@ -4062,6 +4075,7 @@ class SupplierRelationService:
             "amount_value",
             "amount_currency",
             "auto_validity_end_date",
+            "not_applicable",
             "comments",
         ]
         if has_document_column:
@@ -4127,6 +4141,7 @@ class SupplierRelationService:
                 "amount_value": entry["amount_value"],
                 "amount_currency": entry["amount_currency"],
                 "auto_validity_end_date": entry["auto_validity_end_date"],
+                "not_applicable": entry["not_applicable"],
                 "comments": entry["comments"],
                 "score": entry["score"],
             }
@@ -4437,7 +4452,12 @@ class SupplierRelationService:
                 "cons_or_wd":            self._pluck(previous_input, "cons_or_wd"),
                 "financial_health":      self._pluck(previous_input, "financial_health"),
             }
-            class_score = await self._try_calculate_class_score(merged)
+            not_applicable_criteria = await self._resolve_not_applicable_criteria(
+                relation.id_relation
+            )
+            class_score = await self._try_calculate_class_score(
+                merged, not_applicable_criteria
+            )
             class_value = (
                 self._derive_class_value_from_score(class_score)
                 if class_score is not None
@@ -4586,6 +4606,7 @@ class SupplierRelationService:
                     "amount_value",
                     "amount_currency",
                     "comments",
+                    "not_applicable",
                 )
             ):
                 continue
@@ -4604,6 +4625,7 @@ class SupplierRelationService:
                 "amount_value",
                 "amount_currency",
                 "auto_validity_end_date",
+                "not_applicable",
                 "entered_by",
                 "comments",
             ]
@@ -4622,6 +4644,7 @@ class SupplierRelationService:
                 "amount_value": detail.get("amount_value"),
                 "amount_currency": detail.get("amount_currency"),
                 "auto_validity_end_date": detail.get("auto_validity_end_date", False),
+                "not_applicable": bool(detail.get("not_applicable")),
                 "entered_by": changed_by,
                 "comments": detail.get("comments"),
             }
@@ -4700,6 +4723,7 @@ class SupplierRelationService:
     async def get_criteria_scores_breakdown(
         self,
         merged_values: dict[str, Optional[str]],
+        not_applicable: Optional[set[str]] = None,
     ) -> dict[str, Optional[float]]:
         """Return a per-criterion score map for live display in the UI.
 
@@ -4711,6 +4735,11 @@ class SupplierRelationService:
         alias (e.g. "30 days end of month or +"). Normalization is idempotent
         (a no-op on an already-canonical value), so this is safe regardless of
         whether the caller already normalized.
+
+        A criterion in `not_applicable` returns None here regardless of its
+        (possibly stale) selected_value, since it is excluded entirely from
+        the class score calculation -- callers should render it as "N/A"
+        rather than a blank/zero score badge.
         """
         criteria_map = {
             criteria_type: self._normalize_criteria_value(criteria_type, raw_value)
@@ -4730,6 +4759,9 @@ class SupplierRelationService:
         }
         result_map: dict[str, Optional[float]] = {}
         for criteria_type, selected_value in criteria_map.items():
+            if not_applicable and criteria_type in not_applicable:
+                result_map[criteria_type] = None
+                continue
             score = await self._lookup_pld_score(criteria_type, selected_value)
             result_map[criteria_type] = float(score) if score is not None else None
         return result_map
@@ -4840,24 +4872,58 @@ class SupplierRelationService:
         score = result.scalars().first()
         return Decimal(str(score)) if score is not None else None
 
+    async def _resolve_not_applicable_criteria(
+        self,
+        relation_id: int,
+        submitted_details: Optional[dict[str, Any]] = None,
+    ) -> set[str]:
+        """Which of the 11 class criteria are currently flagged Not Applicable
+        (excluded from the class score's numerator AND denominator) for this
+        relation — merges any freshly submitted flags (this request) over
+        what's already stored (previous cycle), falling back to stored when a
+        criterion isn't present in the submitted payload at all."""
+        latest_details = await self._get_latest_criteria_details(relation_id)
+        submitted_details = submitted_details or {}
+        result: set[str] = set()
+        for criteria_type in CLASS_CRITERIA_FIELDS:
+            submitted = submitted_details.get(criteria_type)
+            if hasattr(submitted, "model_dump"):
+                submitted = submitted.model_dump(exclude_none=True)
+            if isinstance(submitted, dict) and "not_applicable" in submitted:
+                flag = bool(submitted["not_applicable"])
+            else:
+                prev = latest_details.get(criteria_type) or {}
+                flag = bool(prev.get("not_applicable"))
+            if flag:
+                result.add(criteria_type)
+        return result
+
     async def _try_calculate_class_score(
         self,
         merged_values: dict[str, Optional[str]],
+        not_applicable: Optional[set[str]] = None,
     ) -> Optional[Decimal]:
-        # Always divide by 11 (fixed denominator, same as Monday.com formula).
-        # Missing criteria count as 0; an unrecognized value also counts as 0.
+        # Divide by (11 - number of criteria marked Not Applicable), same
+        # denominator logic as the Monday.com formula but now supporting
+        # per-criterion exclusion. Missing criteria (not N/A) count as 0 and
+        # stay in the denominator; an unrecognized value also counts as 0.
+        not_applicable = not_applicable or set()
         criteria_map = {
-            "top": merged_values.get("top"),
-            "lta": merged_values.get("lta"),
-            "productivity": merged_values.get("productivity"),
-            "quality_certification": merged_values.get("quality_certification"),
-            "prod_lia_ins": merged_values.get("prod_lia_ins"),
-            "competitiveness": merged_values.get("competitiveness"),
-            "sqma": merged_values.get("sqma"),
-            "family_coverage": merged_values.get("family_coverage"),
-            "geo_coverage": merged_values.get("geo_coverage"),
-            "cons_or_wd": merged_values.get("cons_or_wd"),
-            "financial_health": merged_values.get("financial_health"),
+            criteria_type: value
+            for criteria_type, value in {
+                "top": merged_values.get("top"),
+                "lta": merged_values.get("lta"),
+                "productivity": merged_values.get("productivity"),
+                "quality_certification": merged_values.get("quality_certification"),
+                "prod_lia_ins": merged_values.get("prod_lia_ins"),
+                "competitiveness": merged_values.get("competitiveness"),
+                "sqma": merged_values.get("sqma"),
+                "family_coverage": merged_values.get("family_coverage"),
+                "geo_coverage": merged_values.get("geo_coverage"),
+                "cons_or_wd": merged_values.get("cons_or_wd"),
+                "financial_health": merged_values.get("financial_health"),
+            }.items()
+            if criteria_type not in not_applicable
         }
 
         total = Decimal("0")
@@ -4880,9 +4946,9 @@ class SupplierRelationService:
                     criteria_type, selected_value,
                 )
 
-        if not any_filled:
+        if not any_filled or not criteria_map:
             return None
-        return total / Decimal("11")
+        return total / Decimal(len(criteria_map))
 
     @staticmethod
     def _pluck(instance: Any, field_name: str) -> Any:
@@ -4939,6 +5005,7 @@ class SupplierRelationService:
             "amount_value": self._prefer_decimal(payload.get("amount_value")),
             "amount_currency": payload.get("amount_currency"),
             "auto_validity_end_date": auto_validity_end_date,
+            "not_applicable": bool(payload.get("not_applicable")),
             "comments": payload.get("comments"),
             "score": self._prefer_decimal(
                 payload.get("score"),
@@ -4987,11 +5054,19 @@ class SupplierRelationService:
 
     @staticmethod
     def _derive_class_value_from_score(score: Decimal) -> int:
-        if score >= Decimal("80"):
+        # Official Monday.com reference table (confirmed by the business):
+        #   score <= 50       -> 4
+        #   50 < score <= 60  -> 3
+        #   60 < score <= 80  -> 2
+        #   score > 80        -> 1
+        # Must stay in lockstep with classScore() in
+        # RelationEvaluationPage.tsx (frontend) — that's what the live
+        # preview uses, this is what actually gets persisted.
+        if score > Decimal("80"):
             return 1
-        if score >= Decimal("50"):
+        if score > Decimal("60"):
             return 2
-        if score >= Decimal("30"):
+        if score > Decimal("50"):
             return 3
         return 4
 
@@ -5041,6 +5116,14 @@ class SupplierRelationService:
 
     @staticmethod
     def _derive_operational_grade(score: Optional[Decimal]) -> Optional[str]:
+        # Confirmed against the official Monday.com reference table:
+        #   D32 (average of operational values) >= 80%  -> A
+        #   60% <= D32 < 80%                              -> B
+        #   50% <= D32 < 60%                              -> C
+        #   D32 < 50%                                      -> D
+        # Matches operationalGrade() in RelationEvaluationPage.tsx (frontend)
+        # exactly — verified, not just internally consistent (see the
+        # class-value threshold bug this same verification caught).
         if score is None:
             return None
         if score >= Decimal("80"):
