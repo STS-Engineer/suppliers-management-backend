@@ -3262,7 +3262,7 @@ class SupplierRelationService:
         operational_score = self._pluck(current_classification, "operational_score")
         final_grade = self._compose_final_grade(operational_grade, class_value)
         computed_status = self._derive_supplier_status(final_grade)
-        effective_status = self._resolve_effective_supplier_status(
+        effective_status = await self._resolve_effective_supplier_status(
             relation=relation,
             computed_status=computed_status,
         )
@@ -3467,7 +3467,7 @@ class SupplierRelationService:
         impact_score = self._pluck(current_classification, "impact_score")
         final_grade = self._compose_final_grade(operational_grade, class_value)
         computed_status = self._derive_supplier_status(final_grade)
-        effective_status = self._resolve_effective_supplier_status(
+        effective_status = await self._resolve_effective_supplier_status(
             relation=relation,
             computed_status=computed_status,
         )
@@ -3764,7 +3764,7 @@ class SupplierRelationService:
         self.db.add(classification)
         await self.db.flush()
         computed_status = self._derive_supplier_status(final_grade)
-        effective_status = self._resolve_effective_supplier_status(
+        effective_status = await self._resolve_effective_supplier_status(
             relation=relation,
             computed_status=computed_status,
         )
@@ -4526,7 +4526,7 @@ class SupplierRelationService:
             operational_score = self._pluck(current_classification, "operational_score")
             final_grade = self._compose_final_grade(operational_grade, class_value)
             computed_status = self._derive_supplier_status(final_grade)
-            effective_status = self._resolve_effective_supplier_status(
+            effective_status = await self._resolve_effective_supplier_status(
                 relation=relation, computed_status=computed_status,
             )
 
@@ -5221,28 +5221,39 @@ class SupplierRelationService:
             "days_past_due": days_past_due,
         }
 
-    def _resolve_effective_supplier_status(
+    async def _resolve_effective_supplier_status(
         self,
         relation: SupplierSiteRelation,
         computed_status: Optional[str],
     ) -> Optional[str]:
-        active_override = self._extract_active_override_from_relation(
-            relation=relation,
-            computed_status=computed_status,
-        )
-        if active_override:
+        # "Active override" must be based on an actual recorded override (the
+        # most recent status-history entry tagged STATUS_OVERRIDE_MARKER, via
+        # override_supplier_status) -- never on comparing the stored status
+        # to the freshly computed one. Any legitimate status transition also
+        # makes those two differ, so that comparison alone could never tell
+        # a real override apart from a normal update: it froze
+        # supplier_status on essentially every save that should have changed
+        # it (batch upload, class/operational evaluation, cert re-sync),
+        # while final_grade/operational_grade kept updating underneath it —
+        # leaving the relation self-inconsistent.
+        status_history = await self._get_status_history(relation.id_relation)
+        if self._has_active_status_override(status_history):
             return relation.supplier_status
         return computed_status
 
-    def _extract_active_override_from_relation(
-        self,
-        relation: SupplierSiteRelation,
-        computed_status: Optional[str],
+    @staticmethod
+    def _has_active_status_override(
+        status_history: list[SupplierStatusHistory],
     ) -> bool:
-        return (
-            relation.supplier_status not in (None, "")
-            and computed_status not in (None, "")
-            and relation.supplier_status != computed_status
+        """True if the most recent status-history entry (status_history
+        must be ordered newest-first, see _get_status_history) is a manual
+        override that hasn't since been superseded by a normal recompute."""
+        if not status_history:
+            return False
+        latest = status_history[0]
+        return bool(
+            latest.change_reason
+            and latest.change_reason.startswith(STATUS_OVERRIDE_MARKER)
         )
 
     def _build_status_override_payload(
@@ -5250,25 +5261,21 @@ class SupplierRelationService:
         relation: SupplierSiteRelation,
         status_history: list[SupplierStatusHistory],
     ) -> Optional[dict[str, Any]]:
-        computed_status = self._derive_supplier_status(relation.final_grade)
-        if not self._extract_active_override_from_relation(relation, computed_status):
+        # status_history is ordered newest-first (see _get_status_history) --
+        # only the MOST RECENT entry being an override counts as "active".
+        # Looping for the first-ever override entry (the old behavior) could
+        # resurrect a long-superseded override as if it were still in
+        # effect.
+        if not self._has_active_status_override(status_history):
             return None
-        for entry in status_history:
-            reason = entry.change_reason or ""
-            if reason.startswith(STATUS_OVERRIDE_MARKER):
-                return {
-                    "status": relation.supplier_status,
-                    "reason": reason.replace(f"{STATUS_OVERRIDE_MARKER} ", "", 1),
-                    "changed_at": entry.changed_at,
-                    "changed_by": entry.changed_by,
-                    "computed_status": computed_status,
-                    "active": True,
-                }
+        computed_status = self._derive_supplier_status(relation.final_grade)
+        latest = status_history[0]
+        reason = latest.change_reason or ""
         return {
             "status": relation.supplier_status,
-            "reason": None,
-            "changed_at": relation.last_status_change,
-            "changed_by": None,
+            "reason": reason.replace(f"{STATUS_OVERRIDE_MARKER} ", "", 1),
+            "changed_at": latest.changed_at,
+            "changed_by": latest.changed_by,
             "computed_status": computed_status,
             "active": True,
         }

@@ -22,6 +22,7 @@ from app.db.models import (
     SupplierStatusHistory,
     SupplierUnit,
 )
+from app.features.supplier_relations.service import STATUS_OVERRIDE_MARKER
 from app.shared.development_plan_rules import (
     TERMINAL_PLAN_STATUSES,
     grade_alert_email,
@@ -704,16 +705,24 @@ async def ingest_batch(
         frequency = infer_frequency(relation)
         next_eval = compute_next_evaluation_date(row.evaluation_date, frequency)
 
+        # panel_decision is a deliberate, separately-made business decision
+        # (panel review outcome) — the batch upload must never change it on
+        # its own, regardless of what the newly computed status would imply.
+        new_panel = relation.panel_decision
+
         # Compute new status only if a class value is already recorded
         if existing_class:
             new_status = grade_class_to_status(row.grade, existing_class)
-            new_panel = STATUS_TO_PANEL[new_status]
             final_grade = compose_final_grade(row.grade, existing_class)
         else:
-            # No class yet — update grade only, keep existing status/panel/final_grade
+            # No class yet — update grade only, keep existing status/panel/final_grade.
+            # final_grade in particular must stay whatever it already was (None if
+            # this relation has never had a class evaluation) -- previously this
+            # wrote just the bare grade letter (e.g. "B"), a malformed value that
+            # doesn't match the "letter+digit" format used everywhere else, until
+            # the next class evaluation happened to recompute it correctly.
             new_status = relation.supplier_status or "Active"
-            new_panel = relation.panel_decision
-            final_grade = row.grade  # temporary until PLD class is recorded
+            final_grade = relation.final_grade
 
         old_grade = relation.operational_grade
         old_class = relation.class_value
@@ -788,13 +797,30 @@ async def ingest_batch(
             )
             db.add(history)
 
-        # Preserve a manually applied status override — if the relation's current
-        # supplier_status was deliberately set to something different from the computed
-        # value, keep the override rather than silently reverting it.
-        has_active_override = (
-            relation.supplier_status not in (None, "")
-            and new_status not in (None, "")
-            and relation.supplier_status != new_status
+        # Preserve a manually applied status override — but "active override"
+        # must be based on an actual recorded override (a status-history
+        # entry tagged STATUS_OVERRIDE_MARKER, written by
+        # override_supplier_status), never on comparing the stored status to
+        # the freshly computed one. ANY legitimate status transition also
+        # makes those two differ, so that comparison alone could never tell
+        # a real override apart from a normal update — it froze
+        # supplier_status on essentially every batch upload that should have
+        # changed it, while operational_grade/final_grade/panel_decision
+        # still got updated, leaving the relation self-inconsistent.
+        latest_history_result = await db.execute(
+            select(SupplierStatusHistory)
+            .where(SupplierStatusHistory.id_relation == relation.id_relation)
+            .order_by(
+                SupplierStatusHistory.changed_at.desc(),
+                SupplierStatusHistory.id_history.desc(),
+            )
+            .limit(1)
+        )
+        latest_history_entry = latest_history_result.scalars().first()
+        has_active_override = bool(
+            latest_history_entry
+            and latest_history_entry.change_reason
+            and latest_history_entry.change_reason.startswith(STATUS_OVERRIDE_MARKER)
         )
         effective_status = relation.supplier_status if has_active_override else new_status
 
