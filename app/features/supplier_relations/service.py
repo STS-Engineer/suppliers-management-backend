@@ -3210,16 +3210,34 @@ class SupplierRelationService:
             if computed_impact_score is not None
             else self._pluck(current_classification, "impact_score")
         )
-        evaluation_changed = self._class_evaluation_changed(
-            previous_input=previous_input,
-            merged_values=merged_values,
-            current_classification=current_classification,
-            impact_score=impact_score,
-            strategic_mention=strategic_mention,
-            panel_decision=panel_decision,
-            previous_impact_input=previous_impact_input,
-            data=data,
-            quality_certification_id=quality_certification_id,
+        # Resolve N/A *before* the changed-check below -- toggling a
+        # criterion's Not Applicable flag alone (no other field touched)
+        # still changes what class_score/class_value gets computed, so it
+        # must count as a real evaluation change too. Comparing against the
+        # criteria that were N/A before this request (no submitted_details)
+        # catches that; without this, class_value/final_grade/supplier_status
+        # on the relation get updated below regardless, but silently, with no
+        # new cycle/Classification snapshot and no status-history entry --
+        # an audit-trail gap.
+        not_applicable_criteria = await self._resolve_not_applicable_criteria(
+            relation_id, submitted_details=data.class_criteria_details
+        )
+        previous_not_applicable_criteria = await self._resolve_not_applicable_criteria(
+            relation_id
+        )
+        evaluation_changed = (
+            self._class_evaluation_changed(
+                previous_input=previous_input,
+                merged_values=merged_values,
+                current_classification=current_classification,
+                impact_score=impact_score,
+                strategic_mention=strategic_mention,
+                panel_decision=panel_decision,
+                previous_impact_input=previous_impact_input,
+                data=data,
+                quality_certification_id=quality_certification_id,
+            )
+            or not_applicable_criteria != previous_not_applicable_criteria
         )
         cycle = None
         if evaluation_changed:
@@ -3230,9 +3248,6 @@ class SupplierRelationService:
                 evaluation_date=evaluation_date,
             )
 
-        not_applicable_criteria = await self._resolve_not_applicable_criteria(
-            relation_id, submitted_details=data.class_criteria_details
-        )
         class_score = self._prefer_decimal(
             await self._try_calculate_class_score(merged_values, not_applicable_criteria),
             self._pluck(current_classification, "classification_score"),

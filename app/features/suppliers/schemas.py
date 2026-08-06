@@ -96,6 +96,18 @@ class ContactCreate(ContactBase):
 class ContactUpdate(ContactBase):
     """Schema for updating an existing contact (partial update)."""
 
+    @field_validator("full_name")
+    @classmethod
+    def validate_full_name_not_blank(cls, value: Optional[str]) -> Optional[str]:
+        # ContactCreate requires a non-blank full_name up front, but that
+        # guard doesn't carry over to updates (full_name is Optional here so
+        # a caller can omit it to leave it untouched) -- explicitly reject a
+        # blank/whitespace-only value rather than silently saving an empty
+        # name.
+        if value is not None and not value.strip():
+            raise ValueError("full_name cannot be blank")
+        return value
+
 
 class ContactResponse(BaseModel):
     """Response schema for contact.

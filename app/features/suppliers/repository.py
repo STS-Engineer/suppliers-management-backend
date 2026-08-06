@@ -297,14 +297,50 @@ class SupplierRepository:
         return result.scalar_one_or_none()
 
     async def update_contact(self, contact_id: int, data: dict) -> Optional[Contact]:
-        """Update a contact."""
+        """Update a contact. Unlike update_unit/update_group, this does NOT
+        skip None values -- the caller (service.update_contact) already
+        filters `data` down to only the fields explicitly set via
+        `model_dump(exclude_unset=True)`, so a field present here with value
+        None means "clear it" (e.g. removing a contact's email), not "leave
+        untouched". Skipping None here would silently turn that clear into
+        a no-op."""
         contact = await self.find_contact_by_id(contact_id)
         if contact:
             for key, value in data.items():
-                if value is not None and hasattr(contact, key):
+                if hasattr(contact, key):
                     setattr(contact, key, value)
             await self.db.flush()
         return contact
+
+    async def unset_other_primary_contacts(
+        self,
+        *,
+        unit_id: Optional[int] = None,
+        group_id: Optional[int] = None,
+        except_contact_id: Optional[int] = None,
+    ) -> None:
+        """Ensure at most one contact stays marked primary for the same unit
+        or group. Called whenever a contact is created/updated with
+        is_primary_contact=True -- without this, multiple contacts could be
+        simultaneously flagged "the" primary contact with no warning."""
+        if unit_id is not None:
+            stmt = select(Contact).where(
+                Contact.id_supplier_unit == unit_id,
+                Contact.is_primary_contact.is_(True),
+            )
+        elif group_id is not None:
+            stmt = select(Contact).where(
+                Contact.id_supplier_group == group_id,
+                Contact.is_primary_contact.is_(True),
+            )
+        else:
+            return
+        result = await self.db.execute(stmt)
+        for other in result.scalars().all():
+            if except_contact_id is not None and other.id_contact == except_contact_id:
+                continue
+            other.is_primary_contact = False
+        await self.db.flush()
 
     async def create_contact(self, data: dict) -> Contact:
         """Create a new contact."""

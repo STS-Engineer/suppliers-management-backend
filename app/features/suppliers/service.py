@@ -858,18 +858,26 @@ class SupplierService:
         contact_data = data.model_dump(exclude_unset=True)
         contact_data["id_supplier_group"] = group_id
         contact = await self.repo.create_contact(contact_data)
+        if contact_data.get("is_primary_contact"):
+            await self.repo.unset_other_primary_contacts(
+                group_id=group_id, except_contact_id=contact.id_contact
+            )
         await self.db.commit()
         return contact
-    
+
     async def create_contact_for_unit(self, unit_id: int, data: schemas.ContactCreate) -> Contact:
         """Create a contact for a supplier unit."""
         unit = await self.repo.find_unit_by_id(unit_id)
         if not unit:
             raise AppException(f"Supplier unit with ID {unit_id} not found", status_code=404)
-        
+
         contact_data = data.model_dump(exclude_unset=True)
         contact_data["id_supplier_unit"] = unit_id
         contact = await self.repo.create_contact(contact_data)
+        if contact_data.get("is_primary_contact"):
+            await self.repo.unset_other_primary_contacts(
+                unit_id=unit_id, except_contact_id=contact.id_contact
+            )
         await self.db.commit()
         return contact
 
@@ -879,6 +887,12 @@ class SupplierService:
         contact = await self.repo.update_contact(contact_id, contact_data)
         if not contact:
             raise AppException(f"Contact with ID {contact_id} not found", status_code=404)
+        if contact_data.get("is_primary_contact"):
+            await self.repo.unset_other_primary_contacts(
+                unit_id=contact.id_supplier_unit,
+                group_id=contact.id_supplier_group,
+                except_contact_id=contact.id_contact,
+            )
         await self.db.commit()
         return contact
 

@@ -302,7 +302,12 @@ async def patch_relation(
     if data.panel_decision is not None:
         relation.panel_decision = data.panel_decision
 
-    if data.alias_1 is not None:
+    if "alias_1" in data.model_fields_set:
+        # Unlike panel_decision/is_active (which are never intentionally
+        # cleared), alias_1 can legitimately be cleared by the user — sent
+        # as an explicit null. Checking `is not None` would silently ignore
+        # that and leave the old alias in place. `model_fields_set` lets us
+        # tell "field sent as null" apart from "field omitted".
         relation.alias_1 = data.alias_1
 
     if data.is_active is not None:
