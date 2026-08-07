@@ -298,6 +298,10 @@ class SupplierUnitResponse(SupplierUnitBase):
     inactivated_at: Optional[datetime] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+    updated_by: Optional[str] = None
+    is_deleted: bool = False
+    deleted_at: Optional[datetime] = None
+    deleted_by: Optional[str] = None
 
     class Config:
         from_attributes = True

@@ -27,6 +27,10 @@ class SupplierRelationSummaryResponse(BaseModel):
     next_evaluation_date: Optional[date] = None
     evaluation_frequency: Optional[str] = None
     evaluation_comments: Optional[str] = None
+    evaluation_suggestion: Optional[str] = None
+    last_eval_score: Optional[Decimal] = None
+    annual_spend_value: Optional[Decimal] = None
+    last_status_change: Optional[datetime] = None
     created_at: Optional[datetime] = None
     global_status: Optional[str] = None
     supplier_scope: Optional[str] = None

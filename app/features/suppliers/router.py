@@ -58,6 +58,21 @@ def _require_vp_conversion(current_user: dict = Depends(get_current_user)) -> di
 # Only these roles may create/modify/delete certifications and their files.
 _CERT_MANAGER_PROFILES = {"vp_conversion", "purchasing_director"}
 
+# Only these roles may edit a supplier unit's own details (name, address, city,
+# country, commodity/family/sub_family/product_line, website, carbon footprint,
+# strategique/monopolistique/directed, etc.) — everyone else may still view
+# these fields, they just can't change them.
+_UNIT_DETAILS_EDITOR_PROFILES = {"vp_conversion", "purchasing_director"}
+
+
+def _require_unit_details_editor(current_user: dict) -> None:
+    """Raise 403 unless the caller may edit a supplier unit's details."""
+    if current_user.get("access_profile") not in _UNIT_DETAILS_EDITOR_PROFILES:
+        raise HTTPException(
+            status_code=403,
+            detail="Only Purchasing Director or VP Conversion can edit supplier unit details.",
+        )
+
 
 def _require_cert_manager(current_user: dict = Depends(get_current_user)) -> dict:
     if current_user.get("access_profile") not in _CERT_MANAGER_PROFILES:
@@ -852,8 +867,8 @@ async def update_supplier_unit(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
-    """Update an existing supplier unit."""
-    _block_viewer(current_user)
+    """Update an existing supplier unit. Restricted to purchasing_director/vp_conversion."""
+    _require_unit_details_editor(current_user)
     try:
         service = SupplierService(db)
         unit = await service.update_supplier_unit(
@@ -876,8 +891,8 @@ async def delete_supplier_unit(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
-    """Delete a supplier unit."""
-    _block_viewer(current_user)
+    """Delete a supplier unit. Restricted to purchasing_director/vp_conversion."""
+    _require_unit_details_editor(current_user)
     try:
         service = SupplierService(db)
         success = await service.delete_supplier_unit(
@@ -906,8 +921,10 @@ async def set_unit_active_status(
     Deactivating cascades to every active site relation for this unit.
     Reactivating the unit does NOT reactivate its relations — each must be
     reactivated individually. See SupplierService.set_unit_active_status.
+
+    Restricted to purchasing_director/vp_conversion.
     """
-    _block_viewer(current_user)
+    _require_unit_details_editor(current_user)
     try:
         svc = SupplierService(db)
         result = await svc.set_unit_active_status(
@@ -1297,8 +1314,8 @@ async def add_contact_to_unit(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
-    """Add a contact to a supplier unit."""
-    _block_viewer(current_user)
+    """Add a contact to a supplier unit. Restricted to purchasing_director/vp_conversion."""
+    _require_unit_details_editor(current_user)
     try:
         service = SupplierService(db)
         contact = await service.create_contact_for_unit(unit_id, data)
@@ -1348,8 +1365,9 @@ async def update_contact(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
-    """Update an existing contact (fix a typo in name/email/phone/role)."""
-    _block_viewer(current_user)
+    """Update an existing contact (fix a typo in name/email/phone/role).
+    Restricted to purchasing_director/vp_conversion."""
+    _require_unit_details_editor(current_user)
     try:
         service = SupplierService(db)
         contact = await service.update_contact(contact_id, data)

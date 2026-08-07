@@ -396,8 +396,8 @@ async def update_relation_owner(
     current_user: dict = Depends(get_current_user),
 ):
     """Change the supplier owner of a relation. The owner is stored as a canonical
-    lowercase email. Open to any buyer (non-viewer)."""
-    _require_profile(current_user, NON_VIEWER)
+    lowercase email. Restricted to purchasing_director/vp_conversion."""
+    _require_profile(current_user, PRIVILEGED)
 
     raw = (data.supplier_owner or "").strip()
     if raw:
@@ -1382,8 +1382,9 @@ async def upsert_spend_by_year(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
-    """Create or update the annual spend for a specific fiscal year on a relation."""
-    _require_profile(current_user, NON_VIEWER)
+    """Create or update the annual spend for a specific fiscal year on a relation.
+    Restricted to purchasing_director/vp_conversion."""
+    _require_profile(current_user, PRIVILEGED)
     actor = _resolve_actor(current_user)
 
     rel = await db.get(SupplierSiteRelation, relation_id)
@@ -1428,8 +1429,9 @@ async def delete_spend_by_year(
     db: AsyncSession = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
-    """Remove the annual spend entry for a specific fiscal year."""
-    _require_profile(current_user, NON_VIEWER)
+    """Remove the annual spend entry for a specific fiscal year.
+    Restricted to purchasing_director/vp_conversion."""
+    _require_profile(current_user, PRIVILEGED)
 
     result = await db.execute(
         select(SupplierSpendByYear).where(
